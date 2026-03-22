@@ -3,8 +3,8 @@
         {
             "name": "nor_sdram_zf_dtcm",
             "includePath": [
-                "${workspaceFolder}/../../libraries/**",
-                "${workspaceFolder}/../../project/**",
+                "${workspaceFolder}/libraries/**",
+                "${workspaceFolder}/project/**",
                 "D:\\ruanjian\\keil5 MDK\\Keil5 MDK\\ARM\\ARMCLANG\\include",
                 "D:\\ruanjian\\keil5 MDK\\Keil5 MDK\\ARM\\ARMCLANG\\include\\arm_linux",
                 "D:\\ruanjian\\keil5 MDK\\Keil5 MDK\\ARM\\ARMCLANG\\include\\arm_linux_compat",

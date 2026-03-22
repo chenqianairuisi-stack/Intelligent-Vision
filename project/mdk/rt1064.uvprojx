@@ -464,6 +464,16 @@
               <FilePath>..\Algorithm\pid.cpp</FilePath>
             </File>
             <File>
+              <FileName>trajectory.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\Algorithm\trajectory.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>trajectory.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Algorithm\trajectory.h</FilePath>
+            </File>
+            <File>
               <FileName>tracker.cpp</FileName>
               <FileType>8</FileType>
               <FilePath>..\Algorithm\tracker.cpp</FilePath>

@@ -22,8 +22,6 @@ ChassisControl::ChassisControl()
         IncPid(tune.pid_speed), IncPid(tune.pid_speed), 
         IncPid(tune.pid_speed), IncPid(tune.pid_speed)
       },
-      pid_pos_x(tune.pid_x),
-      pid_pos_y(tune.pid_y),
       pid_pos_yaw(tune.pid_yaw) {}
 
 // 初始化电机
@@ -48,21 +46,38 @@ __attribute__((section(".ramfunc"))) void ChassisControl::update_control_20ms_ti
         target_pose = path_tracker.update_and_get_target(current_pos);
     }
 
-    // 计算误差并旋转坐标系
+    // 计算全局误差与直线距离
     float err_global_x = target_pose.x - current_pos.x;
     float err_global_y = target_pose.y - current_pos.y;
     float err_yaw = normalize_angle(target_pose.yaw - current_yaw);
 
+    float distance = std::sqrt(err_global_x * err_global_x + err_global_y * err_global_y);
+
+    // 轨迹规划器根据当前距离算出一个合适的速度
+    float v_mag = tra_planner.velocity_planning(distance, tune.tracker.max_speed, tune.tracker.max_acc, 0.02f);
+
+    float expected_global_vx = 0.0f;
+    float expected_global_vy = 0.0f;
+
+    // 将标量总速度，沿着目标点的直线方向按比例分解
+    if (distance > 0.1f) {
+        expected_global_vx = v_mag * (err_global_x / distance);
+        expected_global_vy = v_mag * (err_global_y / distance);
+    }
+
+    // 将全局期望速度投影到小车自身的局部坐标系
     float cos_theta = cosf(current_yaw);
     float sin_theta = sinf(current_yaw);
-    
-    float e_x =  err_global_x * cos_theta + err_global_y * sin_theta;
-    float e_y = -err_global_x * sin_theta + err_global_y * cos_theta;
-    float e_theta = err_yaw;
-    
+    float expected_local_vx =  expected_global_vx * cos_theta + expected_global_vy * sin_theta;
+    float expected_local_vy = -expected_global_vx * sin_theta + expected_global_vy * cos_theta;
 
-    // 位置外环控制得到目标轮速，速度内环控制并驱动电机
-    WheelSpeed4 target_wheel_speeds = run_position_loop(e_x, e_y, e_theta);  
+    // PID 单独计算期望的旋转速度
+    float expected_local_vw = pid_pos_yaw.calculate(err_yaw, 0.0f);
+    if(expected_local_vw > tune.tracker.max_ang_speed) expected_local_vw = tune.tracker.max_ang_speed; 
+    if(expected_local_vw < -tune.tracker.max_ang_speed) expected_local_vw = -tune.tracker.max_ang_speed;
+
+    // 逆运动学解算：将期望的底盘全向速度分配给 4 个轮子，得到每个轮子的目标转速 (v1, v2, v3, v4)
+    WheelSpeed4 target_wheel_speeds = Kinematics::inverse_kinematics(expected_local_vx, expected_local_vy, expected_local_vw);
 
     // 速度内环控制：输入目标转速，执行 PID 并驱动电机
     run_speed_loop_and_drive(target_wheel_speeds);
@@ -81,24 +96,6 @@ __attribute__((always_inline)) inline float ChassisControl::normalize_angle(floa
     return angle;
 }
 
-// 位置外环控制：输入局部误差，输出四个轮子的目标转速
-__attribute__((always_inline)) inline WheelSpeed4 ChassisControl::run_position_loop(float ex, float ey, float etheta) {
-    // 位置环 PID 计算期望的底盘速度 (vx, vy, vw)
-    float expected_vx = pid_pos_x.calculate(ex, 0.0f);
-    float expected_vy = pid_pos_y.calculate(ey, 0.0f);
-    float expected_vw = pid_pos_yaw.calculate(etheta, 0.0f);
-
-    // 限幅，防止车速过快 (比如最大 50cm/s)
-    if(expected_vx > tune.tracker.max_speed) expected_vx = tune.tracker.max_speed;
-    if(expected_vx < -tune.tracker.max_speed) expected_vx = -tune.tracker.max_speed;
-    if(expected_vy > tune.tracker.max_speed) expected_vy = tune.tracker.max_speed;
-    if(expected_vy < -tune.tracker.max_speed) expected_vy = -tune.tracker.max_speed;
-    if(expected_vw > tune.tracker.max_ang_speed) expected_vw = tune.tracker.max_ang_speed;
-    if(expected_vw < -tune.tracker.max_ang_speed) expected_vw = -tune.tracker.max_ang_speed;
-
-    // 逆运动学解算:将期望的底盘全向速度分配给 4 个轮子，得到每个轮子的目标转速 (v1, v2, v3, v4)
-    return Kinematics::inverse_kinematics(expected_vx, expected_vy, expected_vw);
-}
 
 // 速度内环控制：输入四个轮子的目标转速，执行 PID 计算并驱动电机
 __attribute__((always_inline)) inline void ChassisControl::run_speed_loop_and_drive(const WheelSpeed4& target_speeds) {

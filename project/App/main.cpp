@@ -1,5 +1,6 @@
 #include "zf_common_headfile.h"
 #include "code_headfile.h"
+#include "storage.h"
 
 extern "C" int main(void) {
 

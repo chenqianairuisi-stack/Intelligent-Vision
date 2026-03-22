@@ -53,6 +53,7 @@
 ** ###################################################################
 */
 
+
 #define m_flash_config_start           0x70000000
 #define m_flash_config_size            0x00001000
 
@@ -154,6 +155,7 @@ LR_m_text m_flash_config_start m_text_start+m_text_size-m_flash_config_start {  
   RW_m_data m_data_start m_data_size-Stack_Size-Heap_Size { ; RW data
     .ANY (+ZI)
 	.ANY (+RW)
+    *(.dtcm_data) 
     *(m_usb_dma_init_data)
     *(m_usb_dma_noninit_data)
 	* (NonCacheable.init)
@@ -169,6 +171,8 @@ LR_m_text m_flash_config_start m_text_start+m_text_size-m_flash_config_start {  
   ITCM_ncache m_data3_start m_data3_size { ; 
     * (ITCM_NonCacheable.init)
     * (*ITCM_NonCacheable)
+    * (.ramfunc)
+    * (.ramfunc.*)
   }
   
   ;OCRAM

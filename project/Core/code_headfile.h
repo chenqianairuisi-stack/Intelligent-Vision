@@ -7,9 +7,10 @@
 #include "task_vision.h"
 #include "task_control.h"
 
-#include "pid.h"
 #include "planning.h"
 #include "tracker.h"
+#include "trajectory.h"
+#include "pid.h"
 #include "kinematics.h"
 #include "odometry.h"
 
