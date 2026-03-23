@@ -85,7 +85,7 @@ void VisionManager::step_parser(UartComm& uart, ProtocolParser& parser, void(Vis
     }
 }
 
-// ART1 协议解包 (地图数据 + 定位数据)
+// ART1 协议解包 (地图数据 + 定位数据) [包头AA 55 + 类型 + 长度 + 负载 + 校验和]
 __attribute__((section(".ramfunc"))) void VisionManager::process_art1_packet() {
     if (parser_art1.msg_type == MSG_MAP_DATA) {
         const uint8_t* p = parser_art1.payload_buf;

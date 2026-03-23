@@ -6,6 +6,7 @@
 #include "game_manage.h"
 #include "task_vision.h"
 #include "task_control.h"
+#include "telemetry.h"
 
 #include "planning.h"
 #include "tracker.h"

@@ -418,6 +418,16 @@
               <FileType>5</FileType>
               <FilePath>..\App\task_control.h</FilePath>
             </File>
+            <File>
+              <FileName>telemetry.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\App\telemetry.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>telemetry.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\App\telemetry.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

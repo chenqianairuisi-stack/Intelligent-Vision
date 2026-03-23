@@ -1,4 +1,10 @@
 #pragma once
+#include <cstdint>
+
+//-----------------------------------------------------------------------------
+//全局坐标系：x轴正方向为右，y轴正方向为前，逆时针为正旋转（x轴设为0度）
+//全局地图：大小 240cm*320cm, 分为 12*16 格，原点(0,0)在左下角，x轴向右，y轴向上
+//-----------------------------------------------------------------------------
 
 namespace SystemConfig {
     // 机械参数
@@ -21,6 +27,21 @@ namespace SystemConfig {
     static constexpr int MAX_PATH_LENGTH = 100;     // 限制最大搜索步数
     
 }
+
+// 四个轮子的转速结构体 (单位：cm/s)
+struct WheelSpeed4 {
+    float lf;      // Left Front
+    float lb;      // Left Back
+    float rf;      // Right Front
+    float rb;      // Right Back
+};
+
+// 速度结构体 (单位：cm/s)
+struct Velocity2D {
+    float vy;      // 前后速度 (前为正)
+    float vx;      // 左右速度 (右为正)
+    float vw;      // 旋转速度 (逆时针为正)
+};
 
 // 全局坐标结构体 (现实世界坐标系中的坐标点，单位cm)
 struct Point2D {

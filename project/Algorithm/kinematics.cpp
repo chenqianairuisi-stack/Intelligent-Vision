@@ -1,11 +1,22 @@
 #include "kinematics.h"
 
-// 麦轮标准逆运动学方程
-__attribute__((section(".ramfunc"))) WheelSpeed4 Kinematics::inverse_kinematics(float vx, float vy, float vw) {
+// 麦轮逆运动学解算：底盘速度 -> 四轮独立速度
+__attribute__((section(".ramfunc"))) 
+WheelSpeed4 Kinematics::inverse_kinematics(float vx, float vy, float vw) {
     WheelSpeed4 speeds;
-    speeds.lf = vy + vx + vw;
-    speeds.lb = vy - vx + vw;
-    speeds.rf = vy - vx - vw;
-    speeds.rb = vy + vx - vw;
+    speeds.lf = vy + vx - vw;
+    speeds.lb = vy - vx - vw;
+    speeds.rf = vy - vx + vw;
+    speeds.rb = vy + vx + vw;
     return speeds;
+}
+
+// 麦轮正运动学解算：四轮独立速度 -> 底盘速度
+__attribute__((section(".ramfunc")))
+Velocity2D Kinematics::forward_kinematics(float v_lf, float v_lb, float v_rf, float v_rb) {
+    Velocity2D vel;
+    vel.vy = ( v_lf + v_lb + v_rf + v_rb) / 4.0f;
+    vel.vx = ( v_lf - v_lb - v_rf + v_rb) / 4.0f;
+    vel.vw = (-v_lf - v_lb + v_rf + v_rb) / 4.0f;
+    return vel;
 }

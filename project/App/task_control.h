@@ -12,16 +12,21 @@ class ChassisControl {
 public:
     ChassisControl();
     void init();
+    float current_planned_v;  // 当前规划的速度大小，供 telemetry 模块发送波形数据
 
-    void set_target_pose(const Pose2D& target);
+    // 设置/获取目标位姿
+    void set_target_pose(const Pose2D& target) {target_pose = target;} 
+    const Pose2D& get_target_pose() const { return target_pose;}
+
+    // 控制任务更新函数
     void update_control_20ms_tick();  
 private:
     Motor motors[4];
-    IncPid pid_wheels[4]; // 四个轮子的速度内环 PID
+    IncPid pid_wheels[4]; 
     PosPid pid_pos_yaw;
     Trajectory tra_planner;
 
-    Pose2D target_pose = {0.0f, 0.0f, 0.0f};
+    Pose2D target_pose = {0.0f, 0.0f, 0.0f};  // 目标位姿 (cm, cm, deg)
 
     inline float normalize_angle(float angle);  // 将角度归一化到 [-pi, pi] 范围
     inline void run_speed_loop_and_drive(const WheelSpeed4& target_speeds);  // 速度内环控制：输入目标转速，执行 PID 并驱动电机

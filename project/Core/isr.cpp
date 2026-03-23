@@ -5,6 +5,7 @@
 #include "imu.h"
 #include "odometry.h"
 #include "task_control.h"
+#include "telemetry.h"
 
 extern "C" void PIT_IRQHandler(void) {
 
@@ -13,7 +14,7 @@ extern "C" void PIT_IRQHandler(void) {
         pit_flag_clear(PIT_CH0);
 
         // 陀螺仪数据读取与积分函数
-        imu_sensor.update_yaw_5ms_tick();  
+        imu_sensor.update_yaw_5ms_tick();
     }
     
     // 20ms 定时器中断，用于底盘控制算法更新，优先级次之，保证底盘控制的稳定性和响应速度
@@ -21,10 +22,11 @@ extern "C" void PIT_IRQHandler(void) {
     {
         pit_flag_clear(PIT_CH1);
 
-        // 全局定位里程计推算 
-        chassis_odometry.update_global_position(encoders.getAllCounts(), imu_sensor.get_yaw() * PI / 180.0f);
-        // 底盘控制算法更新
-        chassis_task.update_control_20ms_tick(); 
+        // // 全局定位里程计推算 
+        // chassis_odometry.update_position_20ms_tick(encoders.getAllCounts(), imu_sensor.get_yaw() * PI / 180.0f);
+        // // 底盘控制算法更新
+        // chassis_task.update_control_20ms_tick(); 
+        
     }
     
     if(pit_flag_get(PIT_CH2))
@@ -116,13 +118,15 @@ void LPUART6_IRQHandler(void)
 }
 
 
-void LPUART8_IRQHandler(void)
+extern "C" void LPUART8_IRQHandler(void)
 {
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART8))
     {
         // 接收中断
-        wireless_module_uart_handler();
-        
+        if(NULL != wireless_module_uart_handler)
+        {
+            wireless_module_uart_handler();
+        }
     }
         
     LPUART_ClearStatusFlags(LPUART8, kLPUART_RxOverrunFlag);    // 不允许删除

@@ -2,10 +2,10 @@
 #include "zf_common_headfile.h"
 #include <stdint.h>
 
-#define KEY1 C13  // 下移 / 减小
+#define KEY1 C14  // 下移 / 减小
 #define KEY2 C12  // 确认 / 编辑模式
-#define KEY3 C14  // 上移 / 增大
-#define KEY4 C15  // 返回 / 退出编辑
+#define KEY3 C15  // 上移 / 增大
+#define KEY4 C13  // 返回 / 退出编辑
 
 // 页面枚举
 enum class MenuPage {
@@ -14,8 +14,7 @@ enum class MenuPage {
     // --- 状态监控组 (只读) ---
     GAME_STATUS,        // 比赛总控监控 (阶段, 目标点, 地图接收状态)
     VISION_DATA,        // 视觉通讯监控 (箱子ID, 炸弹位置)
-    ODOMETRY_DATA,      // 里程计监控 (全局 X, Y, Yaw，按确认键可清零校准)
-    HARDWARE_RAW,       // 底层硬件监控 (编码器速度，IMU原始角度)
+    ODOMETRY_DATA,      // 里程计+硬件监控 (全局位姿、编码器速度、IMU)
 
     // --- 参数调节组 (可编辑) ---
     TUNE_PARAMS
@@ -23,7 +22,6 @@ enum class MenuPage {
 
 class TftMenu {
 public:
-    TftMenu();
     void init();
     void run(); 
 
@@ -44,11 +42,10 @@ private:
     void render_ui();          // 根据 current_page 和相关状态变量绘制 UI
 
     // --- 页面绘制函数 ---
-    void draw_main_menu();           // 主菜单 
+    void draw_main_menu();           // 主菜单
     void draw_game_status();         // 比赛状态监控
     void draw_vision_data();         // 视觉监控页面
-    void draw_odometry_data();       // 里程计数据监控
-    void draw_hardware_raw();        // 硬件原始数据监控
+    void draw_odometry_data();       // 里程计+硬件数据监控
     void draw_tune_params();
 
     // --- 局部刷新辅助 ---

@@ -6,39 +6,42 @@
 #include "encoder.h"
 #include "imu.h"
 #include "storage.h"
+#include "telemetry.h"
 
 TftMenu sys_menu;
 
-// ================= 全局参数字典 (神级调参入口) =================
+// 128x160 的屏幕，6x8 的字体，留出少量间距后可用 16 行，21 列
+static constexpr int UI_COL_W = 6; 
+static constexpr int UI_ROW_H = 10;
+
+
+// ============================== 全局参数字典 ==============================
 // 结构：{ "屏幕显示名称",  变量的内存地址,  按键单次加减步长 }
-struct ParamItem {
-    const char* name;
-    float* val_ptr;
-    float step;
-};
+struct ParamItem { const char* name; float* val_ptr; float step; };
 
 static ParamItem tune_dict[] = {
-    {"Yaw_Kp",   &tune.pid_yaw.kp,            0.1f },
-    {"Yaw_Kd",   &tune.pid_yaw.kd,            0.01f},
-    {"Spd_Kp",   &tune.pid_speed.kp,          0.1f },
-    {"Spd_Ki",   &tune.pid_speed.ki,          0.01f},
-    {"MaxSpd",   &tune.tracker.max_speed,     5.0f },
-    {"ReachRad", &tune.tracker.reach_radius,  1.0f },
+    {"Yaw_Kp",   &tune.pid_yaw.kp,                  0.1f },
+    {"Yaw_Kd",   &tune.pid_yaw.kd,                  0.01f},
+    {"Spd_Kp",   &tune.pid_speed.kp,                0.1f },
+    {"Spd_Ki",   &tune.pid_speed.ki,                0.01f},
+    {"Max_Spd",  &tune.tracker.max_speed,           1.0f },
+    {"Max_Acc",  &tune.tracker.max_acc,             0.5f },
+    {"MaxASpd",  &tune.tracker.max_ang_speed,       0.1f },
+    {"ReachRad", &tune.tracker.reach_radius,        1.0f },
 };
-// 自动计算字典大小
-static constexpr int DICT_SIZE = sizeof(tune_dict) / sizeof(tune_dict[0]);
-static constexpr int PARAMS_PER_PAGE = 7; // 一页最多显示7个参数 (128x160竖屏支持10行)
-// ===============================================================
 
-TftMenu::TftMenu() {}
+static constexpr int DICT_SIZE = sizeof(tune_dict) / sizeof(tune_dict[0]);     // 自动计算字典大小
+static constexpr int PARAMS_PER_PAGE = 12;                                     // 每页显示的参数数量，超过会自动滚动
+// ==========================================================================
+
 
 void TftMenu::init() {
     current_page = MenuPage::MAIN_MENU;
     cursor_idx = 0;
     scroll_offset = 0;
     is_editing = false;
-    need_full_redraw = true;   // 保证第一帧一定会全屏刷黑
-    ui_dirty = true;           // 保证开机一定会渲染菜单
+    need_full_redraw = true;  
+    ui_dirty = true;           
     last_k1 = true; last_k2 = true; last_k3 = true; last_k4 = true;
 
     gpio_init(KEY1, GPI, GPIO_HIGH, GPI_PULL_UP);
@@ -47,7 +50,7 @@ void TftMenu::init() {
     gpio_init(KEY4, GPI, GPIO_HIGH, GPI_PULL_UP);
 
     tft180_set_dir(TFT180_PORTAIT);                  // 竖屏
-    tft180_set_font(TFT180_8X16_FONT);               // 设置字库
+    tft180_set_font(TFT180_6X8_FONT);                // 设置字库
     tft180_set_color(RGB565_RED, RGB565_BLACK);      // 黑底红字
     tft180_init();
 
@@ -84,56 +87,45 @@ void TftMenu::scan_keys() {
 // 核心逻辑控制器：状态跳转与参数修改
 void TftMenu::process_logic() {
     // 如果是监控页面，哪怕没有按键，也要刷新数据
-    if (current_page == MenuPage::GAME_STATUS || 
-        current_page == MenuPage::VISION_DATA || 
-        current_page == MenuPage::ODOMETRY_DATA || 
-        current_page == MenuPage::HARDWARE_RAW) {
-        ui_dirty = true; 
+    if (current_page == MenuPage::GAME_STATUS ||
+        current_page == MenuPage::VISION_DATA ||
+        current_page == MenuPage::ODOMETRY_DATA) {
+        ui_dirty = true;
     }
 
     if (!ui_dirty) return;
 
     switch (current_page) {
         case MenuPage::MAIN_MENU:
-            if (key_down_pressed) cursor_idx = (cursor_idx + 1) % 7;    // 7个主菜单项
-            if (key_up_pressed)   cursor_idx = (cursor_idx == 0) ? 6 : cursor_idx - 1;
-            
+            if (key_down_pressed) cursor_idx = (cursor_idx + 1) % 6;    // 6个主菜单项
+            if (key_up_pressed)   cursor_idx = (cursor_idx == 0) ? 5 : cursor_idx - 1;
+
             if (key_enter_pressed) {
                 if (cursor_idx == 0) current_page = MenuPage::GAME_STATUS;
                 if (cursor_idx == 1) current_page = MenuPage::ODOMETRY_DATA;
-                if (cursor_idx == 2) current_page = MenuPage::HARDWARE_RAW;
-                if (cursor_idx == 3) current_page = MenuPage::VISION_DATA;
-                if (cursor_idx == 4) { current_page = MenuPage::TUNE_PARAMS; cursor_idx = 0; scroll_offset = 0; }
+                if (cursor_idx == 2) current_page = MenuPage::VISION_DATA;
+                if (cursor_idx == 3) { current_page = MenuPage::TUNE_PARAMS; cursor_idx = 0; scroll_offset = 0; }
                 // --- Flash 存储触发 ---
-                if (cursor_idx == 5) {
+                if (cursor_idx == 4) {
                     Storage::save_params();
                     // 在屏幕右侧打个 [OK] 提示，延时 300ms 让人眼能看清
-                    tft180_show_string(16*8, 6 * 16, "[OK]");
-                    system_delay_ms(300); 
-                }
-                if (cursor_idx == 6) {
-                    Storage::load_params();
-                    tft180_show_string(16*8, 7 * 16, "[OK]");
+                    tft180_show_string(15 * UI_COL_W, 6 * UI_ROW_H, "[OK]");
                     system_delay_ms(300);
                 }
-                
-                // 前5个是页面跳转，需要重置光标和清屏
-                if (cursor_idx < 5) {
+                if (cursor_idx == 5) {
+                    Storage::load_params();
+                    tft180_show_string(15 * UI_COL_W, 7 * UI_ROW_H, "[OK]");
+                    system_delay_ms(300);
+                }
+
+                // 前4个是页面跳转，需要重置光标和清屏
+                if (cursor_idx < 4) {
                     cursor_idx = 0; need_full_redraw = true;
                 } else {
-                    // 第6和第7项执行完只需局部刷新把 [OK] 擦掉
-                    need_full_redraw = true; 
+                    // 第5和第6项执行完只需局部刷新把 [OK] 擦掉
+                    need_full_redraw = true;
                 }
             }
-            break;
-
-        case MenuPage::ODOMETRY_DATA:
-            if (key_back_pressed) { current_page = MenuPage::MAIN_MENU; need_full_redraw = true; }
-            // 按下确认键，一键将里程计 X,Y 清零，用于发车校准
-            // if (key_enter_pressed) {
-            //     chassis_odometry.calibrate_position(0.0f, 0.0f);  // TODO: 需要在 Odometry 类中添加此方法
-            //     imu_sensor.reset_yaw(0.0f);                       // TODO: 需要在 Imu 类中添加此方法
-            // }
             break;
 
         case MenuPage::TUNE_PARAMS:
@@ -147,7 +139,7 @@ void TftMenu::process_logic() {
                 if (cursor_idx >= scroll_offset + PARAMS_PER_PAGE) scroll_offset = cursor_idx - PARAMS_PER_PAGE + 1;
 
                 if (key_enter_pressed) is_editing = true;
-                if (key_back_pressed) { current_page = MenuPage::MAIN_MENU; cursor_idx = 4; need_full_redraw = true; }
+                if (key_back_pressed) { current_page = MenuPage::MAIN_MENU; cursor_idx = 3; need_full_redraw = true; }
             } else {
                 // 编辑模式：直接操作字典中的指针，一键修改全局黑板变量
                 if (key_up_pressed)   *(tune_dict[cursor_idx].val_ptr) += tune_dict[cursor_idx].step;
@@ -171,7 +163,6 @@ void TftMenu::render_ui() {
         case MenuPage::MAIN_MENU:      draw_main_menu(); break;
         case MenuPage::GAME_STATUS:    draw_game_status(); break;
         case MenuPage::ODOMETRY_DATA:  draw_odometry_data(); break;
-        case MenuPage::HARDWARE_RAW:   draw_hardware_raw(); break;
         case MenuPage::VISION_DATA:    draw_vision_data(); break;
         case MenuPage::TUNE_PARAMS:    draw_tune_params(); break;
     }
@@ -181,123 +172,115 @@ void TftMenu::render_ui() {
 
 // ------------------------- 页面绘制函数 -------------------------
 
-// 主菜单
 void TftMenu::draw_main_menu() {
-    tft180_show_string(0, 0, "-- COMMAND --");
-    draw_item(1, "Game State", cursor_idx == 0);
-    draw_item(2, "Odometry",   cursor_idx == 1);
-    draw_item(3, "Hardware",   cursor_idx == 2);
-    draw_item(4, "Vision",     cursor_idx == 3);
-    draw_item(5, "Tuning",     cursor_idx == 4);
-    // 新增：Flash 读写开关
-    draw_item(6, "Save Config",cursor_idx == 5);
-    draw_item(7, "Load Config",cursor_idx == 6);
+    tft180_show_string(0, 0, "-- COMMAND MENU --");
+    draw_item(2, "Game State", cursor_idx == 0);
+    draw_item(3, "Odometry",   cursor_idx == 1);
+    draw_item(4, "Vision",     cursor_idx == 2);
+    draw_item(5, "Tuning",     cursor_idx == 3);
+    draw_item(6, "Save Config",cursor_idx == 4);
+    draw_item(7, "Load Config",cursor_idx == 5);
 }
 
-// [滚动页面] 调参页面，展示 tune_dict 中的参数，支持上下滚动和编辑
 void TftMenu::draw_tune_params() {
-    tft180_show_string(0, 0, "-- PARAMETERS --");
+    tft180_show_string(0, 0, "PARAMETERS");
     
-    // 仅绘制当前滚动窗口内的参数
+    // 进度提示 (例如 1/8)，放在右上角第 15 列开始
+    tft180_show_int(14 * UI_COL_W, 0, cursor_idx + 1, 2);
+    tft180_show_string(16 * UI_COL_W, 0, "/");
+    tft180_show_int(17 * UI_COL_W, 0, DICT_SIZE, 2);
+    
     for (int i = 0; i < PARAMS_PER_PAGE; i++) {
         int item_idx = scroll_offset + i;
         if (item_idx >= DICT_SIZE) {
-            // 清除多余的空行残留
-            tft180_show_string(0, (i + 1) * 16, "                    ");
+            // 清理多余行，打印 21 个空格正好覆盖一整行
+            tft180_show_string(0, (i + 1) * UI_ROW_H, "                     ");
             continue;
         }
 
         draw_float_item(i + 1, 
-                        tune_dict[item_idx].name, 
-                        *(tune_dict[item_idx].val_ptr), 
-                        cursor_idx == item_idx, 
-                        is_editing && (cursor_idx == item_idx));
+            tune_dict[item_idx].name, 
+            *(tune_dict[item_idx].val_ptr), 
+            cursor_idx == item_idx, 
+            is_editing && (cursor_idx == item_idx));
     }
-    
-    // 右上角加个进度条提示 (如 1/13)
-    tft180_show_int(16*7, 0, cursor_idx + 1, 2);
-    tft180_show_string(16*8 + 8, 0, "/");
-    tft180_show_int(16*9 + 8, 0, DICT_SIZE, 2);
 }
 
-// [静态页面] 显示比赛状态
 void TftMenu::draw_game_status() {
     tft180_show_string(0, 0, "-- GAME STATUS --");
-    tft180_show_string(0, 16, "Phase: ");
+    tft180_show_string(0, 2 * UI_ROW_H, "Phase: ");
     switch(game_manager.get_phase()) {
-        case GamePhase::INIT_CALIBRATE:   tft180_show_string(16*4, 16, "INIT_CALIB"); break;
-        case GamePhase::EXIT_START_ZONE:  tft180_show_string(16*4, 16, "EXIT_ZONE "); break;
-        case GamePhase::WAIT_FOR_VISION:  tft180_show_string(16*4, 16, "WAIT_VIS  "); break;
-        case GamePhase::PLAN_SOKOBAN:     tft180_show_string(16*4, 16, "PLANNING  "); break;
-        case GamePhase::EXEC_SOKOBAN:     tft180_show_string(16*4, 16, "TRACKING  "); break;
-        case GamePhase::PLAN_RETURN:      tft180_show_string(16*4, 16, "PLAN_RET  "); break;
-        case GamePhase::EXEC_RETURN:      tft180_show_string(16*4, 16, "RETURNING "); break;
-        case GamePhase::ENTER_START_ZONE: tft180_show_string(16*4, 16, "ENTER_ZONE"); break;
-        case GamePhase::FINISHED:         tft180_show_string(16*4, 16, "FINISHED  "); break;
+        case GamePhase::INIT_CALIBRATE:    tft180_show_string(7 * UI_COL_W, 2 * UI_ROW_H, "INIT_CALIB"); break;
+        case GamePhase::EXIT_START_ZONE:   tft180_show_string(7 * UI_COL_W, 2 * UI_ROW_H, "EXIT_ZONE "); break;
+        case GamePhase::WAIT_FOR_VISION:   tft180_show_string(7 * UI_COL_W, 2 * UI_ROW_H, "WAIT_VIS  "); break;
+        case GamePhase::PLAN_SOKOBAN:      tft180_show_string(7 * UI_COL_W, 2 * UI_ROW_H, "PLANNING  "); break;
+        case GamePhase::EXEC_SOKOBAN:      tft180_show_string(7 * UI_COL_W, 2 * UI_ROW_H, "TRACKING  "); break;
+        case GamePhase::PLAN_RETURN:       tft180_show_string(7 * UI_COL_W, 2 * UI_ROW_H, "PLAN_RET  "); break;
+        case GamePhase::EXEC_RETURN:       tft180_show_string(7 * UI_COL_W, 2 * UI_ROW_H, "RETURNING "); break;
+        case GamePhase::ENTER_START_ZONE:  tft180_show_string(7 * UI_COL_W, 2 * UI_ROW_H, "ENTER_ZONE"); break;
+        case GamePhase::FINISHED:          tft180_show_string(7 * UI_COL_W, 2 * UI_ROW_H, "FINISHED  "); break;
     }
+
+    tft180_show_string(0, 6 * UI_ROW_H, "Last RX Cmd:");
+    tft180_show_string(0, 7 * UI_ROW_H, last_rx_cmd); // 打印全局变量
 }
 
-// [实时刷新页] 展示视觉系统数据
 void TftMenu::draw_vision_data() {
     tft180_show_string(0, 0, "-- VISION --");
-    tft180_show_string(0, 16, vision_data.art1_map_ready ? "Map: Ready  " : "Map: Waiting");
+    tft180_show_string(0, 2 * UI_ROW_H, vision_data.art1_map_ready ? "Map: Ready  " : "Map: Waiting");
     
-    tft180_show_string(0, 32, "Boxes: ");
-    tft180_show_int(16*4, 32, vision_data.box_count, 2);
+    tft180_show_string(0, 3 * UI_ROW_H, "Boxes: ");
+    tft180_show_int(8 * UI_COL_W, 3 * UI_ROW_H, vision_data.box_count, 2);
     
-    tft180_show_string(0, 48, "Bombs: ");
-    tft180_show_int(16*4, 48, vision_data.bomb_count, 2);
+    tft180_show_string(0, 4 * UI_ROW_H, "Bombs: ");
+    tft180_show_int(8 * UI_COL_W, 4 * UI_ROW_H, vision_data.bomb_count, 2);
     
-    tft180_show_string(0, 64, "ART2 ID: ");
+    tft180_show_string(0, 5 * UI_ROW_H, "ART2 ID: ");
     if (vision_data.art2_result_ready) {
-        tft180_show_int(16*5, 64, vision_data.current_front_id, 2);
+        tft180_show_int(9 * UI_COL_W, 5 * UI_ROW_H, vision_data.current_front_id, 2);
     } else {
-        tft180_show_string(16*5, 64, "--");
+        tft180_show_string(9 * UI_COL_W, 5 * UI_ROW_H, "--");
     }
 }
 
-// [实时刷新页] 展示里程计坐标
 void TftMenu::draw_odometry_data() {
-    tft180_show_string(0, 0, "-- ODOMETRY --");
+    tft180_show_string(0, 0, "-- ODO & HW --");
     Point2D pos = chassis_odometry.get_position();
     
-    tft180_show_string(0, 16, "Global X: ");
-    tft180_show_float(16*5, 16, pos.x, 3, 2);
-    
-    tft180_show_string(0, 32, "Global Y: ");
-    tft180_show_float(16*5, 32, pos.y, 3, 2);
+    tft180_show_string(0, 2 * UI_ROW_H, "Global X: ");   tft180_show_float(10 * UI_COL_W, 2 * UI_ROW_H, pos.x, 3, 1);
+    tft180_show_string(0, 3 * UI_ROW_H, "Global Y: ");   tft180_show_float(10 * UI_COL_W, 3 * UI_ROW_H, pos.y, 3, 1);
+    tft180_show_string(0, 4 * UI_ROW_H, "Yaw: ");        tft180_show_float(10 * UI_COL_W, 4 * UI_ROW_H, imu_sensor.get_yaw(), 3, 1); 
 
-    tft180_show_string(0, 48, "Yaw(deg): ");
-    tft180_show_float(16*5, 48, imu_sensor.get_yaw(), 3, 2);  // get_yaw() 已经是度
+    tft180_show_string(0, 5 * UI_ROW_H, "Spd Yaw: ");    tft180_show_float(10 * UI_COL_W, 5 * UI_ROW_H, imu_sensor.get_gyro_z(), 3, 1);
 
+    tft180_show_string(0, 6 * UI_ROW_H, "Spd LF: ");     tft180_show_float(10 * UI_COL_W, 6 * UI_ROW_H, encoders.get_speed_cm_s(0), 3, 1);
+    tft180_show_string(0, 7 * UI_ROW_H, "Spd LB: ");     tft180_show_float(10 * UI_COL_W, 7 * UI_ROW_H, encoders.get_speed_cm_s(1), 3, 1);
+    tft180_show_string(0, 8 * UI_ROW_H, "Spd RF: ");     tft180_show_float(10 * UI_COL_W, 8 * UI_ROW_H, encoders.get_speed_cm_s(2), 3, 1);
+    tft180_show_string(0, 9 * UI_ROW_H, "Spd RB: ");     tft180_show_float(10 * UI_COL_W, 9 * UI_ROW_H, encoders.get_speed_cm_s(3), 3, 1);
 }
-
-// [实时刷新页] 展示底层硬件速度 (用于检查编码器有没有反)
-void TftMenu::draw_hardware_raw() {
-    tft180_show_string(0, 0, "-- HW RAW --");
-    tft180_show_string(0, 16, "Spd LF: "); tft180_show_float(16*4, 16, encoders.get_speed_cm_s(0), 2, 1);
-    tft180_show_string(0, 32, "Spd LB: "); tft180_show_float(16*4, 32, encoders.get_speed_cm_s(1), 2, 1);
-    tft180_show_string(0, 48, "Spd RF: "); tft180_show_float(16*4, 48, encoders.get_speed_cm_s(2), 2, 1);
-    tft180_show_string(0, 64, "Spd RB: "); tft180_show_float(16*4, 64, encoders.get_speed_cm_s(3), 2, 1);
-}
-
 
 // -------------------------局部刷新辅助函数 -------------------------
 
 void TftMenu::draw_item(uint8_t row, const char* name, bool is_selected) {
-    if (is_selected) tft180_show_string(0, row * 16, ">"); 
-    else tft180_show_string(0, row * 16, " "); 
-    tft180_show_string(16, row * 16, (char*)name);
+    if (is_selected) tft180_show_string(0, row * UI_ROW_H, ">"); 
+    else tft180_show_string(0, row * UI_ROW_H, " "); 
+    // 名称从第 2 列开始写
+    tft180_show_string(1 * UI_COL_W, row * UI_ROW_H, (char*)name);
 }
 
 void TftMenu::draw_float_item(uint8_t row, const char* name, float val, bool is_selected, bool is_editing_this) {
+    // 1. 渲染光标和名称 (占用 0 ~ 9 列)
     draw_item(row, name, is_selected);
     
+    // 2. 渲染编辑标识 (占用 10 ~ 12 列)
     if (is_selected && is_editing_this) {
-        tft180_show_string(16*5+8, row * 16, "[E]");
+        tft180_show_string(10 * UI_COL_W, row * UI_ROW_H, "[E]");
     } else {
-        tft180_show_string(16*5+8, row * 16, "   ");
+        tft180_show_string(10 * UI_COL_W, row * UI_ROW_H, "   ");
     }
 
-    tft180_show_float(16*7+8, row * 16, val, 2, 3); // 微调了排版间距，防止文字重叠
+    // 3. 渲染浮点数 (从第 14 列开始，最多占用 7 列)
+    // 格式化占位：2位整数 + 1位符号 + 1位小数点 + 3位小数 = 7个字符。
+    // 14 + 7 = 21列。完美容纳在 128 像素内。
+    tft180_show_float(14 * UI_COL_W, row * UI_ROW_H, val, 2, 3);
 }

@@ -29,17 +29,13 @@ void ChassisControl::init() {
     for(auto& m : motors) m.init();
 }
 
-void ChassisControl::set_target_pose(const Pose2D& target) {
-    target_pose = target;
-}
-
 
 // 执行控制算法，更新电机输出 (由 20ms 定时器中断直接调用)
 __attribute__((section(".ramfunc"))) void ChassisControl::update_control_20ms_tick() {
 
-    // 获取当前位姿（全局坐标 + 角度）
+    // 获取当前位姿（全局坐标 + 角度 deg）
     Point2D current_pos = chassis_odometry.get_position();
-    float current_yaw = imu_sensor.get_yaw() * PI / 180.0f;  // IMU 的 yaw 是以度为单位的，这里转换成弧度
+    float current_yaw = imu_sensor.get_yaw();  
     
     // 如果正在跟踪路径，更新目标位姿为当前航点，否则保持原目标不变
     if (path_tracker.get_state() == TrackerState::TRACKING) {
@@ -49,12 +45,13 @@ __attribute__((section(".ramfunc"))) void ChassisControl::update_control_20ms_ti
     // 计算全局误差与直线距离
     float err_global_x = target_pose.x - current_pos.x;
     float err_global_y = target_pose.y - current_pos.y;
-    float err_yaw = normalize_angle(target_pose.yaw - current_yaw);
-
+    float err_yaw = normalize_angle(target_pose.yaw - current_yaw);  // 转换为 [-pi, pi] 范围内的误差，单位 rad
     float distance = std::sqrt(err_global_x * err_global_x + err_global_y * err_global_y);
 
     // 轨迹规划器根据当前距离算出一个合适的速度
     float v_mag = tra_planner.velocity_planning(distance, tune.tracker.max_speed, tune.tracker.max_acc, 0.02f);
+
+    current_planned_v = v_mag;    // 供 telemetry 模块发送波形数据
 
     float expected_global_vx = 0.0f;
     float expected_global_vy = 0.0f;
@@ -68,8 +65,8 @@ __attribute__((section(".ramfunc"))) void ChassisControl::update_control_20ms_ti
     // 将全局期望速度投影到小车自身的局部坐标系
     float cos_theta = cosf(current_yaw);
     float sin_theta = sinf(current_yaw);
-    float expected_local_vx =  expected_global_vx * cos_theta + expected_global_vy * sin_theta;
-    float expected_local_vy = -expected_global_vx * sin_theta + expected_global_vy * cos_theta;
+    float expected_local_vx = expected_global_vx * sin_theta - expected_global_vy * cos_theta;
+    float expected_local_vy = expected_global_vx * cos_theta + expected_global_vy * sin_theta;
 
     // PID 单独计算期望的旋转速度
     float expected_local_vw = pid_pos_yaw.calculate(err_yaw, 0.0f);
@@ -84,16 +81,15 @@ __attribute__((section(".ramfunc"))) void ChassisControl::update_control_20ms_ti
 }
 
 
-
-
 //--------辅助函数--------
 
-// 防止偏航角误差出现 359度 变成 -1度 导致的疯狂原地打转
+// 防止偏航角误差出现 359度 变成 -1度 导致的疯狂原地打转，将角度归一化到 [-pi, pi] 范围内
 __attribute__((always_inline)) inline float ChassisControl::normalize_angle(float angle) {
 
-    while (angle > PI)  angle -= 2.0f * PI;
-    while (angle < -PI) angle += 2.0f * PI;
-    return angle;
+    if (angle > 180.0f)       angle -= 360.0f;
+    else if (angle < -180.0f) angle += 360.0f;
+
+    return angle * PI / 180.0f;  
 }
 
 
