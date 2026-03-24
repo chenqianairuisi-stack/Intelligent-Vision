@@ -9,7 +9,7 @@ extern "C" int main(void) {
     system_delay_ms(300);           
 
     // encoders.init();          // 编码器初始化 (encoder)
-    imu_sensor.init();        // IMU 初始化 (imu)
+    if (!imu_sensor.init()) { sys_menu.halt_with_error("IMU Initialization Failed");}
     Storage::init();          // 存储模块初始化，加载参数 (storage)
     telemetry.init();         // 通信模块初始化 (telemetry)
     sys_menu.init();          // 系统菜单初始化 (display)

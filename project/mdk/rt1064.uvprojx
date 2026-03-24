@@ -428,6 +428,16 @@
               <FileType>5</FileType>
               <FilePath>..\App\telemetry.h</FilePath>
             </File>
+            <File>
+              <FileName>display.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\App\display.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>display.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\App\display.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -498,16 +508,6 @@
         <Group>
           <GroupName>Device</GroupName>
           <Files>
-            <File>
-              <FileName>display.cpp</FileName>
-              <FileType>8</FileType>
-              <FilePath>..\Device\display.cpp</FilePath>
-            </File>
-            <File>
-              <FileName>display.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Device\display.h</FilePath>
-            </File>
             <File>
               <FileName>encoder.cpp</FileName>
               <FileType>8</FileType>

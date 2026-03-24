@@ -16,8 +16,8 @@ public:
     void update_position_20ms_tick(const int16_t* encoder_counts, float imu_yaw);
 
 private:
-    float global_x = 0.0f;      // 机器人在全局坐标系中的 x 位置，单位 cm
-    float global_y = 0.0f;      // 机器人在全局坐标系中的 y 位置，单位 cm
+    float global_x;      // 机器人在全局坐标系中的 x 位置，单位 cm
+    float global_y;      // 机器人在全局坐标系中的 y 位置，单位 cm
 };
 
 

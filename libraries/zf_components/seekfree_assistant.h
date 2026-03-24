@@ -35,6 +35,10 @@
 #ifndef _seekfree_assistant_h_
 #define _seekfree_assistant_h_
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 #include "zf_common_typedef.h"
 
@@ -161,5 +165,8 @@ void    seekfree_assistant_camera_send                          (void);
 void    seekfree_assistant_data_analysis                        (void);
 
 
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -1,3 +1,10 @@
+#ifndef _seekfree_assistant_interface_h_
+#define _seekfree_assistant_interface_h_
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*********************************************************************************************************************
 * RT1064DVL6A Opensourec Library 即（RT1064DVL6A 开源库）是一个基于官方 SDK 接口的第三方开源库
 * Copyright (c) 2022 SEEKFREE 逐飞科技
@@ -33,11 +40,6 @@
 * 2024-1-11        SeekFree         first version
 ********************************************************************************************************************/
 
-#ifndef _seekfree_assistant_interface_h_
-#define _seekfree_assistant_interface_h_
-
-
-
 // 数据发送设备枚举
 typedef enum
 {
@@ -52,6 +54,11 @@ typedef enum
 
 
 void    seekfree_assistant_interface_init   (seekfree_assistant_transfer_device_enum transfer_device);
+
+#ifdef __cplusplus
+}
+#endif
+
 
 
 

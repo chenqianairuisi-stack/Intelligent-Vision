@@ -7,6 +7,8 @@
 #include "tracker.h"
 
 using namespace SystemConfig;
+extern float planned_v_debug;
+extern float speed_y_debug;
 
 __attribute__((section(".dtcm_data"))) ChassisControl chassis_task;
 
@@ -22,7 +24,8 @@ ChassisControl::ChassisControl()
         IncPid(tune.pid_speed), IncPid(tune.pid_speed), 
         IncPid(tune.pid_speed), IncPid(tune.pid_speed)
       },
-      pid_pos_yaw(tune.pid_yaw) {}
+      pid_pos_yaw(tune.pid_yaw),
+      target_pose {0.0f, 0.0f, 90.0f} {}
 
 // 初始化电机
 void ChassisControl::init() {
@@ -50,8 +53,7 @@ __attribute__((section(".ramfunc"))) void ChassisControl::update_control_20ms_ti
 
     // 轨迹规划器根据当前距离算出一个合适的速度
     float v_mag = tra_planner.velocity_planning(distance, tune.tracker.max_speed, tune.tracker.max_acc, 0.02f);
-
-    current_planned_v = v_mag;    // 供 telemetry 模块发送波形数据
+    planned_v_debug = v_mag;    // ~~~ 供 telemetry 模块发送波形数据 ~~~ 
 
     float expected_global_vx = 0.0f;
     float expected_global_vy = 0.0f;

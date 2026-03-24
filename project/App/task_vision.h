@@ -3,18 +3,16 @@
 #include "uart_comm.h"
 #include "system_config.h"
 
-using namespace SystemConfig;
-
 struct VisionData {
     // 解压后的地图 [0为平地，1为墙]
-    std::array<std::array<int8_t, MAP_MAX_WIDTH>, MAP_MAX_HEIGHT> map{};
+    std::array<std::array<int8_t, SystemConfig::MAP_MAX_WIDTH>, SystemConfig::MAP_MAX_HEIGHT> map{};
     
     // 识别到的箱子和目标点
     uint8_t box_count;
     uint8_t bomb_count;
-    point boxes[MAX_BOXES];
-    point targets[MAX_BOXES];
-    point bombs[MAX_BOMBS];
+    point boxes[SystemConfig::MAX_BOXES];
+    point targets[SystemConfig::MAX_BOXES];
+    point bombs[SystemConfig::MAX_BOMBS];
 
     // 全局定位坐标
     float current_x;

@@ -58,7 +58,22 @@ void TftMenu::init() {
     system_delay_ms(50);                             // 延时确保初始化完成
 }
 
-void TftMenu::run() { scan_keys(); process_logic(); render_ui(); }
+void TftMenu::run() { 
+    scan_keys(); 
+    if (is_closed) {
+        if (key_back_pressed) {     // 按返回键唤醒
+            is_closed = false;
+            need_full_redraw = true;
+            current_page = MenuPage::MAIN_MENU;
+            cursor_idx = 0;
+            ui_dirty = true;
+        }
+        return;  // 拦截后续逻辑与渲染
+    }
+    
+    process_logic(); 
+    render_ui(); 
+}
 
 
 // --------------------- 核心功能函数实现 -------------------------
@@ -97,8 +112,8 @@ void TftMenu::process_logic() {
 
     switch (current_page) {
         case MenuPage::MAIN_MENU:
-            if (key_down_pressed) cursor_idx = (cursor_idx + 1) % 6;    // 6个主菜单项
-            if (key_up_pressed)   cursor_idx = (cursor_idx == 0) ? 5 : cursor_idx - 1;
+            if (key_down_pressed) cursor_idx = (cursor_idx + 1) % 7;    // 7个主菜单项
+            if (key_up_pressed)   cursor_idx = (cursor_idx == 0) ? 6 : cursor_idx - 1;
 
             if (key_enter_pressed) {
                 if (cursor_idx == 0) current_page = MenuPage::GAME_STATUS;
@@ -116,6 +131,11 @@ void TftMenu::process_logic() {
                     Storage::load_params();
                     tft180_show_string(15 * UI_COL_W, 7 * UI_ROW_H, "[OK]");
                     system_delay_ms(300);
+                }
+                if (cursor_idx == 6) { 
+                    is_closed = true;
+                    tft180_full(RGB565_BLACK); 
+                    return; 
                 }
 
                 // 前4个是页面跳转，需要重置光标和清屏
@@ -154,6 +174,22 @@ void TftMenu::process_logic() {
     }
 }
 
+// 硬件报错挂起
+void TftMenu::halt_with_error(const char* err_msg) {
+    tft180_full(RGB565_BLACK);
+    tft180_show_string(0, 50, "!!! FATAL ERROR !!!");
+    tft180_show_string(0, 70, (char*)err_msg);
+    
+    // 彻底死循环，避免主循环里的 sys_menu.run() 覆盖屏幕
+    while (1) {
+        // 可以在这里加个蜂鸣器报警代码
+        system_delay_ms(100);
+    }
+}
+
+
+// ------------------------- 页面绘制函数 -------------------------
+
 // UI 渲染器：根据 current_page 调用对应的绘制函数
 void TftMenu::render_ui() {
     if (!ui_dirty) return;
@@ -170,8 +206,6 @@ void TftMenu::render_ui() {
 }
 
 
-// ------------------------- 页面绘制函数 -------------------------
-
 void TftMenu::draw_main_menu() {
     tft180_show_string(0, 0, "-- COMMAND MENU --");
     draw_item(2, "Game State", cursor_idx == 0);
@@ -180,6 +214,7 @@ void TftMenu::draw_main_menu() {
     draw_item(5, "Tuning",     cursor_idx == 3);
     draw_item(6, "Save Config",cursor_idx == 4);
     draw_item(7, "Load Config",cursor_idx == 5);
+    draw_item(8, "Close Menu", cursor_idx == 6); 
 }
 
 void TftMenu::draw_tune_params() {
@@ -225,6 +260,68 @@ void TftMenu::draw_game_status() {
     tft180_show_string(0, 7 * UI_ROW_H, last_rx_cmd); // 打印全局变量
 }
 
+// void TftMenu::draw_vision_data() {
+//     tft180_show_string(0, 0, "-- VISION --");
+//     tft180_show_string(0, 1 * UI_ROW_H, vision_data.art1_map_ready ? "Map: Ready  " : "Map: Waiting");
+
+//     if (!vision_data.art1_map_ready) {
+//         return; // 地图没就绪就不画下面了
+//     }
+
+//     // 地图原点设定 (屏幕宽度128, 地图宽16*5=80, 居中X=(128-80)/2=24)
+//     int map_start_x = 24; 
+//     int map_start_y = 2 * UI_ROW_H + 5; 
+
+//     // 1. 绘制底层地图网格 (16x12)
+//     // 根据你的按位解析逻辑，Y=0是下面(起点)，为了符合屏幕习惯，Y值需要倒置(11 - y)
+//     for (int y = 0; y < 12; ++y) {
+//         for (int x = 0; x < 16; ++x) {
+//             uint16_t color = (vision_data.map[y][x] == 1) ? RGB565_GRAY : RGB565_BLUE;
+//             // 调用你底层的画实心矩形函数
+//             tft180_fill_rect(map_start_x + x * 5, map_start_y + (11 - y) * 5, 5, 5, color);
+//         }
+//     }
+
+//     // 2. 绘制箱子 (黄色) 与 目标点 (紫色)
+//     for (int i = 0; i < vision_data.box_count; i++) {
+//         int tx = vision_data.targets[i].x;
+//         int ty = vision_data.targets[i].y;
+//         tft180_fill_rect(map_start_x + tx * 5, map_start_y + (11 - ty) * 5, 5, 5, RGB565_PURPLE);
+
+//         int bx = vision_data.boxes[i].x;
+//         int by = vision_data.boxes[i].y;
+//         tft180_fill_rect(map_start_x + bx * 5, map_start_y + (11 - by) * 5, 5, 5, RGB565_YELLOW);
+//     }
+
+//     // 3. 绘制小车全局定位点 (红色)
+//     // 通过里程计当前绝对坐标，除以每个网格对应的真实物理长度，映射回网格系
+//     Point2D pos = chassis_odometry.get_position();
+//     float car_grid_x = pos.x / CM_PER_GRID;
+//     float car_grid_y = pos.y / CM_PER_GRID;
+    
+//     // 如果小车在地图范围内，就画一个半格大小 (3x3 像素) 的红点
+//     if (car_grid_x >= 0 && car_grid_x <= 16.0f && car_grid_y >= 0 && car_grid_y <= 12.0f) {
+//         int px = map_start_x + (int)(car_grid_x * 5) + 1; // +1为了居中到5像素格子内
+//         int py = map_start_y + (11 * 5) - (int)(car_grid_y * 5) + 1;
+//         tft180_fill_rect(px, py, 3, 3, RGB565_RED);
+//     }
+
+//     // 4. 在屏幕底部显示具体数值
+//     int text_y = map_start_y + (12 * 5) + 6;
+//     tft180_show_string(0, text_y, "Boxes: ");
+//     tft180_show_int(8 * UI_COL_W, text_y, vision_data.box_count, 2);
+    
+//     tft180_show_string(0, text_y + UI_ROW_H, "Targets: ");
+//     tft180_show_int(9 * UI_COL_W, text_y + UI_ROW_H, vision_data.box_count, 2); // 目标数一般与箱子相等
+    
+//     tft180_show_string(0, text_y + 2 * UI_ROW_H, "ART2 ID: ");
+//     if (vision_data.art2_result_ready) {
+//         tft180_show_int(9 * UI_COL_W, text_y + 2 * UI_ROW_H, vision_data.current_front_id, 2);
+//     } else {
+//         tft180_show_string(9 * UI_COL_W, text_y + 2 * UI_ROW_H, "--");
+//     }
+// }
+
 void TftMenu::draw_vision_data() {
     tft180_show_string(0, 0, "-- VISION --");
     tft180_show_string(0, 2 * UI_ROW_H, vision_data.art1_map_ready ? "Map: Ready  " : "Map: Waiting");
@@ -269,17 +366,17 @@ void TftMenu::draw_item(uint8_t row, const char* name, bool is_selected) {
 }
 
 void TftMenu::draw_float_item(uint8_t row, const char* name, float val, bool is_selected, bool is_editing_this) {
-    // 1. 渲染光标和名称 (占用 0 ~ 9 列)
+    // 渲染光标和名称 (占用 0 ~ 9 列)
     draw_item(row, name, is_selected);
     
-    // 2. 渲染编辑标识 (占用 10 ~ 12 列)
+    // 渲染编辑标识 (占用 10 ~ 12 列)
     if (is_selected && is_editing_this) {
         tft180_show_string(10 * UI_COL_W, row * UI_ROW_H, "[E]");
     } else {
         tft180_show_string(10 * UI_COL_W, row * UI_ROW_H, "   ");
     }
 
-    // 3. 渲染浮点数 (从第 14 列开始，最多占用 7 列)
+    // 渲染浮点数 (从第 14 列开始，最多占用 7 列)
     // 格式化占位：2位整数 + 1位符号 + 1位小数点 + 3位小数 = 7个字符。
     // 14 + 7 = 21列。完美容纳在 128 像素内。
     tft180_show_float(14 * UI_COL_W, row * UI_ROW_H, val, 2, 3);

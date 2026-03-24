@@ -9,6 +9,8 @@
 #include <cmath>
 
 Telemetry telemetry;
+float speed_y_debug = 0.0f;       // 用于调试的全局变量，可以通过上位机命令修改，观察对实际速度的影响
+float planned_v_debug = 0.0f;   // 当前规划的速度大小，供 telemetry 模块发送波形数据
 
 char last_rx_cmd[32] = "WAITING CMD...";
 
@@ -35,12 +37,12 @@ void Telemetry::send_wave_data() {
     float avg_speed_mag = std::sqrt(avg_speed.vx * avg_speed.vx + avg_speed.vy * avg_speed.vy);
 
     // 填充数据通道
-    tx_packet.target_v = chassis_task.current_planned_v;   // 梯形规划的当前速度
-    tx_packet.actual_v = avg_speed_mag;                    // 轮子实际反馈
-    tx_packet.target_x = target_pos.x;                     // 目标点 X
-    tx_packet.actual_x = current_pos.x;                    // 实际里程计 X
-    tx_packet.target_y = target_pos.y;                     // 目标点 Y
-    tx_packet.actual_y = current_pos.y;                    // 实际里程计 Y
+    tx_packet.target_v = planned_v_debug;            // 梯形规划的当前速度
+    tx_packet.actual_v = avg_speed_mag;              // 轮子实际反馈
+    tx_packet.target_x = target_pos.x;               // 目标点 X
+    tx_packet.actual_x = current_pos.x;              // 实际里程计 X
+    tx_packet.target_y = target_pos.y;               // 目标点 Y
+    tx_packet.actual_y = current_pos.y;              // 实际里程计 Y
 
     // tx_packet.actual_x = imu660ra_gyro_x;
     // tx_packet.target_y = imu660ra_gyro_y;
@@ -139,7 +141,8 @@ void Telemetry::execute_command(const char* cmd) {
                 case 'T':  // 转向 (逆时针为正)
                     target.yaw = cur_yaw_deg + value;
                     break;
-                case 'V':  // 速度移动 (暂未实现，保留接口)
+                case 'V':  // 速度移动
+                    speed_y_debug = value;
                     break;
                 default:
                     return;
