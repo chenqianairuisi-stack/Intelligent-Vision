@@ -7,6 +7,7 @@
 #include "task_control.h"
 #include "telemetry.h"
 
+
 extern "C" void PIT_IRQHandler(void) {
 
     // 5ms 定时器中断，优先级最高，用于陀螺仪数据读取与积分，保证底盘姿态更新的及时性
@@ -22,10 +23,12 @@ extern "C" void PIT_IRQHandler(void) {
     {
         pit_flag_clear(PIT_CH1);
 
-        // // 全局定位里程计推算 
-        // chassis_odometry.update_position_20ms_tick(encoders.getAllCounts(), imu_sensor.get_yaw() * PI / 180.0f);
-        // // 底盘控制算法更新
-        // chassis_task.update_control_20ms_tick(); 
+        // 编码器计数更新与清零
+        encoders.update_encoders_20ms_tick();
+        // 全局定位里程计推算 
+        chassis_odometry.update_position_20ms_tick(encoders.getAllCounts(), imu_sensor.get_yaw() * PI / 180.0f);
+        // 底盘控制算法更新
+        chassis_task.update_control_20ms_tick(); 
         
     }
     

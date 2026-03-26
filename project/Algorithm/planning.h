@@ -28,19 +28,19 @@ constexpr point MOVE[4] = {{0,1}, {1,0}, {0,-1}, {-1,0}};
 
 // 游戏状态结构体（用于搜索树中的节点表示）
 struct GameState {
-    point player;                // 玩家当前坐标
-    int8_t box_x[MAX_BOXES];     // 所有幸存箱子的X坐标
-    int8_t box_y[MAX_BOXES];     // 所有幸存箱子的Y坐标
-    uint8_t num_boxes;           // 当前场上还剩几个箱子
-    uint8_t target_mask;         // 位图：记录哪些目标点还没被消耗 (第i位为1表示第i个目标点还在，0表示已消失)
-    uint32_t hash;               // 当前状态的 Zobrist 哈希值（用于查表排重）
+    point player;               // 玩家当前坐标
+    int8_t box_x[MAX_BOXES];    // 所有幸存箱子的X坐标
+    int8_t box_y[MAX_BOXES];    // 所有幸存箱子的Y坐标
+    uint8_t num_boxes;          // 当前场上还剩几个箱子
+    uint8_t target_mask;        // 位图：记录哪些目标点还没被消耗 (第i位为1表示第i个目标点还在，0表示已消失)
+    uint32_t hash;              // 当前状态的 Zobrist 哈希值（用于查表排重）
 };
 
 // 置换表（Transposition Table, TT）大小，必须是2的幂
 constexpr int TT_SIZE = 16384;  
 struct TTEntry {
-    uint16_t sig;       // 记录完整哈希，防止哈希冲突
-    uint8_t remaining;   // 记录该状态下剩余允许的搜索深度（步数），用于剪枝
+    uint16_t sig;         // 记录完整哈希，防止哈希冲突
+    uint8_t  remaining;   // 记录该状态下剩余允许的搜索深度（步数），用于剪枝
 };
 
 
@@ -56,9 +56,9 @@ public:
 protected:
     std::array<std::array<int8_t, MAP_MAX_WIDTH>, MAP_MAX_HEIGHT> map{};  // 静态地图：0空地, 1墙, 2目标
     point player_start;
-    StaticArray<point, MAX_BOMBS> initial_bombs;    // 炸弹位置
-    StaticArray<point, MAX_BOXES> initial_targets;  // 目标点位置
-    StaticArray<point, MAX_PATH_LENGTH> final_path;       // 最终求解路径
+    StaticArray<point, MAX_BOMBS> initial_bombs;        // 炸弹位置
+    StaticArray<point, MAX_BOXES> initial_targets;      // 目标点位置
+    StaticArray<point, MAX_PATH_LENGTH> final_path;     // 最终求解路径
 
     GameState initial_state; // 初始状态
 

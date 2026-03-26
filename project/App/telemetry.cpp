@@ -10,7 +10,7 @@
 
 Telemetry telemetry;
 float speed_y_debug = 0.0f;       // 用于调试的全局变量，可以通过上位机命令修改，观察对实际速度的影响
-float planned_v_debug = 0.0f;   // 当前规划的速度大小，供 telemetry 模块发送波形数据
+float planned_v_debug = 0.0f;     // 当前规划的速度大小，供 telemetry 模块发送波形数据
 
 char last_rx_cmd[32] = "WAITING CMD...";
 

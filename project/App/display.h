@@ -7,6 +7,8 @@
 #define KEY3 C15  // 上移 / 增大
 #define KEY4 C13  // 返回 / 退出编辑
 
+
+
 // 页面枚举
 enum class MenuPage {
     MAIN_MENU,          // 主菜单
@@ -51,9 +53,13 @@ private:
     void draw_odometry_data();       // 里程计+硬件数据监控
     void draw_tune_params();         // 参数调节页面
 
+
     // --- 局部刷新辅助 ---
     void draw_item(uint8_t row, const char* name, bool is_selected);  // 绘制菜单项，选中时高亮
     void draw_float_item(uint8_t row, const char* name, float val, bool is_selected, bool is_editing);  // 绘制带数值的菜单项，选中时高亮，编辑模式下数值闪烁提示
+
+    // --- 基础绘图接口封装 ---
+    void fill_rect(uint8_t x, uint8_t y, uint8_t w, uint8_t h, uint16_t color); //  快速矩形填充
 };
 
 extern TftMenu sys_menu;

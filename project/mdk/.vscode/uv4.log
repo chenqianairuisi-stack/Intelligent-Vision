@@ -1,4 +1,4 @@
-*** Using Compiler 'V6.16', folder: 'D:\ruanjian\keil5 MDK\Keil5 MDK\ARM\ARMCLANG\Bin'
-Build target 'nor_sdram_zf_dtcm'
-".\Objects\rt1064.axf" - 0 Error(s), 0 Warning(s).
-Build Time Elapsed:  00:00:02
+Load "e:\\Project\\Intelligent Vision\\RT1064_MDK_M\\project\\mdk\\Objects\\rt1064.axf" 
+Erase Done.Programming Done.Verify OK.Application running ...
+RDDI-DAP Error
+Flash Load finished at 13:52:44

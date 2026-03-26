@@ -99,3 +99,7 @@ struct StaticArray {
     void reserve(int n) { (void)n; } 
 };
 
+
+#ifndef PI
+#define PI 3.1415926535898f
+#endif

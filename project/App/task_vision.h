@@ -50,6 +50,21 @@ struct ProtocolParser {
 
 class VisionManager {
 public:
+    VisionManager() = default;
+    void init();
+    
+    // 主循环调用，处理串口数据并更新状态
+    void update();    
+
+    // 动作控制接口
+    void request_map_ART1();
+    void request_pose_ART1();
+    void trigger_ART2(bool is_box);
+
+    // 注入本地脱机测试地图数据，供没有摄像头时的调试使用
+    void load_mock_map();
+
+private:
     // 协议指令类型 (MCU -> OpenART)
     static constexpr uint8_t CMD_REQ_MAP      = 0x10;  // 请求刷新地图
     static constexpr uint8_t CMD_REQ_POSE     = 0x11;  // 请求当前定位
@@ -61,15 +76,6 @@ public:
     static constexpr uint8_t MSG_POSE_DATA    = 0x21;  // 接收定位包
     static constexpr uint8_t MSG_ART2_RESULT  = 0x40;  // 接收ART2识别结果(1-10)
 
-    void init();
-    void update();    // 放在 App 层主循环高频调用
-
-    // 动作控制接口
-    void request_map_ART1();
-    void request_pose_ART1();
-    void trigger_ART2(bool is_box);
-
-private:
     ProtocolParser parser_art1;
     ProtocolParser parser_art2;
 

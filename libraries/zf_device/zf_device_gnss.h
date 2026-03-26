@@ -57,7 +57,9 @@
 
 #define ANGLE_TO_RAD(x)     ( (x) * PI / 180.0 )                                // 角度转换为弧度
 #define RAD_TO_ANGLE(x)     ( (x) * 180.0 / PI )                                // 弧度转换为角度
+#ifndef PI
 #define PI                  ( 3.1415926535898 )
+#endif
 
 typedef enum
 {

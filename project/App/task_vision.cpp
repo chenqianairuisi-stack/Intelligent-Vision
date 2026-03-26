@@ -140,3 +140,75 @@ __attribute__((section(".ramfunc"))) void VisionManager::process_art2_packet() {
         vision_data.art2_result_ready = true;
     }
 }
+
+
+// 加载本地 ASCII 字符测试地图
+void VisionManager::load_mock_map() {
+    const char* map_layout[SystemConfig::MAP_MAX_HEIGHT] = {
+        "############",
+        "#----------#",
+        "#-######---#",
+        "#-#----#-.-#",
+        "#-#-##-----#",
+        "#-#-.$$----#",
+        "#-####---#-#",
+        "#----#---#-#",
+        "#----#---#-#",
+        "#----#---#-#",
+        "#--###-----#",
+        "#--#-------#",
+        "#--#-------#",
+        "#-.$-------#",
+        "##-#-------#",
+        "############"
+    };
+
+    // 清空原有的统计数据
+    vision_data.box_count = 0;
+    vision_data.bomb_count = 0;
+    uint8_t target_count = 0;
+
+    // 遍历解析字符矩阵
+    for (int y = 0; y < SystemConfig::MAP_MAX_HEIGHT; y++) {
+        for (int x = 0; x < SystemConfig::MAP_MAX_WIDTH; x++) {
+            
+            // 注：屏幕/字符画是自顶向下(Row 0在最上面)，而我们的地图坐标系是自底向上(Y=0在最下面)
+            char ch = map_layout[SystemConfig::MAP_MAX_HEIGHT - 1 - y][x]; 
+    
+            vision_data.map[y][x] = 0;
+            switch(ch) {
+                case '#': 
+                    vision_data.map[y][x] = 1; // 墙壁
+                    break;
+                    
+                case '.': 
+                    if (target_count < SystemConfig::MAX_BOXES) {
+                        vision_data.targets[target_count] = {(int8_t)x, (int8_t)y};
+                        target_count++;
+                    }
+                    break;
+                    
+                case '$': 
+                    if (vision_data.box_count < SystemConfig::MAX_BOXES) {
+                        vision_data.boxes[vision_data.box_count] = {(int8_t)x, (int8_t)y};
+                        vision_data.box_count++;
+                    }
+                    break;
+                    
+                case '*': 
+                    if (vision_data.bomb_count < SystemConfig::MAX_BOMBS) {
+                        vision_data.bombs[vision_data.bomb_count] = {(int8_t)x, (int8_t)y};
+                        vision_data.bomb_count++;
+                    }
+                    break;
+                    
+                default: 
+                    // '-' 或者空格等其他字符，均视为平地(已默认为0)
+                    break;
+            }
+        }
+    }
+    
+    // 拉起就绪标志位，瞬间触发 GameManager 进入 PLAN_SOKOBAN 寻路状态
+    vision_data.art1_map_ready = true; 
+}
