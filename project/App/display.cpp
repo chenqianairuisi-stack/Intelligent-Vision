@@ -176,7 +176,7 @@ void TftMenu::process_logic() {
                 // 在屏幕中间打个提示，延时防抖
                 tft180_show_string(12, 80, "Local Map Loaded");
                 system_delay_ms(300);
-                need_full_redraw = true;  // 强制重绘，马上就能看到地图
+                need_full_redraw = true;   
             }
             if (key_back_pressed) { 
                 current_page = MenuPage::MAIN_MENU; 
@@ -294,28 +294,7 @@ void TftMenu::draw_odometry_data() {
     tft180_show_string(0, 9 * UI_ROW_H, "Spd RB: ");     tft180_show_float(10 * UI_COL_W, 9 * UI_ROW_H, encoders.get_speed_cm_s(3), 3, 1);
 }
 
-// void TftMenu::draw_vision_data() {
-//     tft180_show_string(0, 0, "-- VISION --");
-//     tft180_show_string(0, 2 * UI_ROW_H, vision_data.art1_map_ready ? "Map: Ready  " : "Map: Waiting");
-    
-//     tft180_show_string(0, 3 * UI_ROW_H, "Boxes: ");
-//     tft180_show_int(8 * UI_COL_W, 3 * UI_ROW_H, vision_data.box_count, 2);
-    
-//     tft180_show_string(0, 4 * UI_ROW_H, "Bombs: ");
-//     tft180_show_int(8 * UI_COL_W, 4 * UI_ROW_H, vision_data.bomb_count, 2);
-    
-//     tft180_show_string(0, 5 * UI_ROW_H, "ART2 ID: ");
-//     if (vision_data.art2_result_ready) {
-//         tft180_show_int(9 * UI_COL_W, 5 * UI_ROW_H, vision_data.current_front_id, 2);
-//     } else {
-//         tft180_show_string(9 * UI_COL_W, 5 * UI_ROW_H, "--");
-//     }
-// }
 
-
-
-// 场地一格的真实物理大小
-static constexpr float CM_PER_GRID = 20.0f; 
 
 // 视觉数据监控页面：地图格子、箱子、目标、炸弹、小车位置等的实时绘制
 void TftMenu::draw_vision_data() {
@@ -351,24 +330,24 @@ void TftMenu::draw_vision_data() {
 
 
     //------------------------------------------------------------------------------------
-    // 2. 绘制静态地图
+    // 2. 静态地图与网格线绘制
     //------------------------------------------------------------------------------------
     int map_start_y = 2 * UI_ROW_H + 4;
 
     for (int map_x = 0; map_x < 12; ++map_x) {
         for (int map_y = 0; map_y < 16; ++map_y) {
+            int screen_x = map_y * 8;
+            int screen_y = map_x * 8 + map_start_y;
             if (vision_data.map[map_y][map_x] == 1) {
-                int screen_x = map_y * 8;
-                int screen_y = map_x * 8 + map_start_y;
-                fill_rect(screen_x, screen_y, 8, 8, RGB565_GRAY);
+                fill_rect(screen_x + 1, screen_y + 1, 7, 7, RGB565_GRAY);  
+            } else {
+                fill_rect(screen_x + 1, screen_y + 1, 6, 6, RGB565_WHITE);           
             }
         }
     }
 
-    // 绘制黑色网格线
     for (int i = 0; i <= 12; ++i) { tft180_draw_line(0, i * 8 + map_start_y, 127, i * 8 + map_start_y, RGB565_BLACK); }
     for (int i = 1; i <= 15; ++i) { tft180_draw_line(i * 8, map_start_y, i * 8, 96 + map_start_y, RGB565_BLACK); }
-
 
     //------------------------------------------------------------------------------------
     // 3. 根据当前阶段，决定是画 [动画数据] 还是 [真实数据]
@@ -386,27 +365,67 @@ void TftMenu::draw_vision_data() {
 
     } else if (current_phase >= GamePhase::EXEC_SOKOBAN) {
 
+        // 绘制箱子和终点目标
         for (int i = 0; i < vision_data.box_count; ++i) {
             fill_rect(vision_data.targets[i].y * 8 + 1, map_start_y + vision_data.targets[i].x * 8 + 1, 6, 6, RGB565_PINK);
             fill_rect(vision_data.boxes[i].y * 8 + 1, map_start_y + vision_data.boxes[i].x * 8 + 1, 6, 6, RGB565_YELLOW);
         }
 
-        // 换算真实物理坐标 -> 屏幕像素
-        Point2D pos = chassis_odometry.get_position();
-        float car_maze_x = (pos.x - MAP_OFFSET_X) / GRID_SIZE_CM;
-        float car_maze_y = (pos.y - MAP_OFFSET_Y) / GRID_SIZE_CM;
+        // 绘制 Tracker 提取的折线路径与目标点
+        const auto& path = path_tracker.grid_path;
+        uint16_t target_idx = path_tracker.current_wp_idx;
         
-        if (car_maze_x >= 0 && car_maze_x < 12 && car_maze_y >= 0 && car_maze_y < 16) {
-            int sx = (int)(car_maze_y * 8) + 2; 
-            int sy = map_start_y + (int)(car_maze_x * 8) + 2;
-            fill_rect(sx, sy, 4, 4, RGB565_RED); 
+        if (path.size() > 0) {
+            // A. 先画折线 (蓝色)
+            for (size_t i = 0; i < path.size() - 1; ++i) {
+                // + 4 是为了将线条画在 8x8 格子的正中心
+                int cx1 = path[i].y * 8 + 4;
+                int cy1 = map_start_y + path[i].x * 8 + 4;
+                int cx2 = path[i+1].y * 8 + 4;
+                int cy2 = map_start_y + path[i+1].x * 8 + 4;
+                tft180_draw_line(cx1, cy1, cx2, cy2, RGB565_BLUE); 
+            }
+
+            // B. 再画节点
+            for (size_t i = 0; i < path.size(); ++i) {
+                int sx = path[i].y * 8;
+                int sy = map_start_y + path[i].x * 8;
+                
+                if (path_tracker.state == TrackerState::TRACKING && i == target_idx) {
+                    // 【当前目标点】：画一个显眼的 蓝底白心 的嵌套矩形
+                    fill_rect(sx + 1, sy + 1, 6, 6, RGB565_BLUE);
+                    fill_rect(sx + 2, sy + 2, 4, 4, RGB565_WHITE);
+                } else if (i < target_idx) {
+                    // 【已路过的点】：画个小灰点
+                    fill_rect(sx + 3, sy + 3, 2, 2, RGB565_GRAY);
+                } else {
+                    // 【未来的点】：画个小蓝点
+                    fill_rect(sx + 3, sy + 3, 2, 2, RGB565_BLUE);
+                }
+            }
         }
 
-        // 底部显示进度
-        tft180_show_string(0, 140, "Status: RUNNING    ");
+        // 换算真实物理坐标 -> 屏幕像素
+        Point2D pos = chassis_odometry.get_position();
+        float car_screen_x = pos.y  / GRID_SIZE_CM * 8.0f;
+        float car_screen_y = map_start_y + pos.x / GRID_SIZE_CM * 8.0f;
+
+        // 边界保护：确保小车不会画出 128x160 屏幕导致内存越界
+        if (car_screen_x >= 2 && car_screen_x <= 126 && 
+            car_screen_y >= map_start_y + 2 && car_screen_y <= map_start_y + 94) {
+            
+            // -2 是为了将 4x4 的车子放在 8x8 的格子中心
+            fill_rect((int)car_screen_x - 2, (int)car_screen_y - 2, 4, 4, RGB565_RED); 
+        }
+
+        // 3. 底部显示运行进度与目标 WP 编号
+        tft180_show_string(0, 140, "Status: TRACKING   ");
+        tft180_show_string(0, 150, "Target WP: ");
+        tft180_show_int(11 * UI_COL_W, 150, target_idx, 2);
+        tft180_show_string(13 * UI_COL_W, 150, "/");
+        tft180_show_int(14 * UI_COL_W, 150, path.size(), 2);
     }
 }
-
 
 
 

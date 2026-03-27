@@ -25,8 +25,14 @@ public:
     virtual void update();    // 主循环调用，更新状态机
 
 protected:
-    static constexpr int ENTRY_GRID_X = 6;
-    static constexpr int ENTRY_GRID_Y = 0;
+    static constexpr float ENTRY_X = 120.0f;
+    static constexpr float ENTRY_Y = 10.0f;
+    static constexpr float ENTRY_YAW = 90.0f;
+    static constexpr float OUT_TARGET_X = 120.0f;
+    static constexpr float OUT_TARGET_Y = 50.0f;
+    static constexpr int PLAN_START_X = 6;
+    static constexpr int PLAN_START_Y = 3;
+
     GamePhase phase;
 };
 

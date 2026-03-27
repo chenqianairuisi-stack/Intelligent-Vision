@@ -32,7 +32,7 @@ extern "C" int main(void) {
         // telemetry.receive_and_parse_task();   // 解析上位机命令
         // telemetry.send_wave_data();           // 发送波形数据给上位机
         
-        // vision_manager.update();              // 解析通信数据
+        vision_manager.update();              // 解析通信数据
 
         // game_manager.update();                // 全局游戏状态轮询
         

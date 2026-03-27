@@ -90,10 +90,10 @@ __attribute__((section(".ramfunc"))) void VisionManager::process_art1_packet() {
     if (parser_art1.msg_type == MSG_MAP_DATA) {
         const uint8_t* p = parser_art1.payload_buf;
         
-        // 解压 16*12 地图 [前24 bytes, 每bit表示一个格子, 左->右、下->上]
+        // 解压 12*16 地图 [前24 bytes, 每bit表示一个格子, 左->右、下->上]
         for (uint16_t i = 0; i < 192; i++) {
-            uint8_t x = i % 16;
-            uint8_t y = i / 16;
+            uint8_t x = i % 12;
+            uint8_t y = i / 12;
             bool is_wall = (p[i / 8] & (1 << (i % 8))) != 0;
             vision_data.map[y][x] = is_wall ? 1 : 0;
         }
@@ -126,7 +126,8 @@ __attribute__((section(".ramfunc"))) void VisionManager::process_art1_packet() {
         
         vision_data.art1_map_ready = true;
     } 
-    else if (parser_art1.msg_type == MSG_POSE_DATA && parser_art1.payload_len == 12) {        memcpy(&vision_data.current_x, &parser_art1.payload_buf[0], 4);
+    else if (parser_art1.msg_type == MSG_POSE_DATA && parser_art1.payload_len == 12) {        
+        memcpy(&vision_data.current_x, &parser_art1.payload_buf[0], 4);
         memcpy(&vision_data.current_y, &parser_art1.payload_buf[4], 4);
         memcpy(&vision_data.current_yaw, &parser_art1.payload_buf[8], 4);
         vision_data.art1_pose_updated = true;

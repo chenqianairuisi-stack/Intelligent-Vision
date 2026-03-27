@@ -17,26 +17,26 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
     
     switch (phase) {
         case GamePhase::INIT_CALIBRATE: {
-            // 假设此时车停在发车区，重置底盘里程计 (将此处定义为物理原点 0,0)
-            // chassis_odometry.reset();
+            // 假设此时车停在发车区，重置底盘里程计坐标为入口位置
+            chassis_odometry.set_position(ENTRY_X, ENTRY_Y);
             
-            // 计算进入地图第一格的物理坐标
+            // 直接设置目标位姿为出库点，准备发车
             Pose2D target;
-            target.x = ENTRY_GRID_X * GRID_SIZE_CM + MAP_OFFSET_X;
-            target.y = ENTRY_GRID_Y * GRID_SIZE_CM + MAP_OFFSET_Y;
-            target.yaw = 0.0f;
+            target.x = OUT_TARGET_X;
+            target.y = OUT_TARGET_Y;
+            target.yaw = ENTRY_YAW;
             
-            // 下发第一步指令
+            // 下发出库指令
             chassis_task.set_target_pose(target);
+
             phase = GamePhase::EXIT_START_ZONE;
             break;
         }
 
         case GamePhase::EXIT_START_ZONE: {
             // 计算到目标点的距离
-            float tx = ENTRY_GRID_X * GRID_SIZE_CM + MAP_OFFSET_X;
-            float ty = ENTRY_GRID_Y * GRID_SIZE_CM + MAP_OFFSET_Y;
-            float dist = std::sqrt((tx - current_pos.x)*(tx - current_pos.x) + (ty - current_pos.y)*(ty - current_pos.y));
+            float dist = std::sqrt((OUT_TARGET_X - current_pos.x)*(OUT_TARGET_X - current_pos.x) + 
+                (OUT_TARGET_Y - current_pos.y)*(OUT_TARGET_Y - current_pos.y));
             
             // 如果到达了地图的第一格 (误差 2cm)
             if (dist < tune.tracker.reach_radius_min) {
@@ -53,9 +53,9 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 // 将 VisionData 转化为纯粹的算法层 SokobanLevel
                 SokobanLevel level;
                 level.map = vision_data.map;
-                level.player_start = {ENTRY_GRID_X, ENTRY_GRID_Y + 1}; // 人物当前在入口格
+                level.player_start = {PLAN_START_X, PLAN_START_Y};    // 注：规划起点与实际位置有一定偏差
                 level.box_count = vision_data.box_count;
-                level.target_count = vision_data.box_count; // 箱子与目标数量一致
+                level.target_count = vision_data.box_count;
                 level.bomb_count = vision_data.bomb_count;
                 
                 for(int i=0; i<level.box_count; ++i) {
@@ -68,13 +68,13 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
 
                 solver.load_from_vision(level);
                 phase = GamePhase::PLAN_SOKOBAN;
+                vision_manager.request_pose_ART1();   // 请求获取当前位姿，供路径跟踪使用
                 vision_data.art1_map_ready = false;   // 重置标志，防止重复处理
             }
             break;
         }
 
         case GamePhase::PLAN_SOKOBAN: {
-            // 调用 IDA* 求解
             if (solver.solve()) {
                 // 求解成功，将生成的网格路径加载到追踪器
                 path_tracker.load_path(solver.get_result_path());
@@ -82,7 +82,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             } else {
                 // 求解失败，重新请求视觉的逻辑
                 vision_manager.request_map_ART1();
-                phase = GamePhase::EXIT_START_ZONE;
+                phase = GamePhase::WAIT_FOR_VISION;
             }
             break;
         }
@@ -96,7 +96,8 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
         }
 
         case GamePhase::FINISHED: {
-            // chassis_task.set_target_pose({0.0f, 0.0f, 0.0f});
+            Point2D current_pos = chassis_odometry.get_position();
+            chassis_task.set_target_pose({current_pos.x, current_pos.y, ENTRY_YAW});
             break;
         }
 
@@ -104,7 +105,6 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             break;
     }
 }
-
 
 
 
@@ -135,7 +135,7 @@ __attribute__((section(".ramfunc"))) void DebugGameManager::update() {
 
             if (success) {
                 // 拦截成功，不立刻发车，而是初始化动画状态机
-                demo.player = {ENTRY_GRID_X, ENTRY_GRID_Y + 1};              //？？？？？
+                demo.player = {PLAN_START_X, PLAN_START_Y};
                 demo.box_count = vision_data.box_count;
                 demo.target_count = vision_data.box_count;
                 for (int i = 0; i < demo.box_count; i++) {
@@ -151,7 +151,7 @@ __attribute__((section(".ramfunc"))) void DebugGameManager::update() {
                 // 求解失败，走原逻辑
                 timer_stop(GPT_TIM_1); // 失败时停掉定时器
                 vision_manager.request_map_ART1();
-                phase = GamePhase::EXIT_START_ZONE;
+                phase = GamePhase::WAIT_FOR_VISION;
             }
             break;
         }
@@ -165,7 +165,7 @@ __attribute__((section(".ramfunc"))) void DebugGameManager::update() {
                 
                 if (demo.path_idx >= path.size() - 1) {
                     
-                    demo.player = {ENTRY_GRID_X, ENTRY_GRID_Y + 1};   // 动画结束：将虚拟小车变回原点                ？？？？
+                    demo.player = {PLAN_START_X, PLAN_START_Y};   // 动画结束：将虚拟小车变回原点     
                     path_tracker.load_path(path);                 // 将计算好的路径真正加载给底层 Tracker
                     timer_stop(GPT_TIM_1);                        // 动画结束，关闭定时器
                     phase = GamePhase::EXEC_SOKOBAN;              // 状态机切入 EXEC_SOKOBAN，接下来基类就会接管真实的物理小车移动

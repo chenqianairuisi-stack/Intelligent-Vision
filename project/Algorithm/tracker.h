@@ -15,6 +15,7 @@ enum class TrackerState : uint8_t {
 class PathTracker {
 public:
     PathTracker();
+    friend class TftMenu;   // 允许 TftMenu 访问私有成员
 
     void load_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path);    // 载入网格路径，并启动跟踪
     Pose2D update_and_get_target(const Point2D& current_pos);    // 更新跟踪状态并获取当前目标位姿，供控制模块调用

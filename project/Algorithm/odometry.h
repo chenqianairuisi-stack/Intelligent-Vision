@@ -9,8 +9,9 @@ public:
 
     Odometry();
 
-    // 获取当前全局坐标
+    // 获取/设置当前全局坐标
     Point2D get_position() const { return {global_x, global_y}; }
+    void set_position(float x, float y) { global_x = x; global_y = y; }
 
     // 更新全局坐标
     void update_position_20ms_tick(const int16_t* encoder_counts, float imu_yaw);
