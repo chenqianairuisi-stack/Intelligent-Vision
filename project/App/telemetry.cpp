@@ -44,10 +44,6 @@ void Telemetry::send_wave_data() {
     tx_packet.target_y = target_pos.y;               // 目标点 Y
     tx_packet.actual_y = current_pos.y;              // 实际里程计 Y
 
-    // tx_packet.actual_x = imu660ra_gyro_x;
-    // tx_packet.target_y = imu660ra_gyro_y;
-    // tx_packet.actual_y = imu660ra_gyro_z;
-    
     wireless_uart_send_buffer((uint8*)&tx_packet, sizeof(VofaJustFloat));
 }
 
@@ -111,8 +107,8 @@ void Telemetry::execute_command(const char* cmd) {
             switch (sub) {
                 case 'P': tune.pid_speed.kp = value; break;
                 case 'I': tune.pid_speed.ki = value; break;
-                case 'V': tune.tracker.max_speed = value; break;
-                case 'A': tune.tracker.max_acc = value; break;
+                case 'V': tune.dynamics.max_speed = value; break;
+                case 'A': tune.dynamics.max_acc = value; break;
                 case 'S': {
                     // 紧急停止 (原地驻车)
                     Pose2D stop_target = { cur_pos.x, cur_pos.y, cur_yaw_deg };

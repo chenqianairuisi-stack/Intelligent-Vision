@@ -8,11 +8,13 @@
 
 namespace SystemConfig {
     // 机械参数
-    static constexpr float WHEEL_RADIUS = 5.0f;        // 轮子半径，单位：厘米
+    static constexpr float WHEEL_RADIUS = 3.15f;           // 轮子半径，单位：厘米
 
-    // 编码器参数
-    static constexpr float PULSES_PER_REV = 1024.0f;   // 编码器每转脉冲数
-    static constexpr float GEAR_RATIO = 1.0f;          // 减速比
+    // 编码器硬件参数
+    static constexpr float ENC_LINES = 1024.0f;            // 编码器物理线数
+    static constexpr float ENC_QUAD_FACTOR = 4.0f;         // 硬件四倍频
+    static constexpr float GEAR_RATIO = 70.0f / 30.0f;     // 传动比：轮轴转一圈，编码器转多少圈
+    static constexpr float PULSES_PER_REV  = ENC_LINES * ENC_QUAD_FACTOR * GEAR_RATIO;    // 轮子每转脉冲数
 
     // 物理常数
     static constexpr float GRID_SIZE_CM = 20.0f;           // 每格20cm
@@ -20,12 +22,20 @@ namespace SystemConfig {
     static constexpr float MAP_OFFSET_Y = 10.0f;           // 网格原点 (0,0) 对应物理世界坐标系 Y 偏移量
 
     // 规划算法参数
-    static constexpr int MAP_MAX_WIDTH = 12;
-    static constexpr int MAP_MAX_HEIGHT = 16;
-    static constexpr int MAX_BOXES = 4;             // 最大箱子数放宽到4个
-    static constexpr int MAX_BOMBS = 4;             // 最大炸弹数放宽到4个
-    static constexpr int MAX_PATH_LENGTH = 100;     // 限制最大搜索步数
+    static constexpr int MAP_MAX_WIDTH = 12;               // 地图最大宽度（网格坐标）
+    static constexpr int MAP_MAX_HEIGHT = 16;              // 地图最大高度（网格坐标）
+    static constexpr int PLAN_START_X = 5;                 // 规划起点 X 坐标（网格坐标）
+    static constexpr int PLAN_START_Y = 2;                 // 规划起点 Y 坐标（网格坐标）
+    static constexpr int MAX_BOXES = 4;                    // 最大箱子数
+    static constexpr int MAX_BOMBS = 4;                    // 最大炸弹数
+    static constexpr int MAX_PATH_LENGTH = 100;            // 最大搜索步数
     
+    // 其他全局常量
+    static constexpr float ENTRY_X = 120.0f;               // 入口位置 X 坐标
+    static constexpr float ENTRY_Y = 10.0f;                // 入口位置 Y 坐标
+    static constexpr float ENTRY_YAW = 90.0f;              // 入口位置航向（单位：度，0度为x轴正方向，逆时针为正）
+    static constexpr float OUT_TARGET_X = 120.0f;          // 出库目标位置 X 坐标
+    static constexpr float OUT_TARGET_Y = 50.0f;           // 出库目标位置 Y 坐标
 }
 
 // 四个轮子的转速结构体 (单位：cm/s)
@@ -41,6 +51,13 @@ struct Velocity2D {
     float vy;      // 前后速度 (前为正)
     float vx;      // 左右速度 (右为正)
     float vw;      // 旋转速度 (逆时针为正)
+};
+
+// 速度结构体 (单位：cm/s)
+struct Speed2D {
+    float vy;      
+    float vx;     
+    float v_mag;   // 标量速度 (单位：cm/s)
 };
 
 // 全局坐标结构体 (现实世界坐标系中的坐标点，单位cm)

@@ -107,6 +107,7 @@ static int8_t bfs_dist[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
 // 使用了递归，移植到嵌入式上时应配置栈区大小，建议至少分配 32 KB 的栈空间！！！！！！！！！！！！！！！！！！！！！！
 __attribute__((section(".ramfunc")))
 int sokoban::dfs(GameState state, int g, int depth, int threshold, StaticArray<point, MAX_PATH_LENGTH>& path) {
+    
     int h = get_heuristic(state);
     if (h >= 9999) return 9999;     // 剪枝：死局
     int f = g + h;

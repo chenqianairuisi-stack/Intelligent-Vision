@@ -35,48 +35,40 @@ void ChassisControl::init() {
 // 执行控制算法，更新电机输出 (由 20ms 定时器中断直接调用)
 __attribute__((section(".ramfunc"))) void ChassisControl::update_control_20ms_tick() {
 
-    // // 获取当前位姿（全局坐标 + 角度 deg）
-    // Point2D current_pos = chassis_odometry.get_position();
-    // float current_yaw = imu_sensor.get_yaw();  
+    // 获取当前位姿（全局坐标 + 角度 deg）
+    Point2D current_pos = chassis_odometry.get_position();
+    float current_yaw = imu_sensor.get_yaw();  
     
-    // // 如果正在跟踪路径，更新目标位姿为当前航点，否则保持原目标不变
-    // if (path_tracker.get_state() == TrackerState::TRACKING) {
-    //     target_pose = path_tracker.update_and_get_target(current_pos);
-    // }
+    // 更新目标位姿
+    if (path_tracker.get_state() == TrackerState::TRACKING) {
+        target_pose = path_tracker.update_and_get_target(current_pos);
+    }
 
-    // // 计算全局误差与直线距离
-    // float err_global_x = target_pose.x - current_pos.x;
-    // float err_global_y = target_pose.y - current_pos.y;
-    // float err_yaw = normalize_angle(target_pose.yaw - current_yaw);  // 转换为 [-pi, pi] 范围内的误差，单位 rad
-    // float distance = std::sqrt(err_global_x * err_global_x + err_global_y * err_global_y);
+    // 计算全局误差与直线距离
+    float err_global_x = target_pose.x - current_pos.x;
+    float err_global_y = target_pose.y - current_pos.y;
+    float err_yaw = normalize_angle(target_pose.yaw - current_yaw);  // 转换为 [-pi, pi] 范围内的误差，单位 rad
 
-    // // 轨迹规划器根据当前距离算出一个合适的速度
-    // float v_mag = tra_planner.velocity_planning(distance, tune.tracker.max_speed, tune.tracker.max_acc, 0.02f);
-    // planned_v_debug = v_mag;    // ~~~ 供 telemetry 模块发送波形数据 ~~~ 
+    // 轨迹规划器根据当前距离算出一个合适的速度
+    Speed2D expected_global_vel = tra_planner.velocity_planning_2d(
+        err_global_x, err_global_y, tune.dynamics.max_speed, tune.dynamics.max_acc, tune.dynamics.max_jerk, 0.02f
+    );
+    planned_v_debug = expected_global_vel.v_mag;    // ~~~ 供 telemetry 模块发送波形数据 ~~~ 
 
-    // float expected_global_vx = 0.0f;
-    // float expected_global_vy = 0.0f;
+    // 将全局期望速度投影到小车自身的局部坐标系
+    float cos_theta = cosf(current_yaw);
+    float sin_theta = sinf(current_yaw);
+    float expected_local_vx = expected_global_vel.vx * sin_theta - expected_global_vel.vy * cos_theta;
+    float expected_local_vy = expected_global_vel.vx * cos_theta + expected_global_vel.vy * sin_theta;
 
-    // // 将标量总速度，沿着目标点的直线方向按比例分解
-    // if (distance > 0.1f) {
-    //     expected_global_vx = v_mag * (err_global_x / distance);
-    //     expected_global_vy = v_mag * (err_global_y / distance);
-    // }
+    // PID 单独计算期望的旋转速度
+    float expected_local_vw = pid_pos_yaw.calculate(err_yaw, 0.0f);
+    if(expected_local_vw > tune.dynamics.max_ang_speed) expected_local_vw = tune.dynamics.max_ang_speed; 
+    if(expected_local_vw < -tune.dynamics.max_ang_speed) expected_local_vw = -tune.dynamics.max_ang_speed;
 
-    // // 将全局期望速度投影到小车自身的局部坐标系
-    // float cos_theta = cosf(current_yaw);
-    // float sin_theta = sinf(current_yaw);
-    // float expected_local_vx = expected_global_vx * sin_theta - expected_global_vy * cos_theta;
-    // float expected_local_vy = expected_global_vx * cos_theta + expected_global_vy * sin_theta;
-
-    // // PID 单独计算期望的旋转速度
-    // float expected_local_vw = pid_pos_yaw.calculate(err_yaw, 0.0f);
-    // if(expected_local_vw > tune.tracker.max_ang_speed) expected_local_vw = tune.tracker.max_ang_speed; 
-    // if(expected_local_vw < -tune.tracker.max_ang_speed) expected_local_vw = -tune.tracker.max_ang_speed;
-
-    float expected_local_vx = 0.0f;
-    float expected_local_vy = speed_y_debug;  // ~~~ 供上位机调试用 ~~~
-    float expected_local_vw = 0.0f;
+    // float expected_local_vx = 0.0f;
+    // float expected_local_vy = speed_y_debug;  // ~~~ 供上位机调试用 ~~~
+    // float expected_local_vw = 0.0f;
 
     // 逆运动学解算：将期望的底盘全向速度分配给 4 个轮子，得到每个轮子的目标转速 (v1, v2, v3, v4)
     WheelSpeed4 target_wheel_speeds = Kinematics::inverse_kinematics(expected_local_vx, expected_local_vy, expected_local_vw);

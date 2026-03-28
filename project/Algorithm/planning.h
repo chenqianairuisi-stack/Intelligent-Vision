@@ -18,7 +18,7 @@ struct SokobanLevel {
     
     point targets[MAX_BOXES];
     uint8_t target_count;
-
+    
     point bombs[MAX_BOMBS];
     uint8_t bomb_count;
 };

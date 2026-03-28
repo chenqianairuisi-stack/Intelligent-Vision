@@ -1,15 +1,22 @@
 #pragma once
+#include "system_config.h"
 
 class Trajectory {
-private:
-    float current_v_mag; // 当前维持的标量速度
-
 public:
     Trajectory();
 
     // 核心规划算法：根据当前距离，算出下一刻的最优速度大小
-    float velocity_planning(float distance, float max_v, float max_acc, float dt);
+    Speed2D velocity_planning_2d(float dx, float dy, float max_v, float max_acc,float max_jerk, float dt);
     
     // 强制刹车或重置状态
     void reset();
+
+private:
+    // 缓存上一周期的真实期望速度矢量
+    float current_vx; 
+    float current_vy;
+
+    // 缓存上一周期的真实加速度矢量 (用于计算 Jerk)
+    float current_ax;
+    float current_ay;
 };

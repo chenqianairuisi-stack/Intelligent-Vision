@@ -80,7 +80,7 @@ __attribute__((section(".ramfunc"))) Pose2D PathTracker::update_and_get_target(c
     // 组装并输出纯净的数学结果（不带任何控制逻辑的位姿），供控制模块调用
     current_target.x = target_x;
     current_target.y = target_y;
-    current_target.yaw = 0.0f; // 目前不需要航向信息，保持 0 即可
+    current_target.yaw = ENTRY_YAW; // 目前不需要航向信息，保持初始角度即可
 
     return current_target;
 }

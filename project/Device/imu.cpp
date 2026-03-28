@@ -4,7 +4,7 @@
 
 __attribute__((section(".dtcm_data"))) Imu imu_sensor;
 
-Imu::Imu() : yaw_angle(90.0f), gyro_z_dps(0.0f), gyro_z_offset(0.0f) {}
+Imu::Imu() : yaw_angle(90.0f), gyro_z_dps(0.0f), gyro_z_offset(0.0f), last_gyro_z_dps(0.0f){}
 
 bool Imu::init() {
     if (imu660ra_init() != 0) return false;
@@ -30,6 +30,9 @@ __attribute__((section(".ramfunc"))) void Imu::update_yaw_5ms_tick() {
     // 转换为角速度
     gyro_z_dps = ((float)imu660ra_gyro_z - gyro_z_offset) / imu660ra_transition_factor[1];
     
-    // 进行离散积分 (逆时针为正，单位为度)
-    yaw_angle += gyro_z_dps * 0.005f; 
+    // 进行离散梯形积分 (逆时针为正，单位为度)
+    yaw_angle += (gyro_z_dps + last_gyro_z_dps) * 0.5f * 0.005f; 
+
+    // 更新历史值
+    last_gyro_z_dps = gyro_z_dps;
 }

@@ -20,14 +20,16 @@ static constexpr int UI_ROW_H = 10;
 struct ParamItem { const char* name; float* val_ptr; float step; };
 
 static ParamItem tune_dict[] = {
-    {"Yaw_Kp",   &tune.pid_yaw.kp,                  0.1f },
-    {"Yaw_Kd",   &tune.pid_yaw.kd,                  0.01f},
-    {"Spd_Kp",   &tune.pid_speed.kp,                0.1f },
-    {"Spd_Ki",   &tune.pid_speed.ki,                0.01f},
-    {"Max_Spd",  &tune.tracker.max_speed,           1.0f },
-    {"Max_Acc",  &tune.tracker.max_acc,             0.5f },
-    {"MaxASpd",  &tune.tracker.max_ang_speed,       0.1f },
-    {"ReachRad", &tune.tracker.reach_radius,        1.0f },
+    {"Yaw_Kp",   &tune.pid_yaw.kp,                  0.1f  },
+    {"Yaw_Kd",   &tune.pid_yaw.kd,                  0.01f },
+    {"Spd_Kp",   &tune.pid_speed.kp,                0.1f  },
+    {"Spd_Ki",   &tune.pid_speed.ki,                0.01f },
+    {"Max_Spd",  &tune.dynamics.max_speed,          1.0f  },
+    {"Max_Acc",  &tune.dynamics.max_acc,            10.0f },
+    {"MaxJerk",  &tune.dynamics.max_jerk,           100.0f},
+    {"MaxASpd",  &tune.dynamics.max_ang_speed,      0.1f  },
+    {"ReachRad", &tune.tracker.reach_radius,        1.0f  },
+    {"ReachMin", &tune.tracker.reach_radius_min,    0.5f  },
 };
 
 static constexpr int DICT_SIZE = sizeof(tune_dict) / sizeof(tune_dict[0]);     // 自动计算字典大小

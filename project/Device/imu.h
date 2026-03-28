@@ -15,6 +15,8 @@ private:
     float yaw_angle;         // 单位：deg (初始值为90度，表示初始车头朝向全局坐标系Y轴正方向)
     float gyro_z_dps;        // 单位：deg/s
     float gyro_z_offset;     // Z轴零偏 [单位：deg/s]
+
+    float last_gyro_z_dps;   // 上一周期的Z轴角速度 
 };
 
 

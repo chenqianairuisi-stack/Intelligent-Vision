@@ -1,7 +1,7 @@
 #pragma once
+#include "system_config.h"
 #include <cstdint>
 #include <cmath>
-#include "system_config.h"
 
 using namespace SystemConfig;
 

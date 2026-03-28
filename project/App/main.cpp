@@ -26,7 +26,12 @@ extern "C" int main(void) {
     interrupt_global_enable(0);               // 全局使能中断
 
 
+    vision_manager.request_map_ART1();
+    game_manager.set_phase(GamePhase::WAIT_FOR_VISION);
+
+    
     while(1) {
+        
         sys_menu.run();                       // 运行系统菜单
 
         // telemetry.receive_and_parse_task();   // 解析上位机命令
@@ -34,8 +39,7 @@ extern "C" int main(void) {
         
         vision_manager.update();              // 解析通信数据
 
-        // game_manager.update();                // 全局游戏状态轮询
-        
-        debug_manager.update();               // 调试用的游戏状态轮询（包含动画演示）
+        // game_manager.update();                // 游戏状态轮询
+        debug_manager.update();               // 游戏状态轮询（调试版）
     }
 }
