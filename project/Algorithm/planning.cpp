@@ -2,7 +2,6 @@
 
 __attribute__((section(".dtcm_data"))) sokoban solver;
 
-
 // 伪随机数生成器 (Xorshift)，用于生成 Zobrist 哈希用的随机数
 static uint32_t xor_state = 123456789;
 static uint32_t xorshift32() {
@@ -10,7 +9,6 @@ static uint32_t xorshift32() {
     return xor_state;
 }
 
-sokoban::sokoban() { }
 
 // 初始化游戏状态，加载地图、箱子、目标点和炸弹等信息
 bool sokoban::load_from_vision(const SokobanLevel& level) {
@@ -51,76 +49,76 @@ bool sokoban::load_from_vision(const SokobanLevel& level) {
 }
 
 
-// 启发式函数 (计算当前状态到通关的最小预估步数，必须小于等于实际步数才能保证最优解)  
-__attribute__((section(".ramfunc")))
-int sokoban::get_heuristic(const GameState& state) const {
-    if (state.num_boxes == 0) return 0; 
+// 求解器入口
+bool sokoban::solve() {
+    if (initial_state.num_boxes != initial_targets.size()) return false;
     
-    int min_h = 9999;
+    std::memset(TT, 0, sizeof(TT)); 
+    int threshold = get_heuristic(initial_state);  // IDA* 初始阈值设为启发函数的预估最小步数
+    StaticArray<point, MAX_PATH_LENGTH> rev_path;  // 反向路径，IDA*成功时会倒序存储从终点到起点的路径
 
-    // 初始化箱子排列索引
-    int p[MAX_BOXES];
-    for (int i = 0; i < state.num_boxes; ++i) p[i] = i;  
-
-    // 初始化目标点排列索引
-    int active_t_idx[MAX_BOXES];
-    int t_count = 0;
-    for (size_t i = 0; i < initial_targets.size(); ++i) {
-        if (state.target_mask & (1 << i)) active_t_idx[t_count++] = i;
-    }
-
-    if (t_count < state.num_boxes) return 9999; // 异常情况：目标比箱子少，不可能通关
-
-    // 因为箱子最多才4个，这里直接使用全排列 (4! = 24种情况)，找出把现存箱子推到现存目标的总距离最小的组合
-    do {
-        int current_h = 0;
-        for (int i = 0; i < state.num_boxes; ++i) {
-            int t_id = active_t_idx[p[i]];  // 根据当前的排列方案，给第 i 号箱子指派一个目标点 t_id
-            int dist = t_dist[t_id][state.box_y[i]][state.box_x[i]];  //目标点 t_id 到箱子 i 的距离
-            if (dist == -1) { current_h = 9999; break; }  // 如果某个箱子到目标不可达，这个组合作废
-            current_h += dist;
+    // IDA* 主循环：阈值逐渐增大，直到找到解或者超过 MAX_PATH_LENGTH
+    while (threshold <= MAX_PATH_LENGTH) {
+        int res = ida_star_search(initial_state, 0, 0, threshold, rev_path);
+        
+        // 找到答案
+        if (res == -1) { 
+            rev_path.push_back(initial_state.player);           // 加入起点
+            std::reverse(rev_path.begin(), rev_path.end());     // 倒序变为正序路径
+            final_path = rev_path;
+            return true;
         }
-        if (current_h < min_h) min_h = current_h;
-    } while (std::next_permutation(p, p + state.num_boxes));
-    
-    if (min_h >= 9999) return 9999; // 所有组合都不可达，说明死局了
-
-    // 加上人跑到离人最近的一个箱子的距离，使得启发函数更精准
-    int min_p_dist = 9999;
-    for (int i = 0; i < state.num_boxes; ++i) {
-        int d = std::abs(state.player.x - state.box_x[i]) + std::abs(state.player.y - state.box_y[i]) - 1;
-        if (d < 0) d = 0;
-        if (d < min_p_dist) min_p_dist = d;
+        if (res >= 9999) break;                                 // 无解
+        threshold = res;                                        // 用新的下界更新阈值
     }
-    if (min_p_dist != 9999) min_h += min_p_dist;
-    
-    return min_h;
+    return false;
 }
 
 
+//==========================================================================================================
+// ----------------------------------------------- 核心逻辑函数 ---------------------------------------------
+//==========================================================================================================
+
+
 // 全局变量，避免递归时频繁开辟内存
-static uint16_t bfs_visited[MAP_MAX_HEIGHT];  // 每行一个16位整数的位图，标记玩家在BFS中访问过哪些格子（1表示访问过，0表示未访问）
+static uint16_t bfs_visited_gen[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];  // 位图，标记玩家在BFS中访问过哪些格子
+static uint16_t current_gen = 0;  // 代数指针：每次BFS开始时+1，配合bfs_visited实现O(1)清空访问标记
 static point bfs_q[256];
 static int8_t bfs_dist[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
 
-// DFS函数：IDA* 算法的递归搜索部分 [g: 已走步数, threshold: 当前深度限制阈值]  
-// 使用了递归，移植到嵌入式上时应配置栈区大小，建议至少分配 32 KB 的栈空间！！！！！！！！！！！！！！！！！！！！！！
+// DFS函数：IDA* 算法的递归搜索部分 [g: 已走步数, threshold: 当前深度限制阈值] (建议至少分配 32 KB 的栈空间)
 __attribute__((section(".ramfunc")))
-int sokoban::dfs(GameState state, int g, int depth, int threshold, StaticArray<point, MAX_PATH_LENGTH>& path) {
-    
+int sokoban::ida_star_search(GameState state, int g, int depth, int threshold, StaticArray<point, MAX_PATH_LENGTH>& path) {
+    // 箱子全消失，返回-1作为成功标志
+    if (state.num_boxes == 0) return -1;  
+
+    // 置换表剪枝：如果之前搜索过一个哈希相同的状态，并且当时剩余的容错深度更大，说明当前分支不如之前的分支，剪掉
+    int remaining = threshold - g;
+    int tt_idx = state.hash & (TT_SIZE - 1);
+    uint16_t sig = (uint16_t)(state.hash >> 16);  // 提取特征码
+    if (TT[tt_idx].sig == sig && TT[tt_idx].remaining >= remaining) return threshold + 1;  // 特征码匹配且剩余容错更大，说明当前分支不如之前的分支，剪掉
+
+
+    // 启发式剪枝：如果当前状态的启发值已经超过阈值，说明这个分支不可能成功，返回启发值作为新的下界建议
     int h = get_heuristic(state);
-    if (h >= 9999) return 9999;     // 剪枝：死局
+    if (h >= 9999) {                // 剪枝：不可达或死锁状态
+        TT[tt_idx].sig = sig; TT[tt_idx].remaining = remaining;
+        return 9999;
+    }
     int f = g + h;
     if (f > threshold) return f;    // 剪枝：超过当前迭代的限制，返回新的阈值建议
-    
-    if (state.num_boxes == 0) return -1;  // 箱子全消失，返回-1作为成功标志
+
 
     // ---------- 宏操作第一步：BFS搜索玩家能到达的所有空地 ----------
-    std::memset(bfs_visited, 0, sizeof(bfs_visited));
+    current_gen++;  // 代数指针+1，等效于瞬间 memset 清空整个数组
+    if (current_gen == 0) { 
+        std::memset(bfs_visited_gen, 0, sizeof(bfs_visited_gen));
+        current_gen = 1;
+    }
+
     int head = 0, tail = 0;
-    
     bfs_q[tail++] = state.player;
-    bfs_visited[state.player.y] |= (1 << state.player.x);
+    bfs_visited_gen[state.player.y][state.player.x] = current_gen;
     bfs_dist[state.player.y][state.player.x] = 0;
     point canon_player = state.player;  // 规范化玩家位置（连通区内左下角的坐标，用于消除同构状态）
 
@@ -133,9 +131,9 @@ int sokoban::dfs(GameState state, int g, int depth, int threshold, StaticArray<p
         for(int dir = 0; dir < 4; ++dir) {
             point np = curr + MOVE[dir];
             if(np.x >= 0 && np.x < MAP_MAX_WIDTH && np.y >= 0 && np.y < MAP_MAX_HEIGHT) {
-                if(!(bfs_visited[np.y] & (1 << np.x)) && map[np.y][np.x] != 1 && !is_bomb(np)) {
+                if(!(bfs_visited_gen[np.y][np.x] == current_gen) && map[np.y][np.x] != 1 && !is_bomb(np)) {
                     if(find_box_id(state, np) == -1) {   
-                        bfs_visited[np.y] |= (1 << np.x);
+                        bfs_visited_gen[np.y][np.x] = current_gen;
                         bfs_dist[np.y][np.x] = bfs_dist[curr.y][curr.x] + 1;
                         bfs_q[tail++] = np;
                     }
@@ -153,11 +151,6 @@ int sokoban::dfs(GameState state, int g, int depth, int threshold, StaticArray<p
     }
     path_hashes[depth] = canon_hash;
 
-    // 置换表(TT)查表剪枝：如果以前遍历过这个状态，并且当时允许的步数(剩余容错)比现在大，说明当前分支没前途，直接剪掉
-    int remaining = threshold - g;
-    int tt_idx = state.hash & (TT_SIZE - 1);
-    uint16_t sig = (uint16_t)(state.hash >> 16);  // 提取特征码
-    if (TT[tt_idx].sig == sig && TT[tt_idx].remaining >= remaining) return threshold + 1;  // 特征码匹配且剩余容错更大，说明当前分支不如之前的分支，剪掉
 
     auto is_active_target = [&](point p, int& out_idx) {
         for (size_t t = 0; t < initial_targets.size(); ++t) {
@@ -168,13 +161,21 @@ int sokoban::dfs(GameState state, int g, int depth, int threshold, StaticArray<p
         return false;
     };
 
+    auto is_tunnel = [&](point p, int d) {
+        if (MOVE[d].x == 0) {
+            bool left_wall = (p.x - 1 < 0) || (map[p.y][p.x - 1] == 1);
+            bool right_wall = (p.x + 1 >= MAP_MAX_WIDTH) || (map[p.y][p.x + 1] == 1);
+            return left_wall && right_wall;
+        } else {
+            bool up_wall = (p.y - 1 < 0) || (map[p.y - 1][p.x] == 1);
+            bool down_wall = (p.y + 1 >= MAP_MAX_HEIGHT) || (map[p.y + 1][p.x] == 1);
+            return up_wall && down_wall;
+        }
+    };
+
     // ---------- 宏操作第二步：寻找有哪些可以执行的推箱子动作 ----------
     struct TinyMove {
-        uint16_t box_idx   : 3; // 0-7   (占 3 bits)
-        uint16_t dir       : 2; // 0-3   (占 2 bits)
-        uint16_t is_double : 1; // 0或1  (占 1 bit)
-        uint16_t box2_idx  : 3; // 0-7   (占 3 bits)
-        uint16_t walk_dist : 7; // 0-127 (占 7 bits, 共16 bits)
+        uint8_t box_idx, dir, is_double, box2_idx, walk_dist, slide_dist;
     };
     TinyMove moves[24]; 
     int num_moves = 0;
@@ -186,7 +187,7 @@ int sokoban::dfs(GameState state, int g, int depth, int threshold, StaticArray<p
             // 确保人能站过去
             point push_from = box_pos - MOVE[dir]; // 推箱子时人站的位置
             if (push_from.x >= 0 && push_from.x < MAP_MAX_WIDTH && push_from.y >= 0 && push_from.y < MAP_MAX_HEIGHT) {
-                if (bfs_visited[push_from.y] & (1 << push_from.x)) {
+                if (bfs_visited_gen[push_from.y][push_from.x] == current_gen) {
                     // 检查推箱子后的位置是否合法
                     point push_to = box_pos + MOVE[dir]; // 箱子要被推到的位置
                     if (push_to.x < 0 || push_to.x >= MAP_MAX_WIDTH || push_to.y < 0 || push_to.y >= MAP_MAX_HEIGHT) continue;
@@ -195,14 +196,25 @@ int sokoban::dfs(GameState state, int g, int depth, int threshold, StaticArray<p
                     int b2 = find_box_id(state, push_to);
                     int dummy_t;
                     if (b2 == -1) {
+                        // 推一个箱子的情况，支持连推：如果推到的位置是个通道，并且后面没有箱子了，可以继续被推
+                        point final_push_to = push_to;
+                        int slide_dist = 0;
+                        while (is_tunnel(final_push_to, dir) && !is_active_target(final_push_to, dummy_t)) {
+                            point next_p = final_push_to + MOVE[dir];
+                            if (next_p.x < 0 || next_p.x >= MAP_MAX_WIDTH || next_p.y < 0 || next_p.y >= MAP_MAX_HEIGHT) break;
+                            if (map[next_p.y][next_p.x] == 1 || is_bomb(next_p) || find_box_id(state, next_p) != -1) break; 
+                            final_push_to = next_p;
+                            slide_dist++;
+                        }
                         // 【剪枝】推过去如果是个死角且不是目标点，则不允许推
                         if (is_dead[push_to.y][push_to.x] && !is_active_target(push_to, dummy_t)) continue; 
+                        
                         if (num_moves < 24) moves[num_moves++] = {
-                            static_cast<uint16_t>(i),
-                            static_cast<uint16_t>(dir),
-                            static_cast<uint16_t>(0),
-                            static_cast<uint16_t>(0),
-                            static_cast<uint16_t>(static_cast<uint8_t>(bfs_dist[push_from.y][push_from.x]))
+                            static_cast<uint8_t>(i),
+                            static_cast<uint8_t>(dir),
+                            static_cast<uint8_t>(0),
+                            static_cast<uint8_t>(0),
+                            static_cast<uint8_t>(static_cast<uint8_t>(bfs_dist[push_from.y][push_from.x]))
                         };
                     } else {
                         // 推两个箱子的情况（支持连推）
@@ -213,11 +225,11 @@ int sokoban::dfs(GameState state, int g, int depth, int threshold, StaticArray<p
                             if (is_dead[push_to.y][push_to.x] && !is_active_target(push_to, dummy_t)) continue;
                             if (is_dead[push_to_2.y][push_to_2.x] && !is_active_target(push_to_2, dummy_t)) continue;
                             if (num_moves < 24) moves[num_moves++] = {
-                                static_cast<uint16_t>(i),
-                                static_cast<uint16_t>(dir),
-                                static_cast<uint16_t>(1),
-                                static_cast<uint16_t>(b2),
-                                static_cast<uint16_t>(static_cast<uint8_t>(bfs_dist[push_from.y][push_from.x]))
+                                static_cast<uint8_t>(i),
+                                static_cast<uint8_t>(dir),
+                                static_cast<uint8_t>(1),
+                                static_cast<uint8_t>(b2),
+                                static_cast<uint8_t>(static_cast<uint8_t>(bfs_dist[push_from.y][push_from.x]))
                             };
                         }
                     }
@@ -235,18 +247,22 @@ int sokoban::dfs(GameState state, int g, int depth, int threshold, StaticArray<p
         point push_from = box_pos - MOVE[mv.dir];
         point push_to = box_pos + MOVE[mv.dir];
 
+        if (mv.slide_dist > 0) {
+            push_to.x += MOVE[mv.dir].x * mv.slide_dist;
+            push_to.y += MOVE[mv.dir].y * mv.slide_dist;
+        }
+
         GameState next_state = state;
-        next_state.player = box_pos; // 推完后，人走到了原来箱子的位置
+        next_state.player = push_to - MOVE[mv.dir]; 
         
         int new_box_count = 0;
-        int8_t new_bx[MAX_BOXES];
-        int8_t new_by[MAX_BOXES];
+        int8_t new_bx[MAX_BOXES], new_by[MAX_BOXES];
         uint8_t new_target_mask = state.target_mask;
         uint32_t new_hash = state.hash;
         
         // 抠掉旧的玩家位置并加上新的玩家位置哈希(原箱子处)
         new_hash ^= ZOBRIST_PLAYER[state.player.y][state.player.x];
-        new_hash ^= ZOBRIST_PLAYER[box_pos.y][box_pos.x];
+        new_hash ^= ZOBRIST_PLAYER[next_state.player.y][next_state.player.x];
 
         // 高效重组剩余的箱子(若到终点自动剔除)
         for (int i = 0; i < state.num_boxes; ++i) {
@@ -284,16 +300,18 @@ int sokoban::dfs(GameState state, int g, int depth, int threshold, StaticArray<p
         }
 
         int step_cost = mv.walk_dist + 1; // 走到推点距离 + 1下推的动作
-        int res = dfs(next_state, g + step_cost, depth + 1, threshold, path);
+        int res = ida_star_search(next_state, g + step_cost, depth + 1, threshold, path);
         
         if (res == -1) { 
             // 如果成功找到解，利用当前BFS访问记录，反推出从原点走到推箱子点的精确路径
-            std::memset(bfs_visited, 0, sizeof(bfs_visited));
+            current_gen++;
+            if(current_gen == 0) { std::memset(bfs_visited_gen, 0, sizeof(bfs_visited_gen)); current_gen = 1; }
+            
             int h2 = 0, t2 = 0;
             static point temp_parent[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
             
             bfs_q[t2++] = state.player;
-            bfs_visited[state.player.y] |= (1 << state.player.x);
+            bfs_visited_gen[state.player.y][state.player.x] = current_gen;
             
             while(h2 < t2) {
                 point curr = bfs_q[h2++];
@@ -301,9 +319,9 @@ int sokoban::dfs(GameState state, int g, int depth, int threshold, StaticArray<p
                 for(int d2 = 0; d2 < 4; ++d2) {
                     point np = curr + MOVE[d2];
                     if(np.x >= 0 && np.x < MAP_MAX_WIDTH && np.y >= 0 && np.y < MAP_MAX_HEIGHT) {
-                        if(!(bfs_visited[np.y] & (1 << np.x)) && map[np.y][np.x] != 1 && !is_bomb(np)) {
+                        if(bfs_visited_gen[np.y][np.x] != current_gen && map[np.y][np.x] != 1 && !is_bomb(np)) {
                             if(find_box_id(state, np) == -1) {
-                                bfs_visited[np.y] |= (1 << np.x);
+                                bfs_visited_gen[np.y][np.x] = current_gen;
                                 temp_parent[np.y][np.x] = curr;
                                 bfs_q[t2++] = np;
                             }
@@ -311,8 +329,14 @@ int sokoban::dfs(GameState state, int g, int depth, int threshold, StaticArray<p
                     }
                 }
             }
+
+            for (int s = mv.slide_dist; s >= 0; --s) {
+                point step_p;
+                step_p.x = box_pos.x + MOVE[mv.dir].x * s;
+                step_p.y = box_pos.y + MOVE[mv.dir].y * s;
+                path.push_back(step_p);
+            }
             
-            path.push_back(box_pos); 
             point walk = push_from;
             while (walk != state.player) {
                 path.push_back(walk);
@@ -330,36 +354,10 @@ int sokoban::dfs(GameState state, int g, int depth, int threshold, StaticArray<p
     return min_next_threshold;
 }
 
-// 求解器入口
-bool sokoban::solve() {
-    if (initial_state.num_boxes != initial_targets.size()) return false;
-    
-    std::memset(TT, 0, sizeof(TT)); 
-    int threshold = get_heuristic(initial_state); // IDA* 初始阈值设为启发函数的预估最小步数
-    StaticArray<point, MAX_PATH_LENGTH> rev_path;
-    rev_path.reserve(MAX_PATH_LENGTH);  // 预先分配足够的空间，避免递归过程中频繁扩容带来的性能损失
 
-    // IDA* 主循环：阈值逐渐增大，直到找到解或者超过 MAX_PATH_LENGTH
-    while (threshold <= MAX_PATH_LENGTH) {
-        int res = dfs(initial_state, 0, 0, threshold, rev_path);
-        
-        // 找到答案
-        if (res == -1) { 
-            rev_path.push_back(initial_state.player);           // 加入起点
-            std::reverse(rev_path.begin(), rev_path.end());     // 倒序变为正序路径
-            final_path = rev_path;
-            return true;
-        }
-        if (res >= 9999) break;                                 // 无解
-        threshold = res;                                        // 用新的下界更新阈值
-    }
-    return false;
-}
-
-
-
-
+//==========================================================================================================
 // ------------------------------------------------ 辅助函数 ------------------------------------------------
+//==========================================================================================================
 
 
 // 初始化 Zobrist 哈希表，给每一个可能的状态分配一个固定的随机数
@@ -373,8 +371,7 @@ void sokoban::init_zobrist() {
 }
 
 // 计算当前状态的哈希值（用于查表排重）
-__attribute__((section(".ramfunc")))
-uint32_t sokoban::compute_hash(const GameState& state) const {
+__attribute__((section(".ramfunc"))) uint32_t sokoban::compute_hash(const GameState& state) const {
     uint32_t h = 0;
     for (int i = 0; i < state.num_boxes; ++i) h ^= ZOBRIST_BOX[state.box_y[i]][state.box_x[i]];
     h ^= ZOBRIST_PLAYER[state.player.y][state.player.x];
@@ -385,22 +382,99 @@ uint32_t sokoban::compute_hash(const GameState& state) const {
     return h;
 }
 
+// 启发式函数 (计算当前状态到通关的最小预估步数，必须小于等于实际步数才能保证最优解)  
+__attribute__((section(".ramfunc"))) int sokoban::get_heuristic(const GameState& state) const {
+    if (state.num_boxes == 0) return 0; 
+    
+    int min_h = 9999;
+
+    // 初始化箱子排列索引
+    int p[MAX_BOXES];
+    for (int i = 0; i < state.num_boxes; ++i) p[i] = i;  
+
+    // 初始化目标点排列索引
+    int active_t_idx[MAX_BOXES];
+    int t_count = 0;
+    for (size_t i = 0; i < initial_targets.size(); ++i) {
+        if (state.target_mask & (1 << i)) active_t_idx[t_count++] = i;
+    }
+    if (t_count < state.num_boxes) return 9999;  // 异常情况：目标比箱子少，不可能通关
+
+    // 因为箱子最多才4个，这里直接使用全排列 (4! = 24种情况)，找出把现存箱子推到现存目标的总距离最小的组合
+    do {
+        int current_h = 0;
+        for (int i = 0; i < state.num_boxes; ++i) {
+            int t_id = active_t_idx[p[i]];  // 根据当前的排列方案，给第 i 号箱子指派一个目标点 t_id
+            int dist = t_dist[t_id][state.box_y[i]][state.box_x[i]];  //目标点 t_id 到箱子 i 的距离
+            if (dist == -1) { current_h = 9999; break; }  // 如果某个箱子到目标不可达，这个组合作废
+            current_h += dist;
+        }
+        if (current_h < min_h) min_h = current_h;
+    } while (std::next_permutation(p, p + state.num_boxes));
+    
+    if (min_h >= 9999) return 9999;  // 所有组合都不可达，死局
+
+    // 加上人跑到离人最近的一个箱子的距离，使得启发函数更精准
+    int min_p_dist = 9999;
+    for (int i = 0; i < state.num_boxes; ++i) {
+        int d = std::abs(state.player.x - state.box_x[i]) + std::abs(state.player.y - state.box_y[i]) - 1;
+        if (d < 0) d = 0;
+        if (d < min_p_dist) min_p_dist = d;
+    }
+    if (min_p_dist != 9999) min_h += min_p_dist;
+    
+    return min_h;
+}
+
 // 静态死锁检测预处理
 void sokoban::precompute_deadlocks() {
-    std::memset(is_dead, 0, sizeof(is_dead));
-    for (int y = 0; y < MAP_MAX_HEIGHT; ++y) {
-        for (int x = 0; x < MAP_MAX_WIDTH; ++x) {
-            if (map[y][x] == 1) continue; // 是墙不用管
-            // 检查上下左右是否有墙
-            bool up = (y + 1 < MAP_MAX_HEIGHT) && (map[y+1][x] == 1);
-            bool down = (y - 1 >= 0) && (map[y-1][x] == 1);
-            bool left = (x - 1 >= 0) && (map[y][x-1] == 1);
-            bool right = (x + 1 < MAP_MAX_WIDTH) && (map[y][x+1] == 1);
-            // 如果一个非墙的格子，(上或下有墙) 且 (左或右有墙)，那它就是一个死角(Corner Deadlock)
-            if ((up || down) && (left || right)) is_dead[y][x] = true;
+    std::memset(is_dead, true, sizeof(is_dead)); 
+    
+    point q[MAP_MAX_WIDTH * MAP_MAX_HEIGHT];
+    int head = 0, tail = 0;
+
+    for (size_t i = 0; i < initial_targets.size(); ++i) {
+        point t = initial_targets[i];
+        is_dead[t.y][t.x] = false;
+        q[tail++] = t;
+    }
+
+    while (head < tail) {
+        point curr = q[head++];
+        
+        for (int dir = 0; dir < 4; ++dir) {
+            point box_prev = curr - MOVE[dir];
+            point player_prev = curr - MOVE[dir] - MOVE[dir]; 
+            
+            if (box_prev.x < 0 || box_prev.x >= MAP_MAX_WIDTH || box_prev.y < 0 || box_prev.y >= MAP_MAX_HEIGHT) continue;
+            if (player_prev.x < 0 || player_prev.x >= MAP_MAX_WIDTH || player_prev.y < 0 || player_prev.y >= MAP_MAX_HEIGHT) continue;
+            
+            if (map[box_prev.y][box_prev.x] != 1 && !is_bomb(box_prev) &&
+                map[player_prev.y][player_prev.x] != 1 && !is_bomb(player_prev)) {
+                
+                if (is_dead[box_prev.y][box_prev.x]) {
+                    is_dead[box_prev.y][box_prev.x] = false; 
+                    q[tail++] = box_prev;
+                }
+            }
         }
     }
 }
+// void sokoban::precompute_deadlocks() {
+//     std::memset(is_dead, 0, sizeof(is_dead));
+//     for (int y = 0; y < MAP_MAX_HEIGHT; ++y) {
+//         for (int x = 0; x < MAP_MAX_WIDTH; ++x) {
+//             if (map[y][x] == 1) continue; // 是墙不用管
+//             // 检查上下左右是否有墙
+//             bool up = (y + 1 < MAP_MAX_HEIGHT) && (map[y+1][x] == 1);
+//             bool down = (y - 1 >= 0) && (map[y-1][x] == 1);
+//             bool left = (x - 1 >= 0) && (map[y][x-1] == 1);
+//             bool right = (x + 1 < MAP_MAX_WIDTH) && (map[y][x+1] == 1);
+//             // 如果一个非墙的格子，(上或下有墙) 且 (左或右有墙)，那它就是一个死角(Corner Deadlock)
+//             if ((up || down) && (left || right)) is_dead[y][x] = true;
+//         }
+//     }
+// }
 
 // 反向 BFS: 获取任意空地到每个目标点的最短距离     //？可达？
 void sokoban::precompute_target_distances() {
@@ -431,12 +505,12 @@ void sokoban::precompute_target_distances() {
 }
 
 
-bool sokoban::is_bomb(point p) const {
+inline bool sokoban::is_bomb(point p) const {
     for (const auto& b : initial_bombs) if (b == p) return true;
     return false;
 }
 
-int sokoban::find_box_id(const GameState& state, point p) const {
+inline int sokoban::find_box_id(const GameState& state, point p) const {
     for (int i = 0; i < state.num_boxes; ++i)
         if (state.box_x[i] == p.x && state.box_y[i] == p.y) return i;
     return -1;

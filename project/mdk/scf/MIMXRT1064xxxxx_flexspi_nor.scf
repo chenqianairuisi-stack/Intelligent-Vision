@@ -97,7 +97,7 @@
 #if (defined(__stack_size__))
   #define Stack_Size                   __stack_size__
 #else
-  #define Stack_Size                   0x2000
+  #define Stack_Size                   0x8000
 #endif
 
 #if (defined(__heap_size__))

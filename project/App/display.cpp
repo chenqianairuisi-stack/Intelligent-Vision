@@ -55,7 +55,7 @@ void TftMenu::init() {
     tft180_set_font(TFT180_6X8_FONT);                // 设置字库
     tft180_set_color(RGB565_BLACK, RGB565_WHITE);     // 白底黑字
     tft180_init();
-
+    
     tft180_full(RGB565_WHITE);
     system_delay_ms(50);                             // 延时确保初始化完成
 }

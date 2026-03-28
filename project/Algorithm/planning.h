@@ -46,14 +46,13 @@ struct TTEntry {
 
 class sokoban {
 public:
-    sokoban();
-
-    bool load_from_vision(const SokobanLevel& level);
-    const StaticArray<point, MAX_PATH_LENGTH>& get_result_path() const { return final_path; }
+    sokoban() = default;
 
     bool solve();  
 
-protected:
+    bool load_from_vision(const SokobanLevel& level);
+    const StaticArray<point, MAX_PATH_LENGTH>& get_result_path() const { return final_path; }
+private:
     std::array<std::array<int8_t, MAP_MAX_WIDTH>, MAP_MAX_HEIGHT> map{};  // 静态地图：0空地, 1墙, 2目标
     point player_start;
     StaticArray<point, MAX_BOMBS> initial_bombs;        // 炸弹位置
@@ -74,16 +73,16 @@ protected:
     int16_t t_dist[MAX_BOXES][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];  // 启发式表：记录地图上任意一点到各个目标点的最短距离
 
     void init_zobrist();
+    uint32_t compute_hash(const GameState& state) const;
+    int get_heuristic(const GameState& state) const;  
     void precompute_deadlocks();
     void precompute_target_distances();
     
-    uint32_t compute_hash(const GameState& state) const;
-    int get_heuristic(const GameState& state) const;       
-    int find_box_id(const GameState& state, point p) const;
-    bool is_bomb(point p) const;
+    inline int find_box_id(const GameState& state, point p) const;
+    inline bool is_bomb(point p) const;
 
-    // 核心搜索函数：IDA* 的递归实现（其实更应该叫 ida_star_search）
-    int dfs(GameState state, int g, int depth, int threshold, StaticArray<point, MAX_PATH_LENGTH>& path);
+    // 核心搜索函数：IDA* 的递归实现
+    int ida_star_search(GameState state, int g, int depth, int threshold, StaticArray<point, MAX_PATH_LENGTH>& path);
 };
 
 extern sokoban solver;
