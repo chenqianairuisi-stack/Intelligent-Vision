@@ -9,7 +9,6 @@ static uint32_t xorshift32() {
     return xor_state;
 }
 
-
 // 初始化游戏状态，加载地图、箱子、目标点和炸弹等信息
 bool sokoban::load_from_vision(const SokobanLevel& level) {
     // 初始化小车位置
@@ -426,7 +425,7 @@ __attribute__((section(".ramfunc"))) int sokoban::get_heuristic(const GameState&
     return min_h;
 }
 
-// 静态死锁检测预处理
+// 预处理：死锁检测
 void sokoban::precompute_deadlocks() {
     std::memset(is_dead, true, sizeof(is_dead)); 
     
@@ -460,23 +459,9 @@ void sokoban::precompute_deadlocks() {
         }
     }
 }
-// void sokoban::precompute_deadlocks() {
-//     std::memset(is_dead, 0, sizeof(is_dead));
-//     for (int y = 0; y < MAP_MAX_HEIGHT; ++y) {
-//         for (int x = 0; x < MAP_MAX_WIDTH; ++x) {
-//             if (map[y][x] == 1) continue; // 是墙不用管
-//             // 检查上下左右是否有墙
-//             bool up = (y + 1 < MAP_MAX_HEIGHT) && (map[y+1][x] == 1);
-//             bool down = (y - 1 >= 0) && (map[y-1][x] == 1);
-//             bool left = (x - 1 >= 0) && (map[y][x-1] == 1);
-//             bool right = (x + 1 < MAP_MAX_WIDTH) && (map[y][x+1] == 1);
-//             // 如果一个非墙的格子，(上或下有墙) 且 (左或右有墙)，那它就是一个死角(Corner Deadlock)
-//             if ((up || down) && (left || right)) is_dead[y][x] = true;
-//         }
-//     }
-// }
 
-// 反向 BFS: 获取任意空地到每个目标点的最短距离     //？可达？
+
+// 预处理：计算每个目标点到地图上每个格子的最短距离（考虑墙和炸弹，但不考虑箱子）
 void sokoban::precompute_target_distances() {
     std::memset(t_dist, -1, sizeof(t_dist));
     for (size_t i = 0; i < initial_targets.size(); ++i) {

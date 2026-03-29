@@ -381,12 +381,47 @@
       </TargetOption>
       <Groups>
         <Group>
+          <GroupName>Core</GroupName>
+          <Files>
+            <File>
+              <FileName>isr.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\Core\isr.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>system_config.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\system_config.h</FilePath>
+            </File>
+            <File>
+              <FileName>tuning_config.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\tuning_config.h</FilePath>
+            </File>
+            <File>
+              <FileName>code_headfile.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\code_headfile.h</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
           <GroupName>App</GroupName>
           <Files>
             <File>
               <FileName>main.cpp</FileName>
               <FileType>8</FileType>
               <FilePath>..\App\main.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>scheduler.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\App\scheduler.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>scheduler.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\App\scheduler.h</FilePath>
             </File>
             <File>
               <FileName>game_manage.cpp</FileName>
@@ -399,16 +434,6 @@
               <FilePath>..\App\game_manage.h</FilePath>
             </File>
             <File>
-              <FileName>task_vision.cpp</FileName>
-              <FileType>8</FileType>
-              <FilePath>..\App\task_vision.cpp</FilePath>
-            </File>
-            <File>
-              <FileName>task_vision.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\App\task_vision.h</FilePath>
-            </File>
-            <File>
               <FileName>task_control.cpp</FileName>
               <FileType>8</FileType>
               <FilePath>..\App\task_control.cpp</FilePath>
@@ -417,6 +442,16 @@
               <FileName>task_control.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\App\task_control.h</FilePath>
+            </File>
+            <File>
+              <FileName>task_vision.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\App\task_vision.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>task_vision.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\App\task_vision.h</FilePath>
             </File>
             <File>
               <FileName>telemetry.cpp</FileName>
@@ -557,31 +592,6 @@
               <FileName>storage.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\Device\storage.h</FilePath>
-            </File>
-          </Files>
-        </Group>
-        <Group>
-          <GroupName>Core</GroupName>
-          <Files>
-            <File>
-              <FileName>system_config.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Core\system_config.h</FilePath>
-            </File>
-            <File>
-              <FileName>code_headfile.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Core\code_headfile.h</FilePath>
-            </File>
-            <File>
-              <FileName>isr.cpp</FileName>
-              <FileType>8</FileType>
-              <FilePath>..\Core\isr.cpp</FilePath>
-            </File>
-            <File>
-              <FileName>tuning_config.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Core\tuning_config.h</FilePath>
             </File>
           </Files>
         </Group>

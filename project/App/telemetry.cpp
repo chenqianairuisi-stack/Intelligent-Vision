@@ -1,6 +1,7 @@
 #include "zf_common_headfile.h"
 #include "telemetry.h"
 #include "task_control.h" 
+#include "task_vision.h"
 #include "odometry.h"
 #include "encoder.h"
 #include "imu.h"
@@ -9,7 +10,6 @@
 #include <cmath>
 
 Telemetry telemetry;
-float speed_y_debug = 0.0f;       // 用于调试的全局变量，可以通过上位机命令修改，观察对实际速度的影响
 float planned_v_debug = 0.0f;     // 当前规划的速度大小，供 telemetry 模块发送波形数据
 
 char last_rx_cmd[32] = "WAITING CMD...";
@@ -37,8 +37,8 @@ void Telemetry::send_wave_data() {
     float avg_speed_mag = std::sqrt(avg_speed.vx * avg_speed.vx + avg_speed.vy * avg_speed.vy);
 
     // 填充数据通道
-    tx_packet.target_v = planned_v_debug;            // 梯形规划的当前速度
-    tx_packet.actual_v = avg_speed_mag;              // 轮子实际反馈
+    tx_packet.target_v = planned_v_debug;            // 梯形规划的当前标量速度
+    tx_packet.actual_v = avg_speed_mag;              // 轮子实际反馈速度
     tx_packet.target_x = target_pos.x;               // 目标点 X
     tx_packet.actual_x = current_pos.x;              // 实际里程计 X
     tx_packet.target_y = target_pos.y;               // 目标点 Y
@@ -80,18 +80,7 @@ void Telemetry::receive_and_parse_task() {
 }
 
 
-// ---------------- 解析规则 ----------------
-// "!SP 1.5"   -> 设定速度环 Kp = 1.5
-// "!SI 0.05"  -> 设定速度环 Ki = 0.05
-// "!SV 80"    -> 设定最大速度为 80 cm/s
-// "!SA 30"    -> 设定最大加速度为 30 cm/s^2
-// "!MW 40"    -> 调试指令：前进 40cm（绝对移动，车头朝向不变）
-// "!MA 40"    -> 调试指令：向左 40cm（绝对移动，车头朝向不变）
-// "!MD 40"    -> 调试指令：向右 40cm（绝对移动，车头朝向不变）
-// "!MS 40"    -> 调试指令：后退 40cm（绝对移动，车头朝向不变）
-// "!MT 90"    -> 调试指令：转向 90 度（逆时针为正）
-// "!MV 40"    -> 调试指令：向相对前方以 40cm/s 的速度移动
-// "!SS"       -> 调试指令：紧急停车 (把当前位置设为目标点)
+// 解析并执行上位机发来的字符串命令 (格式示例: "!S Q 1.5" 表示设置速度环 KP=1.5)
 void Telemetry::execute_command(const char* cmd) {
 
     if (cmd[0] != '!') return;     // 命令必须以 ! 开头
@@ -103,45 +92,41 @@ void Telemetry::execute_command(const char* cmd) {
     float cur_yaw_deg = imu_sensor.get_yaw();
 
     switch (type) {
-        case 'S':  // 设置参数类命令
+        case 'S':  // 参数设置指令
             switch (sub) {
-                case 'P': tune.pid_speed.kp = value; break;
-                case 'I': tune.pid_speed.ki = value; break;
-                case 'V': tune.dynamics.max_speed = value; break;
-                case 'A': tune.dynamics.max_acc = value; break;
-                case 'S': {
-                    // 紧急停止 (原地驻车)
-                    Pose2D stop_target = { cur_pos.x, cur_pos.y, cur_yaw_deg };
-                    chassis_task.set_target_pose(stop_target);
-                    break;
-                }
+                case 'Q': tune.pid_speed.kp = value; break;
+                case 'W': tune.pid_speed.ki = value; break;
+                case 'E': tune.pid_yaw.kp = value; break;
+                case 'R': tune.pid_yaw.kd = value; break;
+                case 'A': tune.dynamics.max_speed = value; break;
+                case 'S': tune.dynamics.max_acc = value; break;
+                case 'D': tune.dynamics.max_jerk = value; break;
+                case 'F': tune.dynamics.max_ang_speed = value; break;
+                case 'Z': tune.tracker.reach_radius = value; break;
+                case 'X': tune.tracker.reach_radius_min = value; break;
+                default: return;
+            }
+            break;
+        
+        case 'C':  // 视觉控制类指令
+            switch (sub) {
+                case 'M': vision_manager.request_map_ART1();  break;
+                case 'P': vision_manager.request_pose_ART1(); break;
+                case 'T': vision_manager.trigger_ART2(true);  break;
             }
             break;
 
-        case 'M': {  // 移动类命令
+        case 'M': {  // 移动类指令
             Pose2D target = { cur_pos.x, cur_pos.y, cur_yaw_deg };
 
             switch (sub) {
-                case 'W':  // 前进 (绝对坐标系 +Y 方向)
-                    target.y += value;
-                    break;
-                case 'S':  // 后退 (绝对坐标系 -Y 方向)
-                    target.y -= value;
-                    break;
-                case 'A':  // 向左 (绝对坐标系 -X 方向)
-                    target.x -= value;
-                    break;
-                case 'D':  // 向右 (绝对坐标系 +X 方向)
-                    target.x += value;
-                    break;
-                case 'T':  // 转向 (逆时针为正)
-                    target.yaw = cur_yaw_deg + value;
-                    break;
-                case 'V':  // 速度移动
-                    speed_y_debug = value;
-                    break;
-                default:
-                    return;
+                case 'W': target.y += value; break;                  // 前进 (绝对坐标系 +Y 方向)
+                case 'S': target.y -= value; break;                  // 后退 (绝对坐标系 -Y 方向)
+                case 'A': target.x -= value; break;                  // 向左 (绝对坐标系 -X 方向)
+                case 'D': target.x += value; break;                  // 向右 (绝对坐标系 +X 方向)
+                case 'T': target.yaw = cur_yaw_deg + value; break;   // 转向 (逆时针为正)
+                case 'M': target = { cur_pos.x, cur_pos.y, cur_yaw_deg }; break;
+                default: return;
             }
             chassis_task.set_target_pose(target);
             break;

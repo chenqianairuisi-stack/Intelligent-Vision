@@ -12,11 +12,10 @@ struct EncoderHWConfig {
 // 集中配置字典，方便统一管理和修改编码器的硬件连接和极性
 static constexpr EncoderHWConfig ENC_CONFIGS[4] = {
     // 轮位映射：按照顺序，分别对应 LF, LB, RF, RB
-    { QTIMER1_ENCODER1, QTIMER1_ENCODER1_CH1_C0,  QTIMER1_ENCODER1_CH2_C1,   1 },
-    { QTIMER2_ENCODER2, QTIMER2_ENCODER2_CH1_C5,  QTIMER2_ENCODER2_CH2_C25,  1 },
-    { QTIMER2_ENCODER1, QTIMER2_ENCODER1_CH1_C3,  QTIMER2_ENCODER1_CH2_C4,  -1 }, 
-    { QTIMER1_ENCODER2, QTIMER1_ENCODER2_CH1_C2,  QTIMER1_ENCODER2_CH2_C24, -1 }
-    
+    { QTIMER1_ENCODER2, QTIMER1_ENCODER2_CH1_C2,  QTIMER1_ENCODER2_CH2_C24,  1 },
+    { QTIMER2_ENCODER1, QTIMER2_ENCODER1_CH1_C3,  QTIMER2_ENCODER1_CH2_C4,   1 }, 
+    { QTIMER2_ENCODER2, QTIMER2_ENCODER2_CH1_C5,  QTIMER2_ENCODER2_CH2_C25, -1 },
+    { QTIMER1_ENCODER1, QTIMER1_ENCODER1_CH1_C0,  QTIMER1_ENCODER1_CH2_C1,  -1 },
 };
 
 
@@ -32,7 +31,7 @@ void EncoderArray::init() {
 }
 
 
-// 更新所有编码器的计数值，并清零计数器 (中断服务函数调用)
+// 更新所有编码器的计数值
 __attribute__((section(".ramfunc"))) void EncoderArray::update_encoders_20ms_tick() {
     
     for (int i = 0; i < 4; ++i) {

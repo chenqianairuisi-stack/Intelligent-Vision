@@ -1,5 +1,6 @@
 #include "game_manage.h"
 #include "task_control.h"
+#include "scheduler.h"
 #include "odometry.h"
 #include "imu.h"
 #include <cmath>
@@ -115,11 +116,6 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
 __attribute__((section(".dtcm_data"))) DebugGameManager debug_manager;
 DebugGameManager::DebugGameManager() : GameManager(), plan_time_ms(0) {}
 
-// 计时器初始化
-void DebugGameManager::timer_init() {
-    ::timer_init(GPT_TIM_1, TIMER_MS);
-}
-
 
 // 核心：多态拦截器
 // 拦截机制：只拦截 PLAN_SOKOBAN 和 ANIMATE_DEMO，其他所有状态（如 INIT, EXIT, EXEC 等），全部甩给基类 GameManager 处理
@@ -128,10 +124,9 @@ __attribute__((section(".ramfunc"))) void DebugGameManager::update() {
     switch (phase) {  
         case GamePhase::PLAN_SOKOBAN: {
             // 开始规划并记录时间
-            timer_clear(GPT_TIM_1);
-            timer_start(GPT_TIM_1);
+            uint32_t start_time = TaskScheduler::get_sys_tick_ms();
             bool success = solver.solve(); 
-            plan_time_ms = timer_get(GPT_TIM_1);
+            plan_time_ms = TaskScheduler::get_sys_tick_ms() - start_time;
 
             if (success) {
                 // 拦截成功，不立刻发车，而是初始化动画状态机
@@ -143,13 +138,12 @@ __attribute__((section(".ramfunc"))) void DebugGameManager::update() {
                     demo.targets[i] = vision_data.targets[i];
                 }
                 demo.path_idx = 0;
-                demo.last_tick = timer_get(GPT_TIM_1);
+                demo.last_tick = TaskScheduler::get_sys_tick_ms();
                 
                 // 将状态转入我们派生类独有的演示状态
                 phase = GamePhase::ANIMATE_DEMO; 
             } else {
                 // 求解失败，走原逻辑
-                timer_stop(GPT_TIM_1); // 失败时停掉定时器
                 vision_manager.request_map_ART1();
                 phase = GamePhase::WAIT_FOR_VISION;
             }
@@ -157,9 +151,9 @@ __attribute__((section(".ramfunc"))) void DebugGameManager::update() {
         }
 
         case GamePhase::ANIMATE_DEMO: {
-            // 每 150ms 刷新一帧动画 (非阻塞)
-            if (timer_get(GPT_TIM_1) - demo.last_tick > 150) {
-                demo.last_tick = timer_get(GPT_TIM_1);
+            // 每 100ms 刷新一帧动画 (非阻塞)
+            if (TaskScheduler::get_sys_tick_ms() - demo.last_tick > 100) {
+                demo.last_tick = TaskScheduler::get_sys_tick_ms();
                 
                 const auto& path = solver.get_result_path(); 
                 
@@ -167,7 +161,6 @@ __attribute__((section(".ramfunc"))) void DebugGameManager::update() {
                     
                     demo.player = {PLAN_START_X, PLAN_START_Y};   // 动画结束：将虚拟小车变回原点     
                     path_tracker.load_path(path);                 // 将计算好的路径真正加载给底层 Tracker
-                    timer_stop(GPT_TIM_1);                        // 动画结束，关闭定时器
                     phase = GamePhase::EXEC_SOKOBAN;              // 状态机切入 EXEC_SOKOBAN，接下来基类就会接管真实的物理小车移动
                     break;
                 }

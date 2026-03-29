@@ -52,7 +52,6 @@ struct DemoState {
 class DebugGameManager : public GameManager {
 public:
     DebugGameManager();
-    void timer_init();
     void update() override;
 
     // 供 UI 读取的调试数据接口

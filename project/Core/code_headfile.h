@@ -3,6 +3,7 @@
 #include "system_config.h"
 #include "tuning_config.h"
 
+#include "scheduler.h"
 #include "game_manage.h"
 #include "task_vision.h"
 #include "task_control.h"

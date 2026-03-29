@@ -30,6 +30,10 @@ static ParamItem tune_dict[] = {
     {"MaxASpd",  &tune.dynamics.max_ang_speed,      0.1f  },
     {"ReachRad", &tune.tracker.reach_radius,        1.0f  },
     {"ReachMin", &tune.tracker.reach_radius_min,    0.5f  },
+    {"LF_Spd",   &tune.motors.lf_speed,             2.0f  },
+    {"LB_Spd",   &tune.motors.lb_speed,             2.0f  },
+    {"RF_Spd",   &tune.motors.rf_speed,             2.0f  },
+    {"RB_Spd",   &tune.motors.rb_speed,             2.0f  }
 };
 
 static constexpr int DICT_SIZE = sizeof(tune_dict) / sizeof(tune_dict[0]);     // 自动计算字典大小

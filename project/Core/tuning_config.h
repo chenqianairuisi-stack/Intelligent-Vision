@@ -24,12 +24,19 @@ struct TuningConfig {
         float reach_radius_min;
     } tracker;
 
+    struct {
+        float lf_speed;
+        float lb_speed;
+        float rf_speed;
+        float rb_speed;
+    } motors;
+
 };
 
 // 全局调参实例，放在 DTCM 区域，供所有模块访问
 __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
-    {2.5f, 0.0f, 0.8f},                        // pid_yaw (小车身 Yaw 极易受干扰，适当保留 Kd 抵抗旋转惯性)
-    {1.2f, 0.5f, 0.0f},                        // pid_speed
+    {2.5f, 0.0f, 0.8f},     // pid_yaw
+    {1.2f, 0.5f, 0.0f},     // pid_speed
     
     // Dynamics 动力学预测参数
     {
@@ -43,15 +50,20 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
     {
         10.0f,     // reach_radius: 10cm 切弯
         1.5f       // reach_radius_min: 终点停稳极小宽容度
+    },
+    
+    // Motors 电机参数
+    {
+        0.0f,    // lf_speed: 左前轮速度
+        0.0f,    // lb_speed: 左后轮速度
+        0.0f,    // rf_speed: 右前轮速度
+        0.0f     // rb_speed: 右后轮速度
     }
 };
 
 
 
 
-// ### 🕹️ 第三部分：赛场 3 步调参法 (Tuning Guide)
-
-// 有了这套极度科学的参数和底层 S 曲线算法，你的调参将不再是“玄学试错”，而是严谨的“剥洋葱法”。请严格按照以下 3 步在场地测试：
 
 // **第一步：测定物理抓地极限 (`max_acc` 调参)**
 // *   **方法**：先随便跑一段直线的路径点。把 `t_acc_jerk` 设得非常小（比如 0.01s，相当于关闭 S 曲线），`max_speed` 给 100。
