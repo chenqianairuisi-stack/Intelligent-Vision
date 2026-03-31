@@ -11,6 +11,8 @@
 
 Telemetry telemetry;
 float planned_v_debug = 0.0f;     // 当前规划的速度大小，供 telemetry 模块发送波形数据
+float current_local_x = 0.0f;     // 当前局部 X 位移，供调试用
+float current_local_y = 0.0f;     // 当前局部 Y 位移，供调试用     
 
 char last_rx_cmd[32] = "WAITING CMD...";
 
@@ -116,7 +118,7 @@ void Telemetry::execute_command(const char* cmd) {
             }
             break;
 
-        case 'M': {  // 移动类指令
+        case 'M': {  // 全局移动类指令
             Pose2D target = { cur_pos.x, cur_pos.y, cur_yaw_deg };
 
             switch (sub) {
@@ -126,6 +128,21 @@ void Telemetry::execute_command(const char* cmd) {
                 case 'D': target.x += value; break;                  // 向右 (绝对坐标系 +X 方向)
                 case 'T': target.yaw = cur_yaw_deg + value; break;   // 转向 (逆时针为正)
                 case 'M': target = { cur_pos.x, cur_pos.y, cur_yaw_deg }; break;
+                default: return;
+            }
+            chassis_task.set_target_pose(target);
+            break;
+        }
+
+        case 'L': {  // 局部移动类指令
+            Pose2D target = { current_local_x, current_local_y, 90.0f }; 
+
+            switch (sub) {
+                case 'W': target.y += value; break;                  // 前进 (绝对坐标系 +Y 方向)
+                case 'S': target.y -= value; break;                  // 后退 (绝对坐标系 -Y 方向)
+                case 'A': target.x -= value; break;                  // 向左 (绝对坐标系 -X 方向)
+                case 'D': target.x += value; break;                  // 向右 (绝对坐标系 +X 方向)
+                case 'M': target = { current_local_x, current_local_y, 90.0f }; break;
                 default: return;
             }
             chassis_task.set_target_pose(target);

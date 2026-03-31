@@ -18,10 +18,13 @@ bool Imu::init() {
         system_delay_ms(5);
     }
     gyro_z_offset = (float)offset_sum / 100.0f;
+
+    gyro_z_offset = 0.0f;  // ~~~ 暂时关闭零偏校准，观察原始数据 ~~~
     yaw_angle = 90.0f;
 
     return true;
 }
+
 
 // 获取陀螺仪数据并积分 (5ms PIT 中断调用)
 __attribute__((section(".ramfunc"))) void Imu::update_yaw_5ms_tick() {
@@ -36,3 +39,4 @@ __attribute__((section(".ramfunc"))) void Imu::update_yaw_5ms_tick() {
     // 更新历史值
     last_gyro_z_dps = gyro_z_dps;
 }
+

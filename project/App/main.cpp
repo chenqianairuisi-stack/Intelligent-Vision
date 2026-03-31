@@ -30,7 +30,7 @@ extern "C" int main(void) {
 
     while(1) {
         vision_manager.update();             // 视觉地图/位置解析
-        debug_manager.update();              // 游戏状态机更新（包含动画演示）
+        // debug_manager.update();              // 游戏状态机更新（包含动画演示）
         // game_manager.update();               // 游戏状态机更新
 
         scheduler.run();

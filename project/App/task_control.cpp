@@ -5,23 +5,22 @@
 #include "zf_device_gnss.h"
 #include "task_control.h"
 #include "tracker.h"
+#include "telemetry.h"
 
 extern float planned_v_debug;
 extern float speed_y_debug;
+extern float current_local_x;
+extern float current_local_y;
 
 __attribute__((section(".dtcm_data"))) ChassisControl chassis_task;
 
 // 生成电机实例和初始化 PID 参数
 ChassisControl::ChassisControl() 
     : motors {
-        // {C9,  PWM2_MODULE1_CHA_C8,  false},  // LF
-        // {C10, PWM2_MODULE2_CHB_C11, true},    // LB
-        // {C7,  PWM2_MODULE0_CHA_C6,  false},  // RF
-        // {D2,  PWM2_MODULE3_CHB_D3,  true}   // RB
-        {C8,  PWM2_MODULE1_CHB_C9,  false},  // LF
-        {C11, PWM2_MODULE2_CHA_C10, true},    // LB
-        {C6,  PWM2_MODULE0_CHB_C7,  false},  // RF
-        {D3,  PWM2_MODULE3_CHA_D2,  true}   // RB
+        {C6,  PWM2_MODULE0_CHB_C7,  false},   // RF
+        {C11, PWM2_MODULE2_CHA_C10, false},   // LB
+        {C8,  PWM2_MODULE1_CHB_C9,  true },   // LF
+        {D3,  PWM2_MODULE3_CHA_D2,  true }    // RB
       },
       pid_wheels {  
         IncPid(tune.pid_speed), IncPid(tune.pid_speed),
@@ -41,6 +40,8 @@ __attribute__((section(".ramfunc"))) void ChassisControl::update_control_20ms_ti
     // 获取当前位姿（全局坐标 + 角度 deg）
     Point2D current_pos = chassis_odometry.get_position();
     float current_yaw = imu_sensor.get_yaw();  
+
+    current_yaw = 90.0f;  // ~~~ 暂时关闭旋转控制，观察纯平移效果 ~~~
 
     // 更新目标位姿
     if (path_tracker.get_state() == TrackerState::TRACKING) {
@@ -68,6 +69,8 @@ __attribute__((section(".ramfunc"))) void ChassisControl::update_control_20ms_ti
     if(expected_local_vw > tune.dynamics.max_ang_speed) expected_local_vw = tune.dynamics.max_ang_speed; 
     if(expected_local_vw < -tune.dynamics.max_ang_speed) expected_local_vw = -tune.dynamics.max_ang_speed;
 
+    expected_local_vw = 0.0f;  // ~~~ 暂时关闭旋转控制，观察纯平移效果 ~~~
+
     // 逆运动学解算：将期望的底盘全向速度分配给 4 个轮子，得到每个轮子的目标转速 (v1, v2, v3, v4)
     WheelSpeed4 target_wheel_speeds = Kinematics::inverse_kinematics(expected_local_vx, expected_local_vy, expected_local_vw);
 
@@ -77,44 +80,90 @@ __attribute__((section(".ramfunc"))) void ChassisControl::update_control_20ms_ti
 
 
 // 供调试使用的控制更新函数
+// __attribute__((section(".ramfunc"))) void ChassisControl::update_control_debug_20ms_tick() {
+//     Point2D current_pos = chassis_odometry.get_position();
+//     float current_yaw = imu_sensor.get_yaw();
+
+//     // ~~~ target pose 由上位机命令直接设定，不使用 Tracker 输出 ~~~
+
+//     float err_global_x = target_pose.x - current_pos.x;
+//     float err_global_y = target_pose.y - current_pos.y;
+//     float err_yaw = normalize_angle(target_pose.yaw - current_yaw);
+
+//     Speed2D expected_global_vel = tra_planner.velocity_planning_2d(
+//         err_global_x, err_global_y, tune.dynamics.max_speed, tune.dynamics.max_acc, tune.dynamics.max_jerk, 0.02f
+//     );
+//     planned_v_debug = expected_global_vel.v_mag;    // ~~~ 供 telemetry 模块发送波形数据 ~~~ 
+
+//     float cos_theta = cosf(current_yaw);
+//     float sin_theta = sinf(current_yaw);
+//     float expected_local_vx = expected_global_vel.vx * sin_theta - expected_global_vel.vy * cos_theta;
+//     float expected_local_vy = expected_global_vel.vx * cos_theta + expected_global_vel.vy * sin_theta;
+
+//     float expected_local_vw = pid_pos_yaw.calculate(err_yaw, 0.0f);
+//     if(expected_local_vw > tune.dynamics.max_ang_speed) expected_local_vw = tune.dynamics.max_ang_speed; 
+//     if(expected_local_vw < -tune.dynamics.max_ang_speed) expected_local_vw = -tune.dynamics.max_ang_speed;
+
+//     WheelSpeed4 target_wheel_speeds = Kinematics::inverse_kinematics(expected_local_vx, expected_local_vy, expected_local_vw);
+
+//     // 用于屏幕单独测试某个电机
+//     // WheelSpeed4 target_wheel_speeds = {
+//     //     tune.motors.lf_speed,
+//     //     tune.motors.lb_speed,
+//     //     tune.motors.rf_speed,
+//     //     tune.motors.rb_speed
+//     // };
+
+//     run_speed_loop_and_drive(target_wheel_speeds);
+// }
+
+
+
+// 供调试使用的控制更新函数 (纯局部 X/Y 动力学调参专用)
 __attribute__((section(".ramfunc"))) void ChassisControl::update_control_debug_20ms_tick() {
-    Point2D current_pos = chassis_odometry.get_position();
-    float current_yaw = imu_sensor.get_yaw();  
+    
+    // 提取真实轮速，正解出底盘真实的“局部速度”
+    float v_lf = encoders.get_speed_cm_s(0);
+    float v_lb = encoders.get_speed_cm_s(1);
+    float v_rf = encoders.get_speed_cm_s(2);
+    float v_rb = encoders.get_speed_cm_s(3);
 
-    // ~~~ target pose 由上位机命令直接设定，不使用 Tracker 输出 ~~~
+    // 麦轮正运动学：纯局部 Y 轴速度 (前进) 和 X 轴速度 (横移)
+    float real_local_vy = (v_lf + v_lb + v_rf + v_rb) / 4.0f;
+    float real_local_vx = (v_lf - v_lb - v_rf + v_rb) / 4.0f;
 
-    float err_global_x = target_pose.x - current_pos.x;
-    float err_global_y = target_pose.y - current_pos.y;
-    float err_yaw = normalize_angle(target_pose.yaw - current_yaw);
+    // 积分计算纯局部坐标系下的相对位移 (替代漂移的里程计)
+    // 注意：如果是多次测试，上位机下发新目标时，最好加个标志位清零这两个变量
+    current_local_x += real_local_vx * 0.02f;
+    current_local_y += real_local_vy * 0.02f;
 
-    Speed2D expected_global_vel = tra_planner.velocity_planning_2d(
-        err_global_x, err_global_y, tune.dynamics.max_speed, tune.dynamics.max_acc, tune.dynamics.max_jerk, 0.02f
+    // 计算局部误差 (把 target_pose 当作局部期望相对位移)
+    float err_local_x = target_pose.x - current_local_x;
+    float err_local_y = target_pose.y - current_local_y;
+
+    // 直接输入局部误差，输出局部平滑速度！
+    Speed2D expected_local_vel = tra_planner.velocity_planning_2d(
+        err_local_x, err_local_y, 
+        tune.dynamics.max_speed, tune.dynamics.max_acc, tune.dynamics.max_jerk, 0.02f
     );
-    planned_v_debug = expected_global_vel.v_mag;    // ~~~ 供 telemetry 模块发送波形数据 ~~~ 
+    planned_v_debug = expected_local_vel.v_mag; // 依然可以发波形
 
-    float cos_theta = cosf(current_yaw);
-    float sin_theta = sinf(current_yaw);
-    float expected_local_vx = expected_global_vel.vx * sin_theta - expected_global_vel.vy * cos_theta;
-    float expected_local_vy = expected_global_vel.vx * cos_theta + expected_global_vel.vy * sin_theta;
+    // 绕过陀螺仪和三角函数投影
+    float expected_local_vx = expected_local_vel.vx;
+    float expected_local_vy = expected_local_vel.vy;
+    float expected_local_vw = 0.0f; 
 
-    float expected_local_vw = pid_pos_yaw.calculate(err_yaw, 0.0f);
-    if(expected_local_vw > tune.dynamics.max_ang_speed) expected_local_vw = tune.dynamics.max_ang_speed; 
-    if(expected_local_vw < -tune.dynamics.max_ang_speed) expected_local_vw = -tune.dynamics.max_ang_speed;
-
+    // 逆解算与驱动
     WheelSpeed4 target_wheel_speeds = Kinematics::inverse_kinematics(expected_local_vx, expected_local_vy, expected_local_vw);
-
-    // 用于屏幕单独测试某个电机
-    // target_wheel_speeds = {
-    //     tune.motors.lf_speed,
-    //     tune.motors.lb_speed,
-    //     tune.motors.rf_speed,
-    //     tune.motors.rb_speed
-    // };
 
     run_speed_loop_and_drive(target_wheel_speeds);
 }
 
 
+
+
+
+// ------------------- 辅助函数实现 --------------------
 
 // 防止偏航角误差出现 359度 变成 -1度 导致的疯狂原地打转，将角度归一化到 [-pi, pi] 范围内
 __attribute__((always_inline)) inline float ChassisControl::normalize_angle(float angle) {

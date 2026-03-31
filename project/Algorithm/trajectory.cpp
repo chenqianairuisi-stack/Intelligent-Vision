@@ -1,4 +1,5 @@
 #include "trajectory.h"
+#include "tuning_config.h"
 #include <cmath>
 #include <algorithm>
 
@@ -14,11 +15,16 @@ void Trajectory::reset() {
 __attribute__((section(".ramfunc"))) 
 Speed2D Trajectory::velocity_planning_2d(float dx, float dy, float max_v, float max_acc,float max_jerk, float dt) {
     
-    // 计算当前点到目标点的距离和当前速度的标量大小
+    // 计算当前距离，死区判断
     float distance = std::sqrtf(dx * dx + dy * dy);  
-    float current_v_mag = std::sqrtf(current_vx * current_vx + current_vy * current_vy);  
+    if (distance < tune.tracker.reach_radius_min) {
+        current_vx = 0.0f; current_vy = 0.0f;
+        current_ax = 0.0f; current_ay = 0.0f;
+        return {0.0f, 0.0f, 0.0f}; 
+    }
 
     // Jerk 动态滞后补偿，计算刹车力建立期间，车体将会“多溜出去”的距离
+    float current_v_mag = std::sqrtf(current_vx * current_vx + current_vy * current_vy);   // 当前速度的标量大小
     float t_jerk = max_acc / max_jerk;                      // 刹车加速度建立所需时间 (s)
     float jerk_lag_dist = 0.5f * current_v_mag * t_jerk;    // 额外滑行的物理距离 (cm)
 
@@ -38,17 +44,17 @@ Speed2D Trajectory::velocity_planning_2d(float dx, float dy, float max_v, float 
     // 目标速度取“最大速度”和“安全刹车速度”的较小值
     target_v = std::min(max_v, target_v);  
 
-    // 防微小浮点数漂移彻底停稳
-    if (target_v < 0.1f && distance < 0.5f) {
-        target_v = 0.0f; 
-    }
-
     // 理想二维全局速度分解：沿着目标点的直线方向按比例分解
     float ideal_vx = 0.0f;
     float ideal_vy = 0.0f;
-    if (distance > 0.1f) {
+    if (distance > 3.0f) {
+        // 远距离：正常矢量分解
         ideal_vx = target_v * (dx / distance);
         ideal_vy = target_v * (dy / distance);
+    } else {
+        // 避免分母 distance 极小导致的除法放大效应
+        ideal_vx = target_v * (dx / 3.0f); 
+        ideal_vy = target_v * (dy / 3.0f); 
     }
 
     // 计算当前需要的期望加速度矢量

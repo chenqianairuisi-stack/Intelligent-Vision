@@ -12,8 +12,8 @@ void Motor::init() {
 
 // 设置电机占空比，范围 -100.0f ~ 100.0f
 __attribute__((section(".ramfunc"))) void Motor::set_duty(float duty) {
-    if (duty > 100.0f) duty = 100.0f;
-    if (duty < -100.0f) duty = -100.0f;
+    if (duty > 50.0f) duty = 50.0f;
+    if (duty < -50.0f) duty = -50.0f;
     if (is_inverted_) duty = -duty;
 
     if (duty >= 0.0f) {

@@ -20,20 +20,20 @@ static constexpr int UI_ROW_H = 10;
 struct ParamItem { const char* name; float* val_ptr; float step; };
 
 static ParamItem tune_dict[] = {
-    {"Yaw_Kp",   &tune.pid_yaw.kp,                  0.1f  },
-    {"Yaw_Kd",   &tune.pid_yaw.kd,                  0.01f },
-    {"Spd_Kp",   &tune.pid_speed.kp,                0.1f  },
-    {"Spd_Ki",   &tune.pid_speed.ki,                0.01f },
-    {"Max_Spd",  &tune.dynamics.max_speed,          1.0f  },
-    {"Max_Acc",  &tune.dynamics.max_acc,            10.0f },
-    {"MaxJerk",  &tune.dynamics.max_jerk,           100.0f},
-    {"MaxASpd",  &tune.dynamics.max_ang_speed,      0.1f  },
-    {"ReachRad", &tune.tracker.reach_radius,        1.0f  },
-    {"ReachMin", &tune.tracker.reach_radius_min,    0.5f  },
-    {"LF_Spd",   &tune.motors.lf_speed,             2.0f  },
-    {"LB_Spd",   &tune.motors.lb_speed,             2.0f  },
-    {"RF_Spd",   &tune.motors.rf_speed,             2.0f  },
-    {"RB_Spd",   &tune.motors.rb_speed,             2.0f  }
+    {"Yaw_Kp  ",   &tune.pid_yaw.kp,                  0.1f  },
+    {"Yaw_Kd  ",   &tune.pid_yaw.kd,                  0.01f },
+    {"Spd_Kp  ",   &tune.pid_speed.kp,                0.1f  },
+    {"Spd_Ki  ",   &tune.pid_speed.ki,                0.01f },
+    {"Max_Spd ",   &tune.dynamics.max_speed,          1.0f  },
+    {"Max_Acc ",   &tune.dynamics.max_acc,            10.0f },
+    {"MaxJerk ",   &tune.dynamics.max_jerk,           100.0f},
+    {"MaxASpd ",   &tune.dynamics.max_ang_speed,      0.1f  },
+    {"ReachRad",   &tune.tracker.reach_radius,        1.0f  },
+    {"ReachMin",   &tune.tracker.reach_radius_min,    0.5f  },
+    {"LF_Spd  ",   &tune.motors.lf_speed,             2.0f  },
+    {"LB_Spd  ",   &tune.motors.lb_speed,             2.0f  },
+    {"RF_Spd  ",   &tune.motors.rf_speed,             2.0f  },
+    {"RB_Spd  ",   &tune.motors.rb_speed,             2.0f  }
 };
 
 static constexpr int DICT_SIZE = sizeof(tune_dict) / sizeof(tune_dict[0]);     // 自动计算字典大小
@@ -458,7 +458,7 @@ void TftMenu::draw_float_item(uint8_t row, const char* name, float val, bool is_
     // 渲染浮点数 (从第 14 列开始，最多占用 7 列)
     // 格式化占位：2位整数 + 1位符号 + 1位小数点 + 3位小数 = 7个字符。
     // 14 + 7 = 21列。完美容纳在 128 像素内。
-    tft180_show_float(14 * UI_COL_W, row * UI_ROW_H, val, 2, 3);
+    tft180_show_float(14 * UI_COL_W, row * UI_ROW_H, val, 4, 2);
 }
 
 
