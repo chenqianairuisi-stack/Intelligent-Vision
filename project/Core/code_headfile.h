@@ -9,7 +9,9 @@
 #include "task_control.h"
 #include "telemetry.h"
 
-#include "planning.h"
+#include "sokoban.h"
+#include "exploration.h"
+
 #include "tracker.h"
 #include "trajectory.h"
 #include "pid.h"

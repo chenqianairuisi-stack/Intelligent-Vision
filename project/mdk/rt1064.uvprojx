@@ -339,7 +339,7 @@
               <MiscControls>-fno-common  -fdata-sections  -ffreestanding  -fno-builtin  -mthumb -Wno-invalid-source-encoding</MiscControls>
               <Define>CPU_MIMXRT1064DVL6A,SKIP_SYSCLK_INIT,XIP_EXTERNAL_FLASH=1, XIP_BOOT_HEADER_DCD_ENABLE =1, XIP_BOOT_HEADER_ENABLE =1,PRINTF_FLOAT_ENABLE=1, SCANF_FLOAT_ENABLE=1, PRINTF_ADVANCED_ENABLE=1, SCANF_ADVANCED_ENABLE=1, FSL_DRIVER_TRANSFER_DOUBLE_WEAK_IRQ=0, USB_STACK_BM, DEBUG, MCUXPRESSO_SDK, SD_ENABLED</Define>
               <Undefine></Undefine>
-              <IncludePath>..\..\libraries\sdk\startup\mdk;..\..\libraries\sdk\deceive;..\..\libraries\sdk\drives;..\..\libraries\sdk\xip;..\..\libraries\sdk\utilities;..\..\libraries\sdk\utilities\debug_console;..\..\libraries\sdk\utilities\str;..\..\libraries\sdk\cmsis_drivers;..\..\libraries\sdk\CMSIS\Include;..\..\libraries\sdk\CMSIS\Driver\Include;..\..\libraries\sdk\components\lists;..\..\libraries\sdk\components\osa;..\..\libraries\sdk\components\serial_manager;..\..\libraries\sdk\components\uart;..\..\libraries\sdk\board;..\..\libraries\components\fatfs\source;..\..\libraries\components\fatfs\source\fsl_sd_disk;..\..\libraries\components\sdmmc;..\..\libraries\components\sdmmc\common;..\..\libraries\components\sdmmc\host\usdhc;..\..\libraries\components\sdmmc\osa;..\..\libraries\components\sdmmc\sd;..\..\libraries\components\usb\device;..\..\libraries\components\usb\include;..\..\libraries\components\usb\phy;..\..\libraries\components\usb\usb_cdc_adapter;..\..\libraries\zf_common;..\..\libraries\zf_driver;..\..\libraries\zf_device;..\..\libraries\zf_components;..\App;..\Algorithm;..\Device;..\Core</IncludePath>
+              <IncludePath>..\..\libraries\sdk\startup\mdk;..\..\libraries\sdk\deceive;..\..\libraries\sdk\drives;..\..\libraries\sdk\xip;..\..\libraries\sdk\utilities;..\..\libraries\sdk\utilities\debug_console;..\..\libraries\sdk\utilities\str;..\..\libraries\sdk\cmsis_drivers;..\..\libraries\sdk\CMSIS\Include;..\..\libraries\sdk\CMSIS\Driver\Include;..\..\libraries\sdk\components\lists;..\..\libraries\sdk\components\osa;..\..\libraries\sdk\components\serial_manager;..\..\libraries\sdk\components\uart;..\..\libraries\sdk\board;..\..\libraries\components\fatfs\source;..\..\libraries\components\fatfs\source\fsl_sd_disk;..\..\libraries\components\sdmmc;..\..\libraries\components\sdmmc\common;..\..\libraries\components\sdmmc\host\usdhc;..\..\libraries\components\sdmmc\osa;..\..\libraries\components\sdmmc\sd;..\..\libraries\components\usb\device;..\..\libraries\components\usb\include;..\..\libraries\components\usb\phy;..\..\libraries\components\usb\usb_cdc_adapter;..\..\libraries\zf_common;..\..\libraries\zf_driver;..\..\libraries\zf_device;..\..\libraries\zf_components;..\App;..\Device;..\Core;..\Algorithm\Algorithm_Control;..\Algorithm\Algorithm_Planning</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -476,67 +476,82 @@
           </Files>
         </Group>
         <Group>
-          <GroupName>Algorithm</GroupName>
+          <GroupName>Algorithm_Control</GroupName>
           <Files>
             <File>
               <FileName>kinematics.cpp</FileName>
               <FileType>8</FileType>
-              <FilePath>..\Algorithm\kinematics.cpp</FilePath>
+              <FilePath>..\Algorithm\Algorithm_Control\kinematics.cpp</FilePath>
             </File>
             <File>
               <FileName>kinematics.h</FileName>
               <FileType>5</FileType>
-              <FilePath>..\Algorithm\kinematics.h</FilePath>
+              <FilePath>..\Algorithm\Algorithm_Control\kinematics.h</FilePath>
             </File>
             <File>
               <FileName>odometry.cpp</FileName>
               <FileType>8</FileType>
-              <FilePath>..\Algorithm\odometry.cpp</FilePath>
+              <FilePath>..\Algorithm\Algorithm_Control\odometry.cpp</FilePath>
             </File>
             <File>
               <FileName>odometry.h</FileName>
               <FileType>5</FileType>
-              <FilePath>..\Algorithm\odometry.h</FilePath>
-            </File>
-            <File>
-              <FileName>planning.cpp</FileName>
-              <FileType>8</FileType>
-              <FilePath>..\Algorithm\planning.cpp</FilePath>
-            </File>
-            <File>
-              <FileName>planning.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Algorithm\planning.h</FilePath>
-            </File>
-            <File>
-              <FileName>pid.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Algorithm\pid.h</FilePath>
+              <FilePath>..\Algorithm\Algorithm_Control\odometry.h</FilePath>
             </File>
             <File>
               <FileName>pid.cpp</FileName>
               <FileType>8</FileType>
-              <FilePath>..\Algorithm\pid.cpp</FilePath>
+              <FilePath>..\Algorithm\Algorithm_Control\pid.cpp</FilePath>
             </File>
             <File>
-              <FileName>trajectory.cpp</FileName>
-              <FileType>8</FileType>
-              <FilePath>..\Algorithm\trajectory.cpp</FilePath>
-            </File>
-            <File>
-              <FileName>trajectory.h</FileName>
+              <FileName>pid.h</FileName>
               <FileType>5</FileType>
-              <FilePath>..\Algorithm\trajectory.h</FilePath>
+              <FilePath>..\Algorithm\Algorithm_Control\pid.h</FilePath>
             </File>
             <File>
               <FileName>tracker.cpp</FileName>
               <FileType>8</FileType>
-              <FilePath>..\Algorithm\tracker.cpp</FilePath>
+              <FilePath>..\Algorithm\Algorithm_Control\tracker.cpp</FilePath>
             </File>
             <File>
               <FileName>tracker.h</FileName>
               <FileType>5</FileType>
-              <FilePath>..\Algorithm\tracker.h</FilePath>
+              <FilePath>..\Algorithm\Algorithm_Control\tracker.h</FilePath>
+            </File>
+            <File>
+              <FileName>trajectory.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\Algorithm\Algorithm_Control\trajectory.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>trajectory.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Algorithm\Algorithm_Control\trajectory.h</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>Algorithm_Planning</GroupName>
+          <Files>
+            <File>
+              <FileName>exploration.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\Algorithm\Algorithm_Planning\exploration.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>exploration.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Algorithm\Algorithm_Planning\exploration.h</FilePath>
+            </File>
+            <File>
+              <FileName>sokoban.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\Algorithm\Algorithm_Planning\sokoban.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>sokoban.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Algorithm\Algorithm_Planning\sokoban.h</FilePath>
             </File>
           </Files>
         </Group>

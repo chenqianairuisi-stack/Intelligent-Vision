@@ -448,17 +448,19 @@ void TftMenu::draw_float_item(uint8_t row, const char* name, float val, bool is_
     // 渲染光标和名称 (占用 0 ~ 9 列)
     draw_item(row, name, is_selected);
     
-    // 渲染编辑标识 (占用 10 ~ 12 列)
+    // 渲染编辑标识（与数值区保持不重叠）
     if (is_selected && is_editing_this) {
-        tft180_show_string(10 * UI_COL_W, row * UI_ROW_H, "[E]");
+        tft180_show_string(9 * UI_COL_W, row * UI_ROW_H, "[E]");
     } else {
-        tft180_show_string(10 * UI_COL_W, row * UI_ROW_H, "   ");
+        tft180_show_string(9 * UI_COL_W, row * UI_ROW_H, "   ");
     }
 
-    // 渲染浮点数 (从第 14 列开始，最多占用 7 列)
-    // 格式化占位：2位整数 + 1位符号 + 1位小数点 + 3位小数 = 7个字符。
-    // 14 + 7 = 21列。完美容纳在 128 像素内。
-    tft180_show_float(14 * UI_COL_W, row * UI_ROW_H, val, 4, 2);
+    // 固定从第 12 列开始显示，较原先左移一列，避免增加位数后越界。
+    tft180_show_float(12 * UI_COL_W,
+                     row * UI_ROW_H,
+                     val,
+                     5,
+                     2);
 }
 
 

@@ -2,7 +2,7 @@
 #include <cstdint>
 #include "system_config.h"
 #include "task_vision.h"
-#include "planning.h"
+#include "sokoban.h"
 #include "tracker.h"
 
 // 游戏全局状态机枚举

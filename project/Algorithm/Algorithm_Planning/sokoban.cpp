@@ -1,4 +1,4 @@
-#include "planning.h"
+#include "sokoban.h"
 
 __attribute__((section(".dtcm_data"))) sokoban solver;
 
