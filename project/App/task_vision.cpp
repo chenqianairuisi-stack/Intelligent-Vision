@@ -1,8 +1,12 @@
 #include "task_vision.h"
 #include <string.h> 
 
+
+// ===================================================== 实例化与初始化 =====================================================
+
 __attribute__((section(".dtcm_data"))) VisionData     vision_data;
 __attribute__((section(".dtcm_data"))) VisionManager  vision_manager;
+
 
 void VisionManager::init() {
     vision_data.art1_map_ready = false;
@@ -12,6 +16,9 @@ void VisionManager::init() {
     uart_cam1.Init();
     uart_cam2.Init();
 }
+
+
+// ===================================================== 控制信息传递 =====================================================
 
 // 请求地图 (MCU -> ART1)
 void VisionManager::request_map_ART1() {
@@ -23,12 +30,15 @@ void VisionManager::request_pose_ART1() {
     uart_cam1.send_packet(CMD_REQ_POSE, nullptr, 0);
 }
 
-// 触发第一视角识别 (MCU -> ART2)
-void VisionManager::trigger_ART2(bool is_box) {
-    vision_data.art2_result_ready = false;
-    uint8_t cmd = is_box ? CMD_TRIG_BOX : CMD_TRIG_TARGET;
-    uart_cam2.send_packet(cmd, nullptr, 0);
+// 请求捕获照片 (MCU -> ART2)
+void VisionManager::request_capture_ART2(uint8_t entity_id, bool is_box) {
+    vision_data.capture_ack_received = false;
+    uint8_t payload[2] = {entity_id, static_cast<uint8_t>(is_box ? 1 : 0)};
+    uart_cam2.send_packet(CMD_TRIG_CAPTURE, payload, 2);
 }
+
+
+// ===================================================== 接收信息解析 =====================================================
 
 // 高频状态机解析轮询，放在 App 层 main loop 中调用
 __attribute__((section(".ramfunc"))) void VisionManager::update() {
@@ -39,7 +49,7 @@ __attribute__((section(".ramfunc"))) void VisionManager::update() {
 }
 
 
-// 通用的状态机解析器
+// 通用的状态机解析器 
 __attribute__((section(".ramfunc"))) 
 void VisionManager::step_parser(UartComm& uart, ProtocolParser& parser, void(VisionManager::*process_cb)()) {
     uint8_t byte;
@@ -134,36 +144,65 @@ __attribute__((section(".ramfunc"))) void VisionManager::process_art1_packet() {
     }
 }
 
-// ART2 协议解包 (数字识别)
+// ART2 协议解包
 __attribute__((section(".ramfunc"))) void VisionManager::process_art2_packet() {
-    if (parser_art2.msg_type == MSG_ART2_RESULT && parser_art2.payload_len == 1) {
-        vision_data.current_front_id = parser_art2.payload_buf[0];
-        vision_data.art2_result_ready = true;
+    // 收到 ART2 的“快门完成”确认，小车可以立刻开走
+    if (parser_art2.msg_type == MSG_CAPTURE_ACK && parser_art2.payload_len == 1) {
+        vision_data.capture_ack_received = true;
+    }
+
+    // 收到 ART2 的“推理完成”结果，直接写入对应实体的内存池（无需打断主流程）
+    else if (parser_art2.msg_type == MSG_ART2_RESULT && parser_art2.payload_len == 2) {
+        uint8_t entity_id = parser_art2.payload_buf[0];
+        int8_t semantic_id = parser_art2.payload_buf[1];
+        if (entity_id < SystemConfig::MAX_ENTITIES) {
+            vision_data.semantic_labels[entity_id] = semantic_id;
+        }
     }
 }
 
 
+
+// ===================================================== 本地加载测试 =====================================================
+
 // 加载本地 ASCII 字符测试地图
 void VisionManager::load_mock_map() {
+    // const char* map_layout[SystemConfig::MAP_MAX_HEIGHT] = {
+    //     "############",
+    //     "#----------#",
+    //     "#-######---#",
+    //     "#-#----#-.-#",
+    //     "#-#-##$----#",
+    //     "#-#-.---$--#",
+    //     "#-####---#-#",
+    //     "#----#---#-#",
+    //     "#----#---#-#",
+    //     "#----#---#-#",
+    //     "#--###-----#",
+    //     "#--#-------#",
+    //     "#--#-------#",
+    //     "#-.-----$--#",
+    //     "##-#-------#",
+    //     "############"
+    // };
     const char* map_layout[SystemConfig::MAP_MAX_HEIGHT] = {
         "############",
         "#----------#",
-        "#-######---#",
-        "#-#----#-.-#",
-        "#-#-##$----#",
-        "#-#-.$-----#",
-        "#-####---#-#",
-        "#----#---#-#",
-        "#----#---#-#",
-        "#----#---#-#",
-        "#--###-----#",
-        "#--#-------#",
-        "#--#-------#",
-        "#-.$-------#",
+        "#----------#",
+        "#-#--------#",
+        "#-#--------#",
+        "#-#--------#",
+        "#-.------#-#",
+        "#------$-#-#",
+        "#--------#-#",
+        "#--------#-#",
+        "#----------#",
+        "#-$-----.--#",
+        "#----------#",
+        "#-.-----$--#",
         "##-#-------#",
         "############"
     };
-
     // 清空原有的统计数据
     vision_data.box_count = 0;
     vision_data.bomb_count = 0;
@@ -204,7 +243,6 @@ void VisionManager::load_mock_map() {
                     break;
                     
                 default: 
-                    // '-' 或者空格等其他字符，均视为平地(已默认为0)
                     break;
             }
         }

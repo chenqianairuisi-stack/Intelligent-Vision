@@ -8,7 +8,6 @@
 #define KEY4 C13  // 返回 / 退出编辑
 
 
-
 // 页面枚举
 enum class MenuPage {
     MAIN_MENU,          // 主菜单
@@ -37,6 +36,7 @@ private:
     bool need_full_redraw;          // 是否需要全屏重绘 (页面切换时为 true，局部刷新时为 false)
     bool ui_dirty;                  // UI 是否需要更新（按键触发或监控页面强制刷新）
     bool is_closed = false;         // 息屏标志位
+    bool force_bg_redraw = true;    // 强制背景重绘（用于动画演示）
 
     bool key_up_pressed, key_down_pressed, key_enter_pressed, key_back_pressed;    // 按键状态
     bool last_k1, last_k2, last_k3, last_k4;                                       // 上一轮按键状态（用于边缘检测）

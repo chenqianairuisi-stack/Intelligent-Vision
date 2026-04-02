@@ -1,4 +1,3 @@
-#include "zf_common_headfile.h"
 #include "telemetry.h"
 #include "task_control.h" 
 #include "task_vision.h"
@@ -114,7 +113,6 @@ void Telemetry::execute_command(const char* cmd) {
             switch (sub) {
                 case 'M': vision_manager.request_map_ART1();  break;
                 case 'P': vision_manager.request_pose_ART1(); break;
-                case 'T': vision_manager.trigger_ART2(true);  break;
             }
             break;
 

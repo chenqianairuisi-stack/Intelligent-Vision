@@ -14,9 +14,10 @@ extern "C" int main(void) {
     Storage::init();                          // 存储模块初始化，加载参数 (flash)
     telemetry.init();                         // 通信模块初始化 (wireless_uart)
     sys_menu.init();                          // 系统菜单初始化 (tft180)
+    scheduler.init();                         // 任务调度器初始化 (timer)
     vision_manager.init();                    // 视觉模块初始化 (uart)
     chassis_task.init();                      // 控制模块初始化 (motor)
-    scheduler.init();                         // 任务调度器初始化 (timer)
+    // game_manager.init();                      // 管理模块初始化 (gpio)
 
     pit_ms_init(PIT_CH0, 5);                  // 初始化 PIT_CH0 为 5ms 周期中断
     pit_ms_init(PIT_CH1, 20);                 // 初始化 PIT_CH1 为 20ms 周期中断
@@ -25,7 +26,9 @@ extern "C" int main(void) {
 
 
     // vision_manager.request_map_ART1();
-    game_manager.set_phase(GamePhase::WAIT_FOR_VISION);
+    debug_manager.init();                      // 管理模块初始化 (gpio)
+    debug_manager.inject_mock_semantics();   // 注入虚拟视觉标签，供没有摄像头时的调试使用
+    debug_manager.set_phase(GamePhase::WAIT_FOR_VISION);
 
 
     while(1) {

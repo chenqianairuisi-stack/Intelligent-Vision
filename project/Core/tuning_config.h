@@ -13,10 +13,10 @@ struct TuningConfig {
     PidParams pid_speed;
 
     struct {
-        float max_speed;                     // 跟踪时的最大线速度 (cm/s)
-        float max_acc;                       // 跟踪时的最大加速度 (cm/s^2)
-        float max_jerk;                      // 跟踪时的最大加加速度 (cm/s^3)
-        float max_ang_speed;                 // 跟踪时的最大角速度 (rad/s)
+        float max_speed;                   // 跟踪时的最大线速度 (cm/s)
+        float max_acc;                     // 跟踪时的最大加速度 (cm/s^2)
+        float max_jerk;                    // 跟踪时的最大加加速度 (cm/s^3)
+        float max_ang_speed;               // 跟踪时的最大角速度 (rad/s)
     }dynamics;
 
     struct {
@@ -41,7 +41,7 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
     // Dynamics 动力学预测参数
     {
         120.0f,    // max_speed: 1m/s，极速过弯
-        85.0f,    // max_acc: 0.25G 极限抓地力
+        85.0f,     // max_acc: 0.25G 极限抓地力
         1200.0f,   // t_acc_jerk: 0.1秒起步柔化
         1.0f       // max_ang_speed: 约 230度/秒，旋转敏捷
     },
@@ -52,33 +52,11 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
         1.0f       // reach_radius_min: 终点停稳极小宽容度
     },
     
-    // Motors 电机参数
+    // Motors 电机速度调节参数 (用于测试电机接线和转向)
     {
-        0.0f,    // lf_speed: 左前轮速度
-        0.0f,    // lb_speed: 左后轮速度
-        0.0f,    // rf_speed: 右前轮速度
-        0.0f     // rb_speed: 右后轮速度
+        0.0f,      // lf_speed: 左前轮速度
+        0.0f,      // lb_speed: 左后轮速度
+        0.0f,      // rf_speed: 右前轮速度
+        0.0f       // rb_speed: 右后轮速度
     }
 };
-
-
-
-
-
-// **第一步：测定物理抓地极限 (`max_acc` 调参)**
-// *   **方法**：先随便跑一段直线的路径点。把 `t_acc_jerk` 设得非常小（比如 0.01s，相当于关闭 S 曲线），`max_speed` 给 100。
-// *   **操作**：不断增大 `max_acc` (从 100 开始加，每次加 50)。
-// *   **观察**：当你发现小车在起步瞬间或者急刹车瞬间，**轮胎发出了“呲呲”的打滑声，或者车体有轻微侧偏**，这就说明你突破了 10x20cm 底盘的静摩擦力极限！
-// *   **锁定**：把出现打滑时的值**乘以 0.85**（留出灰尘和电量衰减裕度），这就是你这台车的**天命 `max_acc`**，以后永远不要动它。
-
-// **第二步：测定底盘悬挂柔性 (`t_acc_jerk` 调参)**
-// *   **方法**：保持上一步测出的天命 `max_acc`。现在车不打滑了，但是起步/刹车会“硬邦邦”的，车身（特别是上方的摄像头）会猛烈颤抖。
-// *   **操作**：逐渐增大 `t_acc_jerk` (从 0.02 往上加，0.05, 0.08, 0.10...)。
-// *   **观察**：盯住车体顶部的 OpenART 摄像头。当参数加到一个临界点时，你会发现**小车起步瞬间如同德芙般丝滑，摄像头的果冻效应完全消失**。
-// *   **锁定**：此时的值就是完美的柔化时间（通常在 0.08s ~ 0.15s 之间）。
-
-// **第三步：测定几何切弯流线 (`reach_radius` 调参)**
-// *   **方法**：在屏幕上画一个 90度 直角弯的 Mock 地图。
-// *   **操作**：增大 `reach_radius`（从 5cm 往上加）。
-// *   **观察**：这个参数直接决定了小车是“走折线”还是“跑赛车线”。半径越大，切入直角越早，速度掉得越少。如果你发现小车切弯时碰到了虚拟箱子或者偏离中心线太多，就减小它。一般 8~12cm 是最佳甜点。
-
