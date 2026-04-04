@@ -2,7 +2,7 @@
 #include "task_control.h"
 #include "scheduler.h"
 #include "odometry.h"
-#include "imu.h"
+#include "imu_process.h"
 #include <cmath>
 #include <cstring>
 
@@ -60,7 +60,8 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             // 如果到达了地图的第一格 (误差 2cm)
             if (dist < tune.tracker.reach_radius_min) {
                 // 请求视觉模块发送地图数据
-                vision_manager.request_map_ART1();
+                // vision_manager.request_map_ART1();
+                vision_manager.load_mock_map();     // ~~~ 调试用：直接导入本地地图 ~~~
                 phase = GamePhase::WAIT_FOR_VISION;
             }
             break;

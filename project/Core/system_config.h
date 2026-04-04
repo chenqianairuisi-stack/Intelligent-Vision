@@ -1,14 +1,16 @@
 #pragma once
 #include <cstdint>
 
-//-----------------------------------------------------------------------------
-//全局坐标系：x轴正方向为右，y轴正方向为前，逆时针为正旋转（x轴设为0度）
-//全局地图：大小 240cm*320cm, 分为 12*16 格，原点(0,0)在左下角，x轴向右，y轴向上
-//-----------------------------------------------------------------------------
+//---------------------------------------------------------------------------------
+//全局坐标系：x 轴正方向为右，y 轴正方向为前，逆时针为正旋转（x 轴设为 0 度）
+//全局地图：大小 240cm*320cm, 分为 12*16 格，原点(0,0)在左下角，x 轴向右，y 轴向上
+//---------------------------------------------------------------------------------
 
 namespace SystemConfig {
     // 机械参数
     static constexpr float WHEEL_RADIUS = 3.15f;                // 轮子半径，单位：厘米
+    static constexpr float HALF_X_AXIS = 9.0f;                  // x 轴半轴距，单位：厘米
+    static constexpr float HALF_Y_AXIS = 9.9f;                  // y 轴半轴距，单位：厘米
 
     // 编码器硬件参数
     static constexpr float ENC_LINES = 1024.0f;                 // 编码器物理线数
@@ -32,11 +34,14 @@ namespace SystemConfig {
     static constexpr int MAX_PATH_LENGTH = 100;                 // 最大搜索步数
     
     // 其他全局常量
-    static constexpr float ENTRY_X = 120.0f;                    // 入口位置 X 坐标
+    static constexpr float ENTRY_X = 110.0f;                    // 入口位置 X 坐标
     static constexpr float ENTRY_Y = 10.0f;                     // 入口位置 Y 坐标
     static constexpr float ENTRY_YAW = 90.0f;                   // 入口位置航向（单位：度，0度为x轴正方向，逆时针为正）
-    static constexpr float OUT_TARGET_X = 120.0f;               // 出库目标位置 X 坐标
+    static constexpr float OUT_TARGET_X = 110.0f;               // 出库目标位置 X 坐标
     static constexpr float OUT_TARGET_Y = 50.0f;                // 出库目标位置 Y 坐标
+
+    // 数学常数
+    static constexpr float DEG_TO_RAD = 3.1415926535f / 180.0f;
 }
 
 // 四个轮子的转速结构体 (单位：cm/s)
@@ -47,34 +52,33 @@ struct WheelSpeed4 {
     float rb;      // Right Back
 };
 
-// 速度结构体 (单位：cm/s)
+// 速度结构体 (cm/s)
 struct Velocity2D {
-    float vy;      // 前后速度 (前为正)
     float vx;      // 左右速度 (右为正)
+    float vy;      // 前后速度 (前为正)
     float vw;      // 旋转速度 (逆时针为正)
 };
 
-// 速度结构体 (单位：cm/s)
+// 速度结构体 (cm/s)
 struct Speed2D {
-    float vy;      
-    float vx;     
-    float v_mag;   // 标量速度 (单位：cm/s)
+    float vx;
+    float vy;
 };
 
-// 全局坐标结构体 (现实世界坐标系中的坐标点，单位cm)
+// 全局物理坐标结构体 (单位 cm)
 struct Point2D {
     float x;
     float y;
 };
 
-// 全局位姿结构体 (现实世界坐标系中的位姿，单位 cm 和 deg)
+// 全局物理位姿结构体 (单位 cm/deg)
 struct Pose2D {
     float x;
     float y;
     float yaw;
 };
 
-// 坐标结构体 (用于表示网格地图上的坐标点)
+// 全局网格坐标结构体 (单位：格)
 struct point {
     int8_t x, y;  
 
@@ -88,7 +92,7 @@ struct point {
     }
 };
 
-// 模版类：固定长度数组，兼容 vector 接口，避免动态内存分配
+// 【模版类】定长数组：兼容 vector 接口，避免动态内存分配
 template <typename T, int MAX_LEN>
 struct StaticArray {
     T data[MAX_LEN];

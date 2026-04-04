@@ -4,7 +4,7 @@
 #include "game_manage.h"
 #include "odometry.h"
 #include "encoder.h"
-#include "imu.h"
+#include "imu_process.h"
 #include "storage.h"
 #include "telemetry.h"
 
@@ -180,8 +180,8 @@ void TftMenu::process_logic() {
         case MenuPage::VISION_DATA:
             // 按确认键注入本地地图
             if (key_enter_pressed) {
-                vision_manager.load_mock_map();
                 debug_manager.set_phase(GamePhase::WAIT_FOR_VISION);  // 直接跳过视觉模块，进入寻路阶段，方便调试 UI 和算法
+                vision_manager.load_mock_map();
                 // 在屏幕中间打个提示，延时防抖
                 tft180_show_string(12, 80, "Local Map Loaded");
                 system_delay_ms(300);
@@ -305,8 +305,9 @@ void TftMenu::draw_odometry_data() {
     tft180_show_string(0, 2 * UI_ROW_H, "Global X: ");   tft180_show_float(10 * UI_COL_W, 2 * UI_ROW_H, pos.x, 3, 1);
     tft180_show_string(0, 3 * UI_ROW_H, "Global Y: ");   tft180_show_float(10 * UI_COL_W, 3 * UI_ROW_H, pos.y, 3, 1);
 
-    tft180_show_string(0, 4 * UI_ROW_H, "Yaw: ");        tft180_show_float(10 * UI_COL_W, 4 * UI_ROW_H, imu_sensor.get_yaw(), 3, 2); 
-    tft180_show_string(0, 5 * UI_ROW_H, "Spd Yaw: ");    tft180_show_float(10 * UI_COL_W, 5 * UI_ROW_H, imu_sensor.get_gyro_z(), 3, 2);
+    char ui_buf[32]; 
+    sprintf(ui_buf, "Yaw: %8.2f   ", imu_sensor.get_yaw());     tft180_show_string(0, 4 * UI_ROW_H, ui_buf);
+    sprintf(ui_buf, "Spd: %8.2f   ", imu_sensor.get_gyro_z());  tft180_show_string(0, 5 * UI_ROW_H, ui_buf);
 
     tft180_show_string(0, 6 * UI_ROW_H, "Spd LF: ");     tft180_show_float(10 * UI_COL_W, 6 * UI_ROW_H, encoders.get_speed_cm_s(0), 3, 1);
     tft180_show_string(0, 7 * UI_ROW_H, "Spd LB: ");     tft180_show_float(10 * UI_COL_W, 7 * UI_ROW_H, encoders.get_speed_cm_s(1), 3, 1);

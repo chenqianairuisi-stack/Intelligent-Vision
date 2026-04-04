@@ -16,8 +16,8 @@ __attribute__((section(".ramfunc"))) void Odometry::update_position_20ms_tick(co
     float d_rb = encoder_counts[3] * PLUSE_TO_CM;
 
     // 计算机器人在局部坐标系中的位移
-    float dy_local = (d_lf + d_lb + d_rf + d_rb) / 4.0f;
     float dx_local = (d_lf - d_lb - d_rf + d_rb) / 4.0f;
+    float dy_local = (d_lf + d_lb + d_rf + d_rb) / 4.0f;
 
     // 将局部坐标系的位移转换到全局坐标系
     float cos_yaw = cosf(current_yaw_rad);

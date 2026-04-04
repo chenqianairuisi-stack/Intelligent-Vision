@@ -3,9 +3,9 @@
 #include <cmath>
 #include <algorithm>
 
+
 Trajectory::Trajectory() : current_vx(0.0f), current_vy(0.0f), current_ax(0.0f), current_ay(0.0f)  {}
 
-// 强制刹车或重置状态
 void Trajectory::reset() {
     current_vx = 0.0f; current_vy = 0.0f; current_ax = 0.0f; current_ay = 0.0f;
 }
@@ -13,15 +13,19 @@ void Trajectory::reset() {
 
 // 二维速度规划算法：输入当前位置与目标位置的 dx, dy，输出平滑的期望速度 (vx, vy) 和标量速度 v_mag
 __attribute__((section(".ramfunc"))) 
-Speed2D Trajectory::velocity_planning_2d(float dx, float dy, float max_v, float max_acc,float max_jerk, float dt) {
+Speed2D Trajectory::velocity_planning_2d(float dx, float dy, float dt) {
     
     // 计算当前距离，死区判断
     float distance = std::sqrtf(dx * dx + dy * dy);  
     if (distance < tune.tracker.reach_radius_min) {
-        current_vx = 0.0f; current_vy = 0.0f;
-        current_ax = 0.0f; current_ay = 0.0f;
-        return {0.0f, 0.0f, 0.0f}; 
+        reset();
+        return {0.0f, 0.0f}; 
     }
+
+    // 直接读取 DTCM 中的全局极限参数
+    float max_acc = tune.dynamics.max_acc;
+    float max_jerk = tune.dynamics.max_jerk;
+    float max_v = tune.dynamics.max_speed;
 
     // Jerk 动态滞后补偿，计算刹车力建立期间，车体将会“多溜出去”的距离
     float current_v_mag = std::sqrtf(current_vx * current_vx + current_vy * current_vy);   // 当前速度的标量大小
@@ -37,7 +41,7 @@ Speed2D Trajectory::velocity_planning_2d(float dx, float dy, float max_v, float 
     if (safe_distance > 2.0f) {
         target_v = std::sqrtf(2.0f * max_acc * safe_distance);
     } else {
-        float kp = std::sqrtf(2.0f * max_acc * 2.0f) / 2.0f;
+        float kp = std::sqrtf(max_acc);
         target_v = kp * safe_distance;
     }
 
@@ -66,9 +70,9 @@ Speed2D Trajectory::velocity_planning_2d(float dx, float dy, float max_v, float 
     float djx = req_ax - current_ax;
     float djy = req_ay - current_ay;
     float dj_mag = std::sqrtf(djx * djx + djy * djy);
-    float max_dj = max_jerk * dt; // 本周期内允许的最大加速度变化量
+    float max_dj = max_jerk * dt;  // 本周期内允许的最大加速度变化量
 
-    if (dj_mag > max_dj) {
+    if (dj_mag > max_dj && dj_mag > 1e-4f) {  // 加入小阈值避免除以零
         float scale = max_dj / dj_mag;
         current_ax += djx * scale;
         current_ay += djy * scale;
@@ -81,7 +85,7 @@ Speed2D Trajectory::velocity_planning_2d(float dx, float dy, float max_v, float 
     // 【第二级滤波】：Accel (加速度) 矢量限幅，确保合成摩擦力总和不超过轮胎物理抓地力极限
     float a_mag = std::sqrtf(current_ax * current_ax + current_ay * current_ay);
     
-    if (a_mag > max_acc) {
+    if (a_mag > max_acc && a_mag > 1e-4f) {  // 加入小阈值避免除以零
         float scale = max_acc / a_mag;
         current_ax *= scale;
         current_ay *= scale;
@@ -92,5 +96,5 @@ Speed2D Trajectory::velocity_planning_2d(float dx, float dy, float max_v, float 
     current_vy += current_ay * dt;
 
     // 返回平滑后的结果
-    return {current_vy, current_vx, std::sqrtf(current_vx * current_vx + current_vy * current_vy)};
+    return {current_vx, current_vy};
 }

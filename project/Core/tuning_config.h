@@ -35,7 +35,7 @@ struct TuningConfig {
 
 // 全局调参实例，放在 DTCM 区域，供所有模块访问
 __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
-    {1.0f, 0.0f, 0.8f},         // pid_yaw
+    {2.5f, 0.0f, 0.8f},         // pid_yaw
     {0.4f, 0.5f, 0.0f},         // pid_speed
     
     // Dynamics 动力学预测参数
@@ -43,7 +43,7 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
         120.0f,    // max_speed: 1m/s，极速过弯
         85.0f,     // max_acc: 0.25G 极限抓地力
         1200.0f,   // t_acc_jerk: 0.1秒起步柔化
-        1.0f       // max_ang_speed: 约 230度/秒，旋转敏捷
+        2.0f       // max_ang_speed: 约 230度/秒，旋转敏捷
     },
     
     // Tracker 几何预测参数

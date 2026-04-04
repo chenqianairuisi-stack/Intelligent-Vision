@@ -339,7 +339,7 @@
               <MiscControls>-fno-common  -fdata-sections  -ffreestanding  -fno-builtin  -mthumb -Wno-invalid-source-encoding</MiscControls>
               <Define>CPU_MIMXRT1064DVL6A,SKIP_SYSCLK_INIT,XIP_EXTERNAL_FLASH=1, XIP_BOOT_HEADER_DCD_ENABLE =1, XIP_BOOT_HEADER_ENABLE =1,PRINTF_FLOAT_ENABLE=1, SCANF_FLOAT_ENABLE=1, PRINTF_ADVANCED_ENABLE=1, SCANF_ADVANCED_ENABLE=1, FSL_DRIVER_TRANSFER_DOUBLE_WEAK_IRQ=0, USB_STACK_BM, DEBUG, MCUXPRESSO_SDK, SD_ENABLED</Define>
               <Undefine></Undefine>
-              <IncludePath>..\..\libraries\sdk\startup\mdk;..\..\libraries\sdk\deceive;..\..\libraries\sdk\drives;..\..\libraries\sdk\xip;..\..\libraries\sdk\utilities;..\..\libraries\sdk\utilities\debug_console;..\..\libraries\sdk\utilities\str;..\..\libraries\sdk\cmsis_drivers;..\..\libraries\sdk\CMSIS\Include;..\..\libraries\sdk\CMSIS\Driver\Include;..\..\libraries\sdk\components\lists;..\..\libraries\sdk\components\osa;..\..\libraries\sdk\components\serial_manager;..\..\libraries\sdk\components\uart;..\..\libraries\sdk\board;..\..\libraries\components\fatfs\source;..\..\libraries\components\fatfs\source\fsl_sd_disk;..\..\libraries\components\sdmmc;..\..\libraries\components\sdmmc\common;..\..\libraries\components\sdmmc\host\usdhc;..\..\libraries\components\sdmmc\osa;..\..\libraries\components\sdmmc\sd;..\..\libraries\components\usb\device;..\..\libraries\components\usb\include;..\..\libraries\components\usb\phy;..\..\libraries\components\usb\usb_cdc_adapter;..\..\libraries\zf_common;..\..\libraries\zf_driver;..\..\libraries\zf_device;..\..\libraries\zf_components;..\App;..\Device;..\Core;..\Algorithm\Algorithm_Control;..\Algorithm\Algorithm_Planning</IncludePath>
+              <IncludePath>..\..\libraries\sdk\startup\mdk;..\..\libraries\sdk\deceive;..\..\libraries\sdk\drives;..\..\libraries\sdk\xip;..\..\libraries\sdk\utilities;..\..\libraries\sdk\utilities\debug_console;..\..\libraries\sdk\utilities\str;..\..\libraries\sdk\cmsis_drivers;..\..\libraries\sdk\CMSIS\Include;..\..\libraries\sdk\CMSIS\Driver\Include;..\..\libraries\sdk\components\lists;..\..\libraries\sdk\components\osa;..\..\libraries\sdk\components\serial_manager;..\..\libraries\sdk\components\uart;..\..\libraries\sdk\board;..\..\libraries\components\fatfs\source;..\..\libraries\components\fatfs\source\fsl_sd_disk;..\..\libraries\components\sdmmc;..\..\libraries\components\sdmmc\common;..\..\libraries\components\sdmmc\host\usdhc;..\..\libraries\components\sdmmc\osa;..\..\libraries\components\sdmmc\sd;..\..\libraries\components\usb\device;..\..\libraries\components\usb\include;..\..\libraries\components\usb\phy;..\..\libraries\components\usb\usb_cdc_adapter;..\..\libraries\zf_common;..\..\libraries\zf_driver;..\..\libraries\zf_device;..\..\libraries\zf_components;..\App;..\Device;..\Core;..\Algorithm\Algorithm_Control;..\Algorithm\Algorithm_Planning;..\Algorithm\Algorithm_Perception</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -489,16 +489,6 @@
               <FilePath>..\Algorithm\Algorithm_Control\kinematics.h</FilePath>
             </File>
             <File>
-              <FileName>odometry.cpp</FileName>
-              <FileType>8</FileType>
-              <FilePath>..\Algorithm\Algorithm_Control\odometry.cpp</FilePath>
-            </File>
-            <File>
-              <FileName>odometry.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Algorithm\Algorithm_Control\odometry.h</FilePath>
-            </File>
-            <File>
               <FileName>pid.cpp</FileName>
               <FileType>8</FileType>
               <FilePath>..\Algorithm\Algorithm_Control\pid.cpp</FilePath>
@@ -556,6 +546,31 @@
           </Files>
         </Group>
         <Group>
+          <GroupName>Algorithm_Perception</GroupName>
+          <Files>
+            <File>
+              <FileName>imu_process.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\Algorithm\Algorithm_Perception\imu_process.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>imu_process.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Algorithm\Algorithm_Perception\imu_process.h</FilePath>
+            </File>
+            <File>
+              <FileName>odometry.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\Algorithm\Algorithm_Perception\odometry.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>odometry.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Algorithm\Algorithm_Perception\odometry.h</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
           <GroupName>Device</GroupName>
           <Files>
             <File>
@@ -607,6 +622,16 @@
               <FileName>storage.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\Device\storage.h</FilePath>
+            </File>
+            <File>
+              <FileName>icm42688.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\Device\icm42688.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>icm42688.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Device\icm42688.h</FilePath>
             </File>
           </Files>
         </Group>
