@@ -11,6 +11,7 @@
 
 #include "sokoban.h"
 #include "exploration.h"
+#include "strategy.h"
 
 #include "tracker.h"
 #include "trajectory.h"

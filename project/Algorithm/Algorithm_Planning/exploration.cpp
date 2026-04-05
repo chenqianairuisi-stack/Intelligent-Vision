@@ -28,11 +28,11 @@ StaticArray<ObsPoint, 32> Exploration::plan_optimal_patrol(point start_pos, floa
     int M = obs_points.size();
     if (M == 0 || total_entities == 0) return StaticArray<ObsPoint, 32>();
 
-    // 准备动态规划(DP)表，记录到达每一种“进度+位置”组合的最低成本，放在 DTCM 防止局部数组爆栈 (256 * 32 * 4 字节 = 32KB)
-    static float dp[256][32];          // dp[mask][u] = 访问了 mask 里的实体(例如00001011代表已访问过1,2,4号实体)，且最后停在观测点 u 的最小代价
-    static uint8_t parent[256][32];    // parent[mask][u] = 上一个观测点的索引，用于回溯路径
+    // 准备动态规划(DP)表，尺寸随配置缩放，避免写死 256x32 占用额外内存
+    static float dp[MAX_ENTITY_MASK][MAX_OBS_POINTS];          // dp[mask][u] = 访问了 mask 里的实体，且最后停在观测点 u 的最小代价
+    static uint8_t parent[MAX_ENTITY_MASK][MAX_OBS_POINTS];    // parent[mask][u] = 上一个观测点的索引，用于回溯路径
     
-    int max_mask = (1 << total_entities);   // 已访问实体状态总数 (实体最多是8，所以 mask 范围是 0 ~ 255)
+    int max_mask = (1 << total_entities);   // 已访问实体状态总数
     for (int i = 0; i < max_mask; ++i) {
         for (int j = 0; j < M; ++j) dp[i][j] = 999999.0f;
     }
@@ -273,7 +273,7 @@ float Exploration::bfs_shortest_path(point start, point end) {
     static int8_t dist[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
     std::memset(dist, -1, sizeof(dist));
     
-    point q[256];
+    point q[MAP_CELL_COUNT];
     int head = 0, tail = 0;
     
     q[tail++] = start;
@@ -326,7 +326,7 @@ bool Exploration::get_grid_path(point start, point end, StaticArray<point, MAX_P
     point parent[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
     std::memset(visited, 0, sizeof(visited));
     
-    point q[256];
+    point q[MAP_CELL_COUNT];
     int head = 0, tail = 0;
     
     q[tail++] = start;

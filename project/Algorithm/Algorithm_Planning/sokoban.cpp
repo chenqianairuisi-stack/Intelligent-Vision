@@ -97,7 +97,7 @@ template <GameMode Mode> bool Sokoban::solve_internal() {
 // 全局变量，避免递归时频繁开辟内存
 static uint16_t bfs_visited_gen[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];  // 位图，标记玩家在BFS中访问过哪些格子
 static uint16_t current_gen = 0;  // 代数指针：每次BFS开始时+1，配合bfs_visited实现O(1)清空访问标记
-static point bfs_q[256];
+static point bfs_q[MAP_CELL_COUNT];
 static int8_t bfs_dist[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
 
 // DFS函数：IDA* 算法的递归搜索部分 [g: 已走步数, threshold: 当前深度限制阈值] (建议至少分配 32 KB 的栈空间)
@@ -565,7 +565,7 @@ void Sokoban::precompute_target_distances() {
     std::memset(t_dist, -1, sizeof(t_dist));
     for (size_t i = 0; i < initial_targets.size(); ++i) {
         point start = initial_targets[i];
-        point q[256];
+        point q[MAP_CELL_COUNT];
         int head = 0, tail = 0;
         
         q[tail++] = start;

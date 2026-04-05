@@ -28,9 +28,12 @@ namespace SystemConfig {
     static constexpr int MAP_MAX_HEIGHT = 16;                   // 地图最大高度（网格坐标）
     static constexpr int PLAN_START_X = 5;                      // 规划起点 X 坐标（网格坐标）
     static constexpr int PLAN_START_Y = 2;                      // 规划起点 Y 坐标（网格坐标）
-    static constexpr int MAX_BOXES = 4;                         // 最大箱子数
-    static constexpr int MAX_BOMBS = 4;                         // 最大炸弹数
-    static constexpr int MAX_ENTITIES = MAX_BOXES + MAX_BOMBS;  // 最大实体数（箱子+炸弹）
+    static constexpr int MAX_BOXES = 3;                         // 最大箱子数
+    static constexpr int MAX_BOMBS = 3;                         // 最大炸弹数
+    static constexpr int MAX_ENTITIES = 2 * MAX_BOXES;          // 最大实体数（箱子+目标点）
+    static constexpr int MAX_ENTITY_MASK = 1 << MAX_ENTITIES;   // 实体访问状态总数（bitmask）
+    static constexpr int MAX_OBS_POINTS = 4 * MAX_ENTITIES;     // 最大观测点数（每个实体最多4个观测点，分别对应4个朝向）
+    static constexpr int MAP_CELL_COUNT = MAP_MAX_WIDTH * MAP_MAX_HEIGHT;   // 地图总格子数
     static constexpr int MAX_PATH_LENGTH = 100;                 // 最大搜索步数
     
     // 其他全局常量
@@ -92,13 +95,13 @@ struct point {
     }
 };
 
-// 【模版类】定长数组：兼容 vector 接口，避免动态内存分配
+// 定长数组：保留常用 vector 风格接口，避免动态内存分配 
 template <typename T, int MAX_LEN>
 struct StaticArray {
     T data[MAX_LEN];
     int length = 0;
 
-    // 兼容 vector 的接口
+    // 与 vector 常用接口保持一致
     void push_back(const T& val) { if (length < MAX_LEN) data[length++] = val; }
     void pop_back() { if (length > 0) length--; }
     void clear() { length = 0; }
@@ -117,7 +120,7 @@ struct StaticArray {
     const T* begin() const { return &data[0]; }
     const T* end() const { return &data[length]; }
 
-    // 提供一个空的 reserve 预分配函数，兼容原本代码里的 reserve
+    // 占位接口：保持与原调用方兼容
     void reserve(int n) { (void)n; } 
 };
 

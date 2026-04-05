@@ -543,6 +543,16 @@
               <FileType>5</FileType>
               <FilePath>..\Algorithm\Algorithm_Planning\sokoban.h</FilePath>
             </File>
+            <File>
+              <FileName>strategy.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\Algorithm\Algorithm_Planning\strategy.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>strategy.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Algorithm\Algorithm_Planning\strategy.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
