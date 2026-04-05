@@ -3,40 +3,37 @@
 #include <cmath>
 #include <algorithm>
 
-
-Trajectory::Trajectory() : current_vx(0.0f), current_vy(0.0f), current_ax(0.0f), current_ay(0.0f)  {}
+Trajectory::Trajectory() : current_v(0.0f), current_a(0.0f) {}
 
 void Trajectory::reset() {
-    current_vx = 0.0f; current_vy = 0.0f; current_ax = 0.0f; current_ay = 0.0f;
+    current_v = 0.0f; 
+    current_a = 0.0f;
 }
 
-
-// 二维速度规划算法：输入当前位置与目标位置的 dx, dy，输出平滑的期望速度 (vx, vy) 和标量速度 v_mag
+// 一维速度规划算法：严格算出标量梯形速度，最后投影分解
 __attribute__((section(".ramfunc"))) 
-Speed2D Trajectory::velocity_planning_2d(float dx, float dy, float dt) {
+Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt) {
     
-    // 计算当前距离，死区判断
+    // 1. 计算当前距离，死区判断
     float distance = std::sqrtf(dx * dx + dy * dy);  
     if (distance < tune.tracker.reach_radius_min) {
         reset();
         return {0.0f, 0.0f}; 
     }
 
-    // 直接读取 DTCM 中的全局极限参数
+    // 2. 读取 DTCM 中的全局极限参数
     float max_acc = tune.dynamics.max_acc;
     float max_jerk = tune.dynamics.max_jerk;
-    float max_v = tune.dynamics.max_speed;
+    float max_v_limit = tune.dynamics.max_speed;
 
-    // Jerk 动态滞后补偿，计算刹车力建立期间，车体将会“多溜出去”的距离
-    float current_v_mag = std::sqrtf(current_vx * current_vx + current_vy * current_vy);   // 当前速度的标量大小
+    // 3. Jerk 动态滞后补偿 (直接使用标量速度，计算极大简化)
     float t_jerk = max_acc / max_jerk;                      // 刹车加速度建立所需时间 (s)
-    float jerk_lag_dist = 0.5f * current_v_mag * t_jerk;    // 额外滑行的物理距离 (cm)
+    float jerk_lag_dist = 0.5f * current_v * t_jerk;        // 额外滑行的物理距离 (cm)
 
-    // 欺骗规划器：把溜车距离从总距离中扣除，强迫它随速度动态“提前刹车”
+    // 4. 计算理论安全刹车速度 (梯形速度规划)
     float safe_distance = distance - jerk_lag_dist;
-    if (safe_distance < 0.0f) safe_distance = 0.0f;         // 防下溢出
+    if (safe_distance < 0.0f) safe_distance = 0.0f;         
 
-    // 标量刹车防撞规划，计算理论安全刹车速度 (公式: V^2 = 2 * a * s  =>  V = sqrt(2*a*s))
     float target_v;
     if (safe_distance > 2.0f) {
         target_v = std::sqrtf(2.0f * max_acc * safe_distance);
@@ -45,56 +42,37 @@ Speed2D Trajectory::velocity_planning_2d(float dx, float dy, float dt) {
         target_v = kp * safe_distance;
     }
 
-    // 目标速度取“最大速度”和“安全刹车速度”的较小值
-    target_v = std::min(max_v, target_v);  
-
-    // 理想二维全局速度分解：沿着目标点的直线方向按比例分解
-    float ideal_vx = 0.0f;
-    float ideal_vy = 0.0f;
-    if (distance > 3.0f) {
-        // 远距离：正常矢量分解
-        ideal_vx = target_v * (dx / distance);
-        ideal_vy = target_v * (dy / distance);
-    } else {
-        // 避免分母 distance 极小导致的除法放大效应
-        ideal_vx = target_v * (dx / 3.0f); 
-        ideal_vy = target_v * (dy / 3.0f); 
-    }
-
-    // 计算当前需要的期望加速度矢量
-    float req_ax = (ideal_vx - current_vx) / dt;
-    float req_ay = (ideal_vy - current_vy) / dt;
-
-
-    // 【第一级滤波】：Jerk (加加速度) 矢量限幅，限制每拍加速度变化的剧烈程度，防止电机扭矩阶跃
-    float djx = req_ax - current_ax;
-    float djy = req_ay - current_ay;
-    float dj_mag = std::sqrtf(djx * djx + djy * djy);
-    float max_dj = max_jerk * dt;  // 本周期内允许的最大加速度变化量
-
-    if (dj_mag > max_dj && dj_mag > 1e-4f) {  // 加入小阈值避免除以零
-        float scale = max_dj / dj_mag;
-        current_ax += djx * scale;
-        current_ay += djy * scale;
-    } else {
-        current_ax = req_ax;
-        current_ay = req_ay;
-    }
-
-
-    // 【第二级滤波】：Accel (加速度) 矢量限幅，确保合成摩擦力总和不超过轮胎物理抓地力极限
-    float a_mag = std::sqrtf(current_ax * current_ax + current_ay * current_ay);
+    target_v = std::min(max_v_limit, target_v);  
     
-    if (a_mag > max_acc && a_mag > 1e-4f) {  // 加入小阈值避免除以零
-        float scale = max_acc / a_mag;
-        current_ax *= scale;
-        current_ay *= scale;
+    // 计算当前需要的期望标量加速度
+    float req_a = (target_v - current_v) / dt;
+
+    // 【第一级滤波】：Jerk 标量限幅
+    float da = req_a - current_a;
+    float max_da = max_jerk * dt; 
+
+    if (da > max_da) {
+        current_a += max_da;
+    } else if (da < -max_da) {
+        current_a -= max_da;
+    } else {
+        current_a = req_a;
     }
 
-    // 更新物理速度
-    current_vx += current_ax * dt;
-    current_vy += current_ay * dt;
+    // 【第二级滤波】：Accel 标量限幅
+    if (current_a > max_acc) {
+        current_a = max_acc;
+    } else if (current_a < -max_acc) {
+        current_a = -max_acc;
+    }
 
-    // 返回平滑后的结果
-    return {current_vx, current_vy};
+    // 更新真实的物理标量速度
+    current_v += current_a * dt;
+    if (current_v < 0.0f) current_v = 0.0f; // 防下溢倒车
+
+    // 最终投影：顺着目标点的方向线，将绝对纯净的标量速度分解
+    float ux = dx / distance;
+    float uy = dy / distance;
+
+    return {current_v * ux, current_v * uy};
 }

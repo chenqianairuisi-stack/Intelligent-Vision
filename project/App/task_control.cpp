@@ -52,7 +52,7 @@ __attribute__((section(".ramfunc"))) void ChassisControl::update_control_20ms_ti
     float err_yaw = normalize_angle(target_pose.yaw - current_yaw);  // 转换为 [-pi, pi] 范围内的误差，单位 rad
 
     // 轨迹规划器根据当前距离算出一个合适的速度
-    Speed2D expected_global_vel = tra_planner.velocity_planning_2d(err_global_x, err_global_y, 0.02f);
+    Speed2D expected_global_vel = tra_planner.velocity_planning_1d(err_global_x, err_global_y, 0.02f);
 
     // 将全局期望速度投影到小车自身的局部坐标系
     float current_yaw_rad = current_yaw * SystemConfig::DEG_TO_RAD;  // 转换为弧度
@@ -85,7 +85,7 @@ __attribute__((section(".ramfunc"))) void ChassisControl::update_control_debug_2
     float err_global_y = target_pose.y - current_pos.y;
     float err_yaw = normalize_angle(target_pose.yaw - current_yaw);
 
-    Speed2D expected_global_vel = tra_planner.velocity_planning_2d(err_global_x, err_global_y, 0.02f);
+    Speed2D expected_global_vel = tra_planner.velocity_planning_1d(err_global_x, err_global_y, 0.02f);
 
     float current_yaw_rad = current_yaw * SystemConfig::DEG_TO_RAD;  // 转换为弧度
     float cos_theta = cosf(current_yaw_rad);
