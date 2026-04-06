@@ -5,103 +5,216 @@
 
 __attribute__((section(".dtcm_data"))) Exploration patrol_planner;
 
-// 物理代价权重 (需要根据实车动态调整)
-static constexpr float COST_PER_GRID = 1.0f;       // 走一格的代价
-static constexpr float COST_PER_DEGREE = 0.02f;    // 转 1 度的代价 (例如转90度=1.8代价，相当于走1.8格)
+// ============================================================================
+// 物理学惩罚权重配置
+// ============================================================================
+static constexpr float COST_PER_GRID = 1.0f;       // 直线行驶 1 格的代价
+static constexpr uint16_t COST_INFINITY = 65535;   // 代表无解 (uint16_t 的最大值)
 
 
-// 加载地图并缓存
+// ============================================================================
+// 内存池架构：全部数据结构预先分配在 DTCM 中，避免运行时动态内存分配，提升性能和稳定性
+// ============================================================================
+struct DPWorkspace {
+    uint16_t dist_matrix[MAX_BOMBS + 1][MAX_OBS_POINTS + 1][MAX_OBS_POINTS + 1];
+    uint16_t dp[MAX_ENTITY_MASK][MAX_BOMBS + 1][MAX_OBS_POINTS + 1];
+    uint8_t  parent_u[MAX_ENTITY_MASK][MAX_BOMBS + 1][MAX_OBS_POINTS + 1];
+    uint8_t  parent_k[MAX_ENTITY_MASK][MAX_BOMBS + 1][MAX_OBS_POINTS + 1];
+    point    bfs_queue[MAP_CELL_COUNT];  // 高频复用队列，取代局部数组
+};
+__attribute__((section(".dtcm_data"))) static DPWorkspace dp_ram;
+
+struct BombPathWorkspace {
+    // 宏观 BFS 使用
+    BombMacroNode q[1024];                              // 极小队列
+    uint8_t visited[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];     // 掩码位图：bit0~3 代表 4 个方向是否访问过
+    
+    // 微观 BFS 使用 (用于小车绕着炸弹走的内部寻路)
+    point micro_q[MAP_CELL_COUNT];
+    uint8_t micro_visited[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+    point micro_parent[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+    uint8_t micro_gen; // 代数刷新器，避免高频 memset
+};
+__attribute__((section(".dtcm_data"))) static BombPathWorkspace b_ws;
+
+// ============================================================================
+// [模块 1] 地图解析与点位生成
+// ============================================================================
 void Exploration::load_level(const SokobanLevel& level) {
-    this->cached_level = level; // 直接拷贝进内部缓存
+    this->cached_level = level; 
+}
+
+void Exploration::generate_obs_points() {
+    obs_points.clear();
+    total_entities = 0;
+
+    auto add_obs_points_for_entity = [&](point entity_pos, bool is_box) {
+        for (int d = 0; d < 4; ++d) {
+            point obs_p = entity_pos + MOVE[d];
+            
+            if (obs_p.x < 0 || obs_p.x >= MAP_MAX_WIDTH || obs_p.y < 0 || obs_p.y >= MAP_MAX_HEIGHT) continue;
+            if (cached_level.map[obs_p.y][obs_p.x] == 1) continue; // 撞墙
+            
+            // 碰撞箱体和炸弹检测
+            bool hit_other = false;
+            for(int b=0; b<cached_level.box_count; ++b) {
+                if(cached_level.boxes[b] == obs_p) { hit_other = true; break; }
+            }
+            for(int b=0; b<cached_level.bomb_count; ++b) {
+                if(cached_level.bombs[b].x != -1 && cached_level.bombs[b] == obs_p) { hit_other = true; break; }
+            }
+            if (hit_other) continue;
+
+            // 存入合法观测点
+            obs_points.push_back({obs_p, 270.0f - 90.0f * d, total_entities, is_box});
+        }
+        total_entities++;
+    };
+
+    for (int i = 0; i < cached_level.box_count; ++i) add_obs_points_for_entity(cached_level.boxes[i], true);
+    for (int i = 0; i < cached_level.target_count; ++i) add_obs_points_for_entity(cached_level.targets[i], false);
 }
 
 
-// 核心外部接口
+// ============================================================================
+//[模块 2] 多重分支地图巡图引擎
+// ============================================================================
 __attribute__((section(".ramfunc"))) 
-StaticArray<ObsPoint, 32> Exploration::plan_optimal_patrol(point start_pos, float start_yaw) {
-    
-    // Step 1: 生成观测点与计算代价矩阵
+StaticArray<PatrolAction, 32> Exploration::plan_optimal_patrol(
+    point start_pos, const StaticArray<BombTask, MAX_BOMBS>& bomb_tasks) 
+{
     generate_obs_points();
-    build_cost_matrix();
-
-    // 如果没有合法的观测点，直接返回空序列
     int M = obs_points.size();
-    if (M == 0 || total_entities == 0) return StaticArray<ObsPoint, 32>();
-
-    // 准备动态规划(DP)表，尺寸随配置缩放，避免写死 256x32 占用额外内存
-    static float dp[MAX_ENTITY_MASK][MAX_OBS_POINTS];          // dp[mask][u] = 访问了 mask 里的实体，且最后停在观测点 u 的最小代价
-    static uint8_t parent[MAX_ENTITY_MASK][MAX_OBS_POINTS];    // parent[mask][u] = 上一个观测点的索引，用于回溯路径
+    if (M == 0 || total_entities == 0) return StaticArray<PatrolAction, 32>();
     
-    int max_mask = (1 << total_entities);   // 已访问实体状态总数
-    for (int i = 0; i < max_mask; ++i) {
-        for (int j = 0; j < M; ++j) dp[i][j] = 999999.0f;
-    }
+    if (total_entities >= 8) total_entities = 7; // 防止掩码溢出的最后断言
 
+    int B = bomb_tasks.size();
+    const int MACRO_NODE = M; // 状态表中的特殊索引，代表“刚执行完炸弹宏动作的状态”
 
-    // Step 2: 初始化起点状态
-    for (int v = 0; v < M; ++v) {
-        uint8_t e_id = obs_points[v].entity_id;
+    static SokobanLevel multi_maps[MAX_BOMBS + 1];
+    multi_maps[0] = cached_level; 
 
-        float dist = bfs_shortest_path(start_pos, obs_points[v].pos); 
-        if (dist >= 9999.0f) continue;
+    // --- 阶段 1：多重宇宙地形推演 ---
+    for (int k = 0; k < B; ++k) {
+        multi_maps[k + 1] = multi_maps[k];
+        point t_wall = bomb_tasks[k].target_wall;
 
-        float yaw_diff = std::abs(obs_points[v].target_yaw - start_yaw);
-        if (yaw_diff > 180.0f) yaw_diff = 360.0f - yaw_diff;
-
-        // 计算初始代价：距离 + 朝向差
-        float cost = dist * COST_PER_GRID + yaw_diff * COST_PER_DEGREE;
-        
-        // 如果同一个实体有多个观测点，取最小值
-        if (cost < dp[1 << e_id][v]) {
-            dp[1 << e_id][v] = cost;
-        }
-    }
-
-
-    // Step 3: Bitmask DP 状态转移 (Held-Karp GTSP)
-    for (int mask = 1; mask < max_mask; ++mask) {
-        for (int u = 0; u < M; ++u) {
-            if (dp[mask][u] >= 99999.0f) continue; 
-            
-            for (int v = 0; v < M; ++v) {    // 下一个要去的观测点
-                uint8_t next_entity = obs_points[v].entity_id;
-                
-                // 如果已经看过了，跳过
-                if (mask & (1 << next_entity)) continue; 
-                
-                // 计算新的 mask，表示访问了 v 这个观测点对应的实体
-                int next_mask = mask | (1 << next_entity);
-
-                // 计算从 u 到 v 的代价 (物理距离 + 朝向差)
-                float cost_uv = cost_matrix[u][v];
-                if (cost_uv >= 9999.0f) continue;
-                float yaw_diff = std::abs(obs_points[v].target_yaw - obs_points[u].target_yaw);
-                if (yaw_diff > 180.0f) yaw_diff = 360.0f - yaw_diff;
-
-                // 计算总代价：之前的代价 + 这一步的代价
-                float total_cost = dp[mask][u] + cost_uv * COST_PER_GRID + yaw_diff * COST_PER_DEGREE;
-                
-                // 更新 DP 表，如果更优则覆盖原有记录，并记录父节点
-                if (total_cost < dp[next_mask][v]) {
-                    dp[next_mask][v] = total_cost;
-                    parent[next_mask][v] = u; 
+        multi_maps[k + 1].bombs[k] = {-1, -1}; // 物理销毁炸弹
+        // 模拟爆炸毁坏墙体 (3x3范围)
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                int ny = t_wall.y + dy, nx = t_wall.x + dx;
+                if (ny > 0 && ny < MAP_MAX_HEIGHT - 1 && nx > 0 && nx < MAP_MAX_WIDTH - 1) {
+                    multi_maps[k + 1].map[ny][nx] = 0; 
                 }
             }
         }
     }
 
-    // Step 4: 寻找最优终点 (满足至少看了 N-1 个箱子和 N-1 个目标的状态)，并记录最优解的最后一个观测点和 mask
-    int req_boxes = cached_level.box_count - 1;       // 只需要看 N-1 个箱子
-    int req_targets = cached_level.target_count - 1;  // 只需要看 N-1 个目标
+    // --- 阶段 2：预热宏动作节点间的距离矩阵 ---
+    for (int k = 0; k <= B; ++k) {
+        for (int u = 0; u <= M; ++u) {
+            point p_start;
+            if (u == MACRO_NODE) {
+                if (k == 0) continue; // k=0时不存在上一个炸弹的终点
+                // 核心解耦：上一个动作如果是推炸弹，我们直接假设起点就在墙壁废墟处
+                p_start = bomb_tasks[k - 1].target_wall;
+            } else {
+                p_start = obs_points[u].pos;
+            }
+
+            for (int v = 0; v <= M; ++v) {
+                point p_end;
+                if (v < M) {
+                    p_end = obs_points[v].pos;
+                } else {
+                    if (k >= B) continue; 
+                    // 核心解耦：要去推下一颗炸弹，目标点直接设为炸弹所在坐标
+                    p_end = bomb_tasks[k].bomb_start; 
+                }
+
+                if (p_start == p_end) dp_ram.dist_matrix[k][u][v] = 0;
+                else dp_ram.dist_matrix[k][u][v] = bfs_shortest_path(multi_maps[k], p_start, p_end);
+            }
+        }
+    }
+
+    // --- 阶段 3：全整数状态机初始化 ---
+    int max_mask = (1 << total_entities);
+    for (int i = 0; i < max_mask; ++i) {
+        for (int k = 0; k <= B; ++k) {
+            for (int u = 0; u <= M; ++u) dp_ram.dp[i][k][u] = COST_INFINITY;
+        }
+    }
+
+    // 注入直接去各个观测点的初始代价
+    for (int v = 0; v < M; ++v) {
+        uint16_t dist = bfs_shortest_path(multi_maps[0], start_pos, obs_points[v].pos);
+        if (dist != COST_INFINITY) {
+            uint8_t e_id = obs_points[v].entity_id;
+            uint16_t cost = dist * COST_PER_GRID;
+            if (cost < dp_ram.dp[1 << e_id][0][v]) dp_ram.dp[1 << e_id][0][v] = cost;
+        }
+    }
     
-    float min_total_cost = 999999.0f;
-    int best_last_obs = -1;
-    int best_mask = -1;
+    // 注入直接去推第一颗炸弹的初始代价
+    if (B > 0) {
+        uint16_t dist = bfs_shortest_path(multi_maps[0], start_pos, bomb_tasks[0].bomb_start);
+        if (dist != COST_INFINITY) {
+            dp_ram.dp[0][1][MACRO_NODE] = dist * COST_PER_GRID; 
+        }
+    }
+
+    // --- 阶段 4：纯距离代价的主循环博弈 ---
+    for (int mask = 0; mask < max_mask; ++mask) {
+        for (int k = 0; k <= B; ++k) {
+            for (int u = 0; u <= M; ++u) {
+                if (dp_ram.dp[mask][k][u] == COST_INFINITY) continue;
+
+                // 动作 A：去巡视下一个目标点
+                for (int v = 0; v < M; ++v) {
+                    uint8_t next_ent = obs_points[v].entity_id;
+                    if (mask & (1 << next_ent)) continue; 
+
+                    uint16_t dist = dp_ram.dist_matrix[k][u][v]; 
+                    if (dist == COST_INFINITY) continue;
+                    
+                    int next_mask = mask | (1 << next_ent);
+                    uint32_t total = (uint32_t)dp_ram.dp[mask][k][u] + dist * COST_PER_GRID;
+
+                    if (total < dp_ram.dp[next_mask][k][v]) {
+                        dp_ram.dp[next_mask][k][v] = total;
+                        dp_ram.parent_u[next_mask][k][v] = u;
+                        dp_ram.parent_k[next_mask][k][v] = k; 
+                    }
+                }
+
+                // 动作 B：穿梭至下一宇宙，去触发下一颗炸弹宏动作
+                if (k < B) { 
+                    uint16_t dist = dp_ram.dist_matrix[k][u][MACRO_NODE]; 
+                    if (dist != COST_INFINITY) {
+                        uint32_t total = (uint32_t)dp_ram.dp[mask][k][u] + dist * COST_PER_GRID;
+
+                        if (total < dp_ram.dp[mask][k + 1][MACRO_NODE]) {
+                            dp_ram.dp[mask][k + 1][MACRO_NODE] = total;
+                            dp_ram.parent_u[mask][k + 1][MACRO_NODE] = u;
+                            dp_ram.parent_k[mask][k + 1][MACRO_NODE] = k;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- 阶段 5：寻找最优回溯 ---
+    int req_boxes = cached_level.box_count - 1;       
+    int req_targets = cached_level.target_count - 1;  
     
-    // 遍历所有的 DP 组合状态
+    uint32_t min_cost = 0xFFFFFFFF; // 无穷大
+    int best_mask = -1, best_k = -1, best_u = -1;
+
     for (int mask = 1; mask < max_mask; ++mask) {
-        
-        // 统计当前 mask 里，包含了几个箱子，几个目标点
         int box_seen = 0, target_seen = 0;
         for (int e = 0; e < total_entities; ++e) {
             if (mask & (1 << e)) {
@@ -110,39 +223,44 @@ StaticArray<ObsPoint, 32> Exploration::plan_optimal_patrol(point start_pos, floa
             }
         }
         
-        // 只要满足数量，就是合法的终点状态
+        // 结束态断言：满足 N-1 观测需求，且必须执行完所有炸弹 (k == B)
         if (box_seen >= req_boxes && target_seen >= req_targets) {
-            
-            for (int u = 0; u < M; ++u) {
-                if (dp[mask][u] >= 99999.0f) continue;
+            // BUG FIX: 强迫引擎必须停留在 k == B 的状态
+            int k = B; 
+            for (int u = 0; u <= M; ++u) {
+                if (dp_ram.dp[mask][k][u] == COST_INFINITY) continue;
+                uint32_t final_cost = dp_ram.dp[mask][k][u];
                 
-                float final_cost = dp[mask][u];
-                
-                // 【末端惩罚】如果最后看的不是箱子，加上惩罚权重
-                if (!obs_points[u].is_box) {
-                    final_cost += 6.0f * COST_PER_GRID; 
-                }
-                
-                if (final_cost < min_total_cost) {
-                    min_total_cost = final_cost;
-                    best_last_obs = u;
-                    best_mask = mask;
+                // 如果最后停在一个观测点，且不是箱子，略微增加惩罚
+                if (u != MACRO_NODE && !obs_points[u].is_box) final_cost += COST_PER_GRID * 5; 
+
+                if (final_cost < min_cost) {
+                    min_cost = final_cost; best_mask = mask; best_k = k; best_u = u;
                 }
             }
         }
     }
 
-    // Step 5: 回溯路径
-    StaticArray<ObsPoint, 32> best_sequence;
-    int curr_mask = best_mask;
-    int curr_obs = best_last_obs;
+    StaticArray<PatrolAction, 32> best_sequence;
+    int curr_mask = best_mask, curr_k = best_k, curr_u = best_u;
 
-    while (curr_mask > 0 && curr_obs != -1) {
+    while (curr_mask > 0 || curr_k > 0) {
+        PatrolAction act;
+        if (curr_u == MACRO_NODE) {
+            act.is_bomb_task = true;
+            act.bomb = bomb_tasks[curr_k - 1]; 
+        } else {
+            act.is_bomb_task = false;
+            act.obs = obs_points[curr_u];
+        }
+        best_sequence.push_back(act);
+
+        int p_u = dp_ram.parent_u[curr_mask][curr_k][curr_u];
+        int p_k = dp_ram.parent_k[curr_mask][curr_k][curr_u];
         
-        best_sequence.push_back(obs_points[curr_obs]);         // 将当前观测点加入最优序列
-        int prev_obs = parent[curr_mask][curr_obs];            // 回退到上一个状态
-        curr_mask ^= (1 << obs_points[curr_obs].entity_id);    // 更新 mask，去掉当前观测点对应的实体
-        curr_obs = prev_obs;                                   // 更新当前观测点索引
+        if (curr_u != MACRO_NODE) curr_mask ^= (1 << obs_points[curr_u].entity_id);
+        curr_k = p_k;
+        curr_u = p_u;
     }
 
     std::reverse(best_sequence.begin(), best_sequence.end());
@@ -150,178 +268,68 @@ StaticArray<ObsPoint, 32> Exploration::plan_optimal_patrol(point start_pos, floa
 }
 
 
-
-// 语义匹配函数：根据识别到的乱序标签，输出完美匹配的箱子到目标的映射关系
+// 向下兼容接口封装
 __attribute__((section(".ramfunc"))) 
-bool Exploration::match_semantics(const int8_t* semantic_labels, uint8_t* out_matched_ids) const {
-    
-    // 记录哪些目标点已经被绑定了，哪些箱子已经找到归宿了
-    bool target_assigned[SystemConfig::MAX_BOXES] = {false};
-    bool box_assigned[SystemConfig::MAX_BOXES] = {false};
-    
-    // 默认初始化
-    for (int i = 0; i < cached_level.box_count; ++i) out_matched_ids[i] = 0;
+StaticArray<ObsPoint, 32> Exploration::plan_optimal_patrol(point start_pos) {
+    StaticArray<BombTask, MAX_BOMBS> empty_bombs; // 传入空炸弹引发引擎降维塌缩
+    StaticArray<PatrolAction, 32> mixed_actions = this->plan_optimal_patrol(start_pos, empty_bombs);
 
-    bool perfect_vision = true;  // 记录视觉部分是否没有任何丢包
-
-    // 第一阶段：明确的视觉精确匹配 (双向都有明确数字)
-    for (int b = 0; b < cached_level.box_count; ++b) {
-        int8_t box_semantic = semantic_labels[b];
-        if (box_semantic == -1) continue;  // 没去看，或者没认出，留给第二阶段演绎
-        
-        for (int t = 0; t < cached_level.target_count; ++t) {
-            int target_entity_id = cached_level.box_count + t;
-            
-            // 如果箱子和目标点看到的数字完全一样，确立绑定关系
-            if (semantic_labels[target_entity_id] == box_semantic) {
-                out_matched_ids[b] = t;        
-                box_assigned[b] = true;
-                target_assigned[t] = true;
-                break;
-            }
-        }
+    StaticArray<ObsPoint, 32> legacy_obs_sequence;
+    for (int i = 0; i < mixed_actions.size(); ++i) {
+        legacy_obs_sequence.push_back(mixed_actions[i].obs);
     }
-
-    // 第二阶段：逻辑演绎与排除法 (处理 N-1 优化)
-    int unassigned_target_search_idx = 0;
-
-    for (int b = 0; b < cached_level.box_count; ++b) {
-        if (!box_assigned[b]) {  // 这个箱子没有明确的视觉匹配，需要逻辑推演
-            // 寻找第一个还没被占用的目标点
-            while (unassigned_target_search_idx < cached_level.target_count && 
-                   target_assigned[unassigned_target_search_idx]) {
-                unassigned_target_search_idx++;
-            }
-
-            if (unassigned_target_search_idx < cached_level.target_count) {
-                out_matched_ids[b] = unassigned_target_search_idx;
-                
-                target_assigned[unassigned_target_search_idx] = true;
-            } else {
-                // 极端异常保护 (理论上永远进不来，因为箱子数 == 目标数)
-                out_matched_ids[b] = 0; 
-                perfect_vision = false;
-            }
-        }
-    }
-
-    return perfect_vision;
+    return legacy_obs_sequence;
 }
 
 
-// 生成所有观测点
-void Exploration::generate_obs_points() {
-    obs_points.clear();
-    total_entities = 0;
+// ============================================================================
+// [模块 3] 底层物理与轨迹生成器
+// ============================================================================
 
-    auto add_obs_points_for_entity = [&](point entity_pos, bool is_box) {
-
-        for (int d = 0; d < 4; ++d) {
-            point obs_p = entity_pos + MOVE[d];
-            
-            // 越界检查
-            if (obs_p.x < 0 || obs_p.x >= MAP_MAX_WIDTH || obs_p.y < 0 || obs_p.y >= MAP_MAX_HEIGHT) continue;
-            
-            // 检测是否是墙，箱子，炸弹
-            if (cached_level.map[obs_p.y][obs_p.x] == 1) continue;
-            
-            bool hit_other = false;
-            for(int b=0; b<cached_level.box_count; ++b) {
-                if(cached_level.boxes[b] == obs_p) { hit_other = true; break; }
-            }
-
-            for(int b=0; b<cached_level.bomb_count; ++b) {
-                if(cached_level.bombs[b] == obs_p) { hit_other = true; break; }
-            }
-            if (hit_other) continue;
-
-            // 这是一个合法的观测点
-            obs_points.push_back({obs_p, 270.0f - 90.0f * d, total_entities, is_box});
-        }
-        total_entities++;
-    };
-
-    // 为所有的箱子生成观测点
-    for (int i = 0; i < cached_level.box_count; ++i) {
-        add_obs_points_for_entity(cached_level.boxes[i], true);
-    }
-    // 为所有的目标点生成观测点
-    for (int i = 0; i < cached_level.target_count; ++i) {
-        add_obs_points_for_entity(cached_level.targets[i], false);
-    }
-}
-
-
-// 构建全源物理代价矩阵
-void Exploration::build_cost_matrix() {
-    int M = obs_points.size();
-    for (int i = 0; i < M; ++i) {
-        for (int j = 0; j < M; ++j) {
-            if (i == j) cost_matrix[i][j] = 0.0f;
-            else {
-                cost_matrix[i][j] = bfs_shortest_path(obs_points[i].pos, obs_points[j].pos);
-            }
-        }
-    }
-}
-
-
-// 简单的防撞箱 BFS (巡图时，所有箱子被视为不可跨越的墙)
-float Exploration::bfs_shortest_path(point start, point end) {
+// BFS 生成最短路径长度 (仅返回距离，不生成路径)
+__attribute__((section(".ramfunc")))
+uint16_t Exploration::bfs_shortest_path(const SokobanLevel& lvl, point start, point end) {
     if (start == end) return 0.0f;
-
     static int8_t dist[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
     std::memset(dist, -1, sizeof(dist));
     
-    point q[MAP_CELL_COUNT];
     int head = 0, tail = 0;
-    
-    q[tail++] = start;
+    dp_ram.bfs_queue[tail++] = start;
     dist[start.y][start.x] = 0;
 
     while (head < tail) {
-        point curr = q[head++];
+        point curr = dp_ram.bfs_queue[head++];
         if (curr == end) return dist[curr.y][curr.x];
 
         for (int d = 0; d < 4; ++d) {
             point np = curr + MOVE[d];
-            
             if (np.x >= 0 && np.x < MAP_MAX_WIDTH && np.y >= 0 && np.y < MAP_MAX_HEIGHT) {
-                if (dist[np.y][np.x] == -1 && cached_level.map[np.y][np.x] != 1) {
-                    
-                    // 检查是否撞到箱子或炸弹
+
+                bool is_wall = (lvl.map[np.y][np.x] == 1);
+
+                if (dist[np.y][np.x] == -1 && (!is_wall || np == end)) {
                     bool hit = false;
-                    for(int b=0; b<cached_level.box_count; ++b) {
-                        if(cached_level.boxes[b] == np) { hit = true; break; }
+                    for(int b=0; b<lvl.box_count; ++b) if(lvl.boxes[b] == np) { hit = true; break; }
+                    for(int b=0; b<lvl.bomb_count; ++b) {
+                        if(lvl.bombs[b].x != -1 && lvl.bombs[b] == np) { hit = true; break; }
                     }
-                    for(int b=0; b<cached_level.bomb_count; ++b) {
-                        if(cached_level.bombs[b] == np) { hit = true; break; }
-                    }
-                    
-                    if (!hit) {
+                    if (!hit || np == end) {
                         dist[np.y][np.x] = dist[curr.y][curr.x] + 1;
-                        q[tail++] = np;
+                        dp_ram.bfs_queue[tail++] = np;
                     }
                 }
             }
         }
     }
-    return 99999.0f; 
+    return COST_INFINITY; 
 }
 
-
-
-// 获取两点之间的实际网格行驶路径 (发给底层 PathTracker 循迹用)
+// BFS 生成最短路径坐标数组 (考虑炸弹推行时的特殊碰撞规则)
 __attribute__((section(".ramfunc")))
-bool Exploration::get_grid_path(point start, point end, StaticArray<point, MAX_PATH_LENGTH>& out_path) {
+bool Exploration::get_grid_path(const SokobanLevel& lvl, point start, point end, StaticArray<point, MAX_PATH_LENGTH>& out_path) {
     out_path.clear();
-    
-    // 如果已经在了，直接返回成功
-    if (start == end) {
-        return true; 
-    }
+    if (start == end) return true; 
 
-    // 局部 BFS 内存分配 (地图 16x12，占用极小，直接放栈上安全又高效)
     bool visited[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
     point parent[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
     std::memset(visited, 0, sizeof(visited));
@@ -331,41 +339,30 @@ bool Exploration::get_grid_path(point start, point end, StaticArray<point, MAX_P
     
     q[tail++] = start;
     visited[start.y][start.x] = true;
-    
     bool found = false;
 
-    // 标准 BFS 洪泛搜索
     while (head < tail) {
         point curr = q[head++];
-        
-        if (curr == end) {
-            found = true;
-            break;
-        }
+        if (curr == end) { found = true; break; }
         
         for (int i = 0; i < 4; ++i) {
             point np = curr + MOVE[i];
             
-            // 越界检查
             if (np.x >= 0 && np.x < MAP_MAX_WIDTH && np.y >= 0 && np.y < MAP_MAX_HEIGHT) {
-                // 如果没访问过，且不是墙
-                if (!visited[np.y][np.x] && cached_level.map[np.y][np.x] != 1) {
-                    
-                    // 【物理防穿模】：把箱子和炸弹当做绝对的墙壁绕开
+                if (!visited[np.y][np.x] && lvl.map[np.y][np.x] != 1) {
                     bool hit_obstacle = false;
-                    for (int b = 0; b < cached_level.box_count; ++b) {
-                        if (cached_level.boxes[b] == np) { hit_obstacle = true; break; }
+                    for (int b = 0; b < lvl.box_count; ++b) {
+                        if (lvl.boxes[b] == np) { hit_obstacle = true; break; }
                     }
                     if (!hit_obstacle) {
-                        for (int b = 0; b < cached_level.bomb_count; ++b) {
-                            if (cached_level.bombs[b] == np) { hit_obstacle = true; break; }
+                        for (int b = 0; b < lvl.bomb_count; ++b) {
+                            // 【物理校准】必须确认炸弹没被引爆 
+                            if (lvl.bombs[b].x != -1 && lvl.bombs[b] == np) { hit_obstacle = true; break; }
                         }
                     }
-                    
-                    // 如果是安全的空地，加入队列
                     if (!hit_obstacle) {
                         visited[np.y][np.x] = true;
-                        parent[np.y][np.x] = curr; // 记录是从哪个格子走过来的
+                        parent[np.y][np.x] = curr; 
                         q[tail++] = np;
                     }
                 }
@@ -373,19 +370,268 @@ bool Exploration::get_grid_path(point start, point end, StaticArray<point, MAX_P
         }
     }
     
-    // 如果被死角卡住不可达
     if (!found) return false;
     
-    // 路径回溯 (Backtracking)
     point curr = end;
     while (!(curr == start)) {
-        // 把路径点塞进数组 (不包含起点，但包含终点)
         out_path.push_back(curr);
         curr = parent[curr.y][curr.x];
     }
-    
-    // 因为是从终点往起点找的，路径是反的，必须要翻转一下！
     std::reverse(out_path.begin(), out_path.end());
-    
     return true;
+}
+
+
+// 生成小车推炸弹的完整连续路线 (从自身位置一直推入墙体)
+__attribute__((section(".ramfunc")))
+bool Exploration::get_bomb_push_path(const SokobanLevel& lvl, point player_start, BombTask task, StaticArray<point, MAX_PATH_LENGTH>& out_path) {
+    out_path.clear();
+    std::memset(b_ws.visited, 0, sizeof(b_ws.visited));
+
+    // --- 内部闭包：统一障碍物碰撞检测 ---
+    auto is_passable = [&](int x, int y, bool is_bomb_moving) {
+        if (x < 0 || x >= MAP_MAX_WIDTH || y < 0 || y >= MAP_MAX_HEIGHT) return false;
+        
+        // 墙壁判定：除非是炸弹准备被推入目标废墟，否则一律不可穿透
+        if (lvl.map[y][x] == 1) {
+            if (is_bomb_moving && x == task.target_wall.x && y == task.target_wall.y) {} 
+            else return false;
+        }
+        
+        // 箱子绝不可穿透
+        for (int i=0; i<lvl.box_count; ++i) 
+            if (lvl.boxes[i].x == x && lvl.boxes[i].y == y) return false;
+            
+        // 未爆的其他炸弹不可穿透
+        for (int i=0; i<lvl.bomb_count; ++i) {
+            if (lvl.bombs[i].x != -1 && lvl.bombs[i].x == x && lvl.bombs[i].y == y) {
+                // 排除当前正在推的这颗炸弹本体 (因为炸弹本体由调用者单独判断)
+                if (lvl.bombs[i].x == task.bomb_start.x && lvl.bombs[i].y == task.bomb_start.y) continue; 
+                return false;
+            }
+        }
+        return true;
+    };
+
+    // --- 内部闭包：微观层小车连通性极速检测 (不记录路径，只看能不能绕过去) ---
+    auto check_micro_reachable = [&](point start, point end, point obstacle_bomb) {
+        if (start == end) return true;
+        // O(1) 极速清零：代数刷新
+        b_ws.micro_gen++; if (b_ws.micro_gen == 0) { std::memset(b_ws.micro_visited, 0, sizeof(b_ws.micro_visited)); b_ws.micro_gen = 1; }
+        
+        int h = 0, t = 0;
+        b_ws.micro_q[t++] = start;
+        b_ws.micro_visited[start.y][start.x] = b_ws.micro_gen;
+        
+        while (h < t) {
+            point curr = b_ws.micro_q[h++];
+            if (curr == end) return true;
+            for (int d = 0; d < 4; ++d) {
+                point np = curr + MOVE[d];
+                if (b_ws.micro_visited[np.y][np.x] != b_ws.micro_gen) {
+                    // 小车绕路时，当前的炸弹坐标也是一堵实心墙
+                    if (is_passable(np.x, np.y, false) && !(np == obstacle_bomb)) {
+                        b_ws.micro_visited[np.y][np.x] = b_ws.micro_gen;
+                        b_ws.micro_q[t++] = np;
+                    }
+                }
+            }
+        }
+        return false;
+    };
+
+    // ==========================================
+    // 阶段 1：宏观图生成与 BFS (仅搜索推演动作)
+    // ==========================================
+    int head = 0, tail = 0;
+    int target_node_idx = -1;
+
+    // 寻找初始能到达的推炸弹面
+    for (int d = 0; d < 4; ++d) {
+        point push_pos = {
+            static_cast<int8_t>(task.bomb_start.x - MOVE[d].x),
+            static_cast<int8_t>(task.bomb_start.y - MOVE[d].y)
+        };
+        if (is_passable(push_pos.x, push_pos.y, false) && check_micro_reachable(player_start, push_pos, task.bomb_start)) {
+            b_ws.visited[task.bomb_start.y][task.bomb_start.x] |= (1 << d);
+            b_ws.q[tail++] = {task.bomb_start.x, task.bomb_start.y, (uint8_t)d, 65535};
+        }
+    }
+
+    while (head < tail) {
+        int curr_idx = head++;
+        BombMacroNode curr = b_ws.q[curr_idx];
+
+        if (curr.bx == task.target_wall.x && curr.by == task.target_wall.y) {
+            target_node_idx = curr_idx;
+            break;
+        }
+
+        point curr_p = {
+            static_cast<int8_t>(curr.bx - MOVE[curr.p_dir].x),
+            static_cast<int8_t>(curr.by - MOVE[curr.p_dir].y)
+        };
+
+        // 【状态变迁 A】小车往前走一步，推了一下炸弹
+        int nbx = curr.bx + MOVE[curr.p_dir].x;
+        int nby = curr.by + MOVE[curr.p_dir].y;
+        if (is_passable(nbx, nby, true)) {
+            if (!(b_ws.visited[nby][nbx] & (1 << curr.p_dir))) {
+                b_ws.visited[nby][nbx] |= (1 << curr.p_dir);
+                b_ws.q[tail++] = {(int8_t)nbx, (int8_t)nby, curr.p_dir, (uint16_t)curr_idx};
+            }
+        }
+
+        // 【状态变迁 B】炸弹不动，小车绕圈走到炸弹的另一个面上
+        for (int d = 0; d < 4; ++d) {
+            if (d == curr.p_dir) continue;
+            point adj_p = {
+                static_cast<int8_t>(curr.bx - MOVE[d].x),
+                static_cast<int8_t>(curr.by - MOVE[d].y)
+            };
+            
+            if (is_passable(adj_p.x, adj_p.y, false)) {
+                if (!(b_ws.visited[curr.by][curr.bx] & (1 << d))) {
+                    if (check_micro_reachable(curr_p, adj_p, {curr.bx, curr.by})) {
+                        b_ws.visited[curr.by][curr.bx] |= (1 << d);
+                        b_ws.q[tail++] = {curr.bx, curr.by, (uint8_t)d, (uint16_t)curr_idx};
+                    }
+                }
+            }
+        }
+    }
+
+    if (target_node_idx == -1) return false; // 地形死锁，无法把炸弹推进目标墙壁
+
+    // ==========================================
+    // 阶段 2：提取宏观动作链并展开为底层连续轨迹
+    // ==========================================
+    StaticArray<BombMacroNode, 256> macro_path;
+    int curr_idx = target_node_idx;
+    while (curr_idx != 65535) {
+        macro_path.push_back(b_ws.q[curr_idx]);
+        curr_idx = b_ws.q[curr_idx].parent_idx;
+    }
+    std::reverse(macro_path.begin(), macro_path.end());
+
+    // --- 内部闭包：生成并附加真实的微观行走坐标 ---
+    auto append_micro_path = [&](point start, point end, point obstacle_bomb) {
+        if (start == end) return;
+        b_ws.micro_gen++; if (b_ws.micro_gen == 0) { std::memset(b_ws.micro_visited, 0, sizeof(b_ws.micro_visited)); b_ws.micro_gen = 1; }
+        
+        int h = 0, t = 0;
+        b_ws.micro_q[t++] = start;
+        b_ws.micro_visited[start.y][start.x] = b_ws.micro_gen;
+        
+        while (h < t) {
+            point c = b_ws.micro_q[h++];
+            if (c == end) break;
+            for (int d = 0; d < 4; ++d) {
+                point np = c + MOVE[d];
+                if (b_ws.micro_visited[np.y][np.x] != b_ws.micro_gen) {
+                    if (is_passable(np.x, np.y, false) && !(np == obstacle_bomb)) {
+                        b_ws.micro_visited[np.y][np.x] = b_ws.micro_gen;
+                        b_ws.micro_parent[np.y][np.x] = c;
+                        b_ws.micro_q[t++] = np;
+                    }
+                }
+            }
+        }
+        
+        StaticArray<point, 256> temp;
+        point curr_p = end;
+        while (!(curr_p == start)) {
+            temp.push_back(curr_p);
+            curr_p = b_ws.micro_parent[curr_p.y][curr_p.x];
+        }
+        for (int i = temp.size() - 1; i >= 0; --i) out_path.push_back(temp[i]);
+    };
+
+    // 1. 小车从原点走到炸弹的第一起推面
+    point current_car_pos = player_start;
+    point first_push_pos = {
+        static_cast<int8_t>(macro_path[0].bx - MOVE[macro_path[0].p_dir].x),
+        static_cast<int8_t>(macro_path[0].by - MOVE[macro_path[0].p_dir].y)
+    };
+    append_micro_path(current_car_pos, first_push_pos, task.bomb_start);
+    current_car_pos = first_push_pos;
+
+    // 2. 翻译宏动作序列为网格轨迹
+    for (int i = 0; i < macro_path.size() - 1; ++i) {
+        BombMacroNode c_node = macro_path[i];
+        BombMacroNode n_node = macro_path[i+1];
+        
+        if (c_node.bx != n_node.bx || c_node.by != n_node.by) {
+            // [动作A：推] 往前走一格，占据炸弹的旧坐标
+            point step_into = {c_node.bx, c_node.by};
+            out_path.push_back(step_into);
+            current_car_pos = step_into;
+        } else {
+            // [动作B：绕圈] 炸弹坐标没变，小车需要绕路换面
+            point target_face = {
+                static_cast<int8_t>(n_node.bx - MOVE[n_node.p_dir].x),
+                static_cast<int8_t>(n_node.by - MOVE[n_node.p_dir].y)
+            };
+            append_micro_path(current_car_pos, target_face, {c_node.bx, c_node.by});
+            current_car_pos = target_face;
+        }
+    }
+
+    // 3. 最后一下必然是推入墙壁！将炸弹原来的坐标点作为小车的最后落脚点
+    out_path.push_back({
+        static_cast<int8_t>(macro_path.back().bx - MOVE[macro_path.back().p_dir].x),
+        static_cast<int8_t>(macro_path.back().by - MOVE[macro_path.back().p_dir].y)
+    });
+
+    return true;
+}
+
+
+// ============================================================================
+// [模块 5] 视觉语义与身份绑定系统
+// ============================================================================
+__attribute__((section(".ramfunc"))) 
+bool Exploration::match_semantics(const int8_t* semantic_labels, uint8_t* out_matched_ids) const {
+    bool target_assigned[SystemConfig::MAX_BOXES] = {false};
+    bool box_assigned[SystemConfig::MAX_BOXES] = {false};
+    
+    for (int i = 0; i < cached_level.box_count; ++i) out_matched_ids[i] = 0;
+    bool perfect_vision = true;  
+
+    // 阶段 1: 强视觉绑定
+    for (int b = 0; b < cached_level.box_count; ++b) {
+        int8_t box_semantic = semantic_labels[b];
+        if (box_semantic == -1) continue; 
+        
+        for (int t = 0; t < cached_level.target_count; ++t) {
+            int target_entity_id = cached_level.box_count + t;
+            if (semantic_labels[target_entity_id] == box_semantic) {
+                out_matched_ids[b] = t;        
+                box_assigned[b] = true;
+                target_assigned[t] = true;
+                break;
+            }
+        }
+    }
+
+    // 阶段 2: N-1 残缺绑定推演
+    int unassigned_target_search_idx = 0;
+    for (int b = 0; b < cached_level.box_count; ++b) {
+        if (!box_assigned[b]) {  
+            while (unassigned_target_search_idx < cached_level.target_count && 
+                   target_assigned[unassigned_target_search_idx]) {
+                unassigned_target_search_idx++;
+            }
+
+            if (unassigned_target_search_idx < cached_level.target_count) {
+                out_matched_ids[b] = unassigned_target_search_idx;
+                target_assigned[unassigned_target_search_idx] = true;
+            } else {
+                out_matched_ids[b] = 0; 
+                perfect_vision = false;
+            }
+        }
+    }
+
+    return perfect_vision;
 }

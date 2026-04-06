@@ -27,7 +27,6 @@ void GameManager::init() {
 }
 
 
-
 // 全局业务状态机，放在 main 循环中高频调用
 __attribute__((section(".ramfunc"))) void GameManager::update() {
     
@@ -57,11 +56,11 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             float dist = std::sqrt((OUT_TARGET_X - current_pos.x)*(OUT_TARGET_X - current_pos.x) + 
                 (OUT_TARGET_Y - current_pos.y)*(OUT_TARGET_Y - current_pos.y));
             
-            // 如果到达了地图的第一格 (误差 2cm)
+            // 如果到达了地图的第一格
             if (dist < tune.tracker.reach_radius_min) {
                 // 请求视觉模块发送地图数据
-                // vision_manager.request_map_ART1();
-                vision_manager.load_mock_map();     // ~~~ 调试用：直接导入本地地图 ~~~
+                vision_manager.request_map_ART1();
+                // vision_manager.load_mock_map();     // ~~~ 调试用：直接导入本地地图 ~~~
                 phase = GamePhase::WAIT_FOR_VISION;
             }
             break;
@@ -74,7 +73,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 // 将 VisionData 转化为纯粹的算法层 SokobanLevel
                 SokobanLevel level_cache;
                 level_cache.map = vision_data.map;
-                level_cache.player_start = {PLAN_START_X, PLAN_START_Y};    // 注：规划起点与实际位置有一定偏差
+                level_cache.player_start = {PLAN_START_X, PLAN_START_Y};  // 注：规划起点与实际位置有一定偏差
                 level_cache.box_count = vision_data.box_count;
                 level_cache.target_count = vision_data.box_count;
                 level_cache.bomb_count = vision_data.bomb_count;
@@ -87,70 +86,96 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     level_cache.bombs[i] = vision_data.bombs[i];
                 }
 
-                solver.load_from_vision(level_cache);   // 将视觉数据加载到推箱求解器
-                
                 vision_manager.request_pose_ART1();     // 请求获取当前位姿，供路径跟踪使用
                 vision_data.art1_map_ready = false;     // 重置标志，防止重复处理
-
                 
+                logical_level = level_cache;            // 同步当前真实地图到逻辑引擎
+
                 if (competition_stage == 2 || competition_stage == 3) {  
-                    patrol_planner.load_level(level_cache);        // 将视觉数据加载到巡图规划引擎(各自存缓存)
-                    phase = GamePhase::PLAN_PATROL;     // 进入巡图
+                    patrol_planner.load_level(logical_level);  // 将视觉数据加载到巡图规划引擎
+                    phase = GamePhase::PLAN_PATROL;            // 进入巡图
                 } else {
-                    phase = GamePhase::PLAN_SOKOBAN;    // 直接进入推箱子阶段
+                    solver.load_from_vision(logical_level);    // 将视觉数据加载到推箱求解器
+                    phase = GamePhase::PLAN_SOKOBAN;           // 直接进入推箱子阶段
                 }
             }
             break;
         }
 
         case GamePhase::PLAN_PATROL: {
-            // 调用 GTSP 算出最优巡回序列
-            patrol_path = patrol_planner.plan_optimal_patrol({PLAN_START_X, PLAN_START_Y}, ENTRY_YAW);
-            patrol_idx = 0;
-            logical_patrol_pos = {PLAN_START_X, PLAN_START_Y};  // 逻辑位置从规划起点开始，绝对准确
-            vision_manager.reset_semantic_labels();   // 清空语义缓存，准备接受新的识别结果
-            phase = GamePhase::EXEC_PATROL_MOVE;
+            if (competition_stage == 3) {
+                // 【阶段三】先算炸弹，再融进 GTSP
+                StaticArray<BombTask, MAX_BOMBS> bombs = strategic_planner.evaluate_and_assign_bombs(logical_level, {PLAN_START_X, PLAN_START_Y});
+                patrol_actions = patrol_planner.plan_optimal_patrol({PLAN_START_X, PLAN_START_Y}, bombs);
+            } else {
+                // 【阶段二兼容】下发空炸弹数组
+                StaticArray<BombTask, MAX_BOMBS> empty_bombs;
+                patrol_actions = patrol_planner.plan_optimal_patrol({PLAN_START_X, PLAN_START_Y}, empty_bombs);
+            }
+
+            action_idx = 0;
+            logical_patrol_pos = {PLAN_START_X, PLAN_START_Y};  // 逻辑位置从规划起点开始
+            vision_manager.reset_semantic_labels();             // 清空语义缓存，准备接受新的识别结果
+            phase = GamePhase::EXEC_ACTION_DISPATCH;
             break;
         }
 
-        case GamePhase::EXEC_PATROL_MOVE: {
-            if (patrol_idx >= patrol_path.size()) {
-                // 巡视全部完成，进入绑定阶段
+        case GamePhase::EXEC_ACTION_DISPATCH: {
+            if (action_idx >= patrol_actions.size()) {
                 phase = GamePhase::BIND_SEMANTICS;
             } else {
-                // 还没巡完，规划去下一个观测点的路径
-                StaticArray<point, MAX_PATH_LENGTH> segment_path;
-                patrol_planner.get_grid_path(logical_patrol_pos, patrol_path[patrol_idx].pos, segment_path);
-                
-                // 将网格路径加载到追踪器
-                path_tracker.load_path(segment_path);
+                const auto& act = patrol_actions[action_idx];
+                StaticArray<point, MAX_PATH_LENGTH> segment;
 
-                phase = GamePhase::ALIGN_YAW;
+                if (act.is_bomb_task) {
+                    // 计算当前逻辑位置推炸弹到目标墙壁的路径 (推炸弹过程中地图会发生改变，需更新 logical_level)
+                    bool found = patrol_planner.get_bomb_push_path(logical_level, logical_patrol_pos, act.bomb, segment);
+                    if (found) {
+                        path_tracker.load_path(segment);
+                        phase = GamePhase::EXEC_BOMB_PUSH;
+                    } else {
+                        phase = GamePhase::ERROR_OCCURRED; 
+                    }
+
+                } else {
+                    // 计算当前逻辑位置到下一个观测点的路径 (观测过程不改变地图)
+                    bool found = patrol_planner.get_grid_path(logical_level, logical_patrol_pos, act.obs.pos, segment);
+                    if (found) {
+                        path_tracker.load_path(segment);
+                        phase = GamePhase::EXEC_PATROL_MOVE;
+                    } else {
+                        phase = GamePhase::ERROR_OCCURRED;
+                    }
+                }
             }
             break;
         }
 
-        case GamePhase::ALIGN_YAW: {
-            // 等待 Tracker 跑到观测点
+        case GamePhase::EXEC_PATROL_MOVE: {
+            // 监控 PathTracker 是否跑到了观测点
             if (path_tracker.get_state() == TrackerState::FINISHED) {
-                // 到底观测点了，闭环控制车头对准实体
-                Pose2D target = chassis_task.get_target_pose();
-                target.yaw = patrol_path[patrol_idx].target_yaw;
-                chassis_task.set_target_pose(target);
+                phase = GamePhase::EXEC_ALIGN_YAW;
+            }
+            break;
+        }
 
-                // 检查 Yaw 角度误差是否小于 5 度
-                float current_yaw = imu_sensor.get_yaw();
-                float err_yaw = std::abs(target.yaw - current_yaw);
-                if (err_yaw > 180.0f) err_yaw = 360.0f - err_yaw;
+        case GamePhase::EXEC_ALIGN_YAW: {
+            // 到底观测点了，闭环控制车头对准实体
+            Pose2D target = chassis_task.get_target_pose();
+            target.yaw = patrol_actions[action_idx].obs.target_yaw;  
+            chassis_task.set_target_pose(target);
 
-                // 对准目标，触发 ART2 捕捉
-                if (err_yaw < 5.0f) { 
-                    uint8_t current_entity = patrol_path[patrol_idx].entity_id;
-                    bool is_box = patrol_path[patrol_idx].is_box;
-                    vision_manager.request_capture_ART2(current_entity, is_box);
+            // 检查 Yaw 角度误差是否小于 5 度
+            float current_yaw = imu_sensor.get_yaw();
+            float err_yaw = std::abs(target.yaw - current_yaw);
+            if (err_yaw > 180.0f) err_yaw = 360.0f - err_yaw;
 
-                    phase = GamePhase::WAIT_ART2_CAPTURE_ACK;
-                }
+            // 已对准目标，触发 ART2 捕捉
+            if (err_yaw < 5.0f) { 
+                uint8_t current_entity = patrol_actions[action_idx].obs.entity_id;
+                bool is_box = patrol_actions[action_idx].obs.is_box;
+                vision_manager.request_capture_ART2(current_entity, is_box);
+                phase = GamePhase::WAIT_ART2_CAPTURE_ACK;
             }
             break;
         }
@@ -159,14 +184,49 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             // 等待 ART2 的捕捉确认（非阻塞），确认收到后立刻去往下一个点（不必等识别结果）
             if (vision_data.capture_ack_received) {
                 vision_data.capture_ack_received = false;
-
-                // 确认到达并观测完毕后，将逻辑位置更新为当前观测点！
-                logical_patrol_pos = patrol_path[patrol_idx].pos; 
-
-                patrol_idx++;
-
-                phase = GamePhase::EXEC_PATROL_MOVE;
+                // 确认到达并观测完毕后，更新小车逻辑位置为该观测点
+                logical_patrol_pos = patrol_actions[action_idx].obs.pos; 
+                action_idx++;
+                phase = GamePhase::EXEC_ACTION_DISPATCH;
             }
+            break;
+        }
+
+        case GamePhase::EXEC_BOMB_PUSH: {
+            // 监控 PathTracker 是否完成推炸弹宏动作
+            if (path_tracker.get_state() == TrackerState::FINISHED) {
+                phase = GamePhase::UPDATE_MAP;
+            }
+            break;
+        }
+
+        case GamePhase::UPDATE_MAP: {
+            point tw = patrol_actions[action_idx].bomb.target_wall;
+            // 摧毁墙壁
+            for(int dy=-1; dy<=1; dy++) for(int dx=-1; dx<=1; dx++) {
+                if (tw.y+dy > 0 && tw.y+dy < MAP_MAX_HEIGHT-1 && tw.x+dx > 0 && tw.x+dx < MAP_MAX_WIDTH-1)
+                    logical_level.map[tw.y+dy][tw.x+dx] = 0;
+            }
+
+            // 从 logical_level 中注销掉这颗炸弹
+            for (int i = 0; i < logical_level.bomb_count; ++i) {
+                if (logical_level.bombs[i].x == patrol_actions[action_idx].bomb.bomb_start.x &&
+                    logical_level.bombs[i].y == patrol_actions[action_idx].bomb.bomb_start.y) {
+                    logical_level.bombs[i] = {-1, -1};
+                    break;
+                }
+            }
+
+            // 直接获取小车当前的物理里程计位置，转换成网格坐标更新逻辑位置
+            Point2D real_pos = chassis_odometry.get_position();
+            int8_t grid_x = static_cast<int8_t>(std::round((real_pos.x - MAP_OFFSET_X) / GRID_SIZE_CM));
+            int8_t grid_y = static_cast<int8_t>(std::round((real_pos.y - MAP_OFFSET_Y) / GRID_SIZE_CM));
+            if (grid_x < 0) grid_x = 0; else if (grid_x >= MAP_MAX_WIDTH) grid_x = MAP_MAX_WIDTH - 1;
+            if (grid_y < 0) grid_y = 0; else if (grid_y >= MAP_MAX_HEIGHT) grid_y = MAP_MAX_HEIGHT - 1;
+            logical_patrol_pos = {grid_x, grid_y}; 
+
+            action_idx++;
+            phase = GamePhase::EXEC_ACTION_DISPATCH;
             break;
         }
 
@@ -174,8 +234,10 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             bool all_done = true;
 
             // 检查观测过的箱子和目标点是不是都出结果了
-            for (int i = 0; i < patrol_path.size(); i++) {
-                uint8_t visited_entity_id = patrol_path[i].entity_id; 
+            for (int i = 0; i < patrol_actions.size(); i++) {
+                if(patrol_actions[i].is_bomb_task) continue; // 跳过炸弹任务
+
+                uint8_t visited_entity_id = patrol_actions[i].obs.entity_id; 
     
                 // 用真正的实体 ID 去查表
                 if (vision_data.semantic_labels[visited_entity_id] == -1) {
@@ -188,14 +250,9 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 //  N-1 推理配对箱子和目标点的 ID
                 uint8_t matched_ids[SystemConfig::MAX_BOXES];
                 bool is_perfect = patrol_planner.match_semantics(vision_data.semantic_labels, matched_ids);
-
-                // 将正确的映射关系注入底层 IDA* 推箱子引擎
-                // point current_player_pos = {(int8_t)((chassis_odometry.get_position().x - MAP_OFFSET_X) / GRID_SIZE_CM), 
-                //                             (int8_t)((chassis_odometry.get_position().y - MAP_OFFSET_Y) / GRID_SIZE_CM)};
-                // 注意：这里的 current_player_pos 是一个纯逻辑坐标，永远保持和巡图规划时一致的绝对准确坐标！
-                point current_player_pos = logical_patrol_pos; 
-
-                solver.bind_semantics(matched_ids, current_player_pos);
+                
+                solver.load_from_vision(logical_level);   // 将爆炸后改变了地形的 logical_level 导入求解器
+                solver.bind_semantics(matched_ids, logical_patrol_pos);
                 phase = GamePhase::PLAN_SOKOBAN;
             }
             break;
@@ -207,7 +264,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             // 根据赛段调用不同的底层 C++ 模板机器码
             if (competition_stage == 1) {
                 success = solver.solve(GameMode::PHASE1_ANY);
-            } else if (competition_stage == 2) {
+            } else if (competition_stage == 2 || competition_stage == 3) {
                 success = solver.solve(GameMode::PHASE2_SPECIFIC);
             }
 
@@ -237,12 +294,16 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             break;
         }
 
+        case GamePhase::ERROR_OCCURRED: {
+            Point2D current_pos = chassis_odometry.get_position();
+            chassis_task.set_target_pose({current_pos.x, current_pos.y, ENTRY_YAW});
+            break;
+        }
+
         default:
             break;
     }
 }
-
-
 
 
 
@@ -251,98 +312,165 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
 //---------------------------------------------------------------------------------------------------------
 
 __attribute__((section(".dtcm_data"))) DebugGameManager debug_manager;
-DebugGameManager::DebugGameManager() : GameManager(), push_plan_time_ms(0), patrol_plan_time_ms(0) {}
+DebugGameManager::DebugGameManager() : GameManager(), push_plan_time_ms(0), patrol_plan_time_ms(0),bomb_plan_time_ms(0) {}
 
-// 多态拦截器：拦截机制：只拦截PLAN_PATROL 和 PLAN_SOKOBAN，其他原有状态甩给基类处理，并新增了两个动画状态来演示规划结果
+// 多态拦截器
 __attribute__((section(".ramfunc"))) void DebugGameManager::update() {
     
     switch (phase) {  
 
-        // 拦截 1: 测算 GTSP 巡图耗时并开启巡图动画
+        // ====================================================================
+        // 拦截 1: 测算 [炸弹战略] +[GTSP巡图] 耗时并开启巡图动画
+        // ====================================================================
         case GamePhase::PLAN_PATROL: {
-            // 计时开始
-            uint32_t start_time = TaskScheduler::get_sys_tick_ms();
-            patrol_path = patrol_planner.plan_optimal_patrol({PLAN_START_X, PLAN_START_Y}, ENTRY_YAW);
-            patrol_plan_time_ms = TaskScheduler::get_sys_tick_ms() - start_time;
+            uint32_t t0 = TaskScheduler::get_sys_tick_ms();
+
+            if (competition_stage == 3) {
+                // 先算炸弹任务，记录耗时
+                cached_bomb_tasks = strategic_planner.evaluate_and_assign_bombs(logical_level, {PLAN_START_X, PLAN_START_Y});
+                bomb_plan_time_ms = TaskScheduler::get_sys_tick_ms() - t0;
+            } else {
+                cached_bomb_tasks.clear();
+                bomb_plan_time_ms = 0;
+            }
+
+            uint32_t t1 = TaskScheduler::get_sys_tick_ms();
+            // 结合炸弹任务，生成含宏动作的 3D 动作流
+            patrol_actions = patrol_planner.plan_optimal_patrol({PLAN_START_X, PLAN_START_Y}, cached_bomb_tasks);
+            patrol_plan_time_ms = TaskScheduler::get_sys_tick_ms() - t1;
 
             vision_manager.reset_semantic_labels(); 
             
-            // 初始化演示状态（将虚拟车放在起点，准备跑巡图）
+            // 初始化演示状态机
             demo.player = {PLAN_START_X, PLAN_START_Y};
             demo.patrol_target_idx = 0;
             demo.segment_path.clear();
+            demo.segment_idx = 0;
             demo.last_tick = TaskScheduler::get_sys_tick_ms();
+            demo.map_state = logical_level;
             
-            // 强行改变流向，不让底盘动，进入屏幕演示模式
+            // 深拷贝初始地图与炸弹数组，供动画过程随意破坏
+            demo.map_state = logical_level;
+            demo.bomb_count = logical_level.bomb_count;
+            for (int i = 0; i < demo.bomb_count; ++i) demo.bombs[i] = logical_level.bombs[i];
+            
+            force_bg_redraw = true;
             phase = GamePhase::ANIMATE_PATROL_DEMO;
             break;
         }
 
-        // 新增状态: 巡图动画 (模拟小车跑图与拍照)
+        // ====================================================================
+        // 新增状态: 巡图混合动画 (观测目标 + 强推炸弹破墙)
+        // ====================================================================        
         case GamePhase::ANIMATE_PATROL_DEMO: {
             // 控制动画帧率：100ms 一步
             if (TaskScheduler::get_sys_tick_ms() - demo.last_tick > 100) {
                 demo.last_tick = TaskScheduler::get_sys_tick_ms();
                 
-                // 如果已经跑完了所有观测点，进入 BIND_SEMANTICS，这会触发你的匹配和 N-1 推理
-                if (demo.patrol_target_idx >= patrol_path.size()) {
+                // 动作流跑完，转入逻辑绑定
+                if (demo.patrol_target_idx >= patrol_actions.size()) {
                     phase = GamePhase::BIND_SEMANTICS;
                     break;
                 }
 
-                // 检查我们是否已经到了当前的观测点
-                if (demo.player == patrol_path[demo.patrol_target_idx].pos) {
-                    // 到达观测点，模拟 ART2 视觉触发并返回了结果
-                    uint8_t current_entity = patrol_path[demo.patrol_target_idx].entity_id;
+                const auto& act = patrol_actions[demo.patrol_target_idx];
+
+                // 1. 如果没有路径，则生成路径
+                if (demo.segment_path.empty()) {
+                    bool success = false;
+                    // 注意：这里必须传入 demo.map_state！因为之前的炸弹可能已经改变了地形
+                    if (act.is_bomb_task) success = patrol_planner.get_bomb_push_path(demo.map_state, demo.player, act.bomb, demo.segment_path);
+                    else success = patrol_planner.get_grid_path(demo.map_state, demo.player, act.obs.pos, demo.segment_path);
                     
-                    // 瞬间注入上帝视角的答案
-                    vision_data.semantic_labels[current_entity] = mock_truth_labels[current_entity];
+                    if (!success) { phase = GamePhase::ERROR_OCCURRED; break; } // 死锁防御
+                    demo.segment_idx = 0;
+                }
+
+                // 2. 物理推演：小车前进
+                if (demo.segment_idx < demo.segment_path.size()) {
+                    point next_pos = demo.segment_path[demo.segment_idx++];
                     
-                    // 同步更新基类的逻辑坐标！防止 BINDING 时给求解器传入错误的起点！
+                    // 如果正在执行推炸弹宏动作，检查小车是不是踏入了炸弹的坐标
+                    if (act.is_bomb_task) {
+                        int b_idx = demo_find_bomb(next_pos);
+                        if (b_idx != -1) {
+                            // 发生了推移：炸弹沿着小车前进的方向被推一格
+                            point push_dir = {static_cast<int8_t>(next_pos.x - demo.player.x), static_cast<int8_t>(next_pos.y - demo.player.y)};
+                            demo.bombs[b_idx] = {static_cast<int8_t>(next_pos.x + push_dir.x), static_cast<int8_t>(next_pos.y + push_dir.y)};
+                        }
+                    }
+                    demo.player = next_pos; // 小车走入新格子
+                } 
+
+                // 3. 终点结算
+                if (demo.segment_idx >= demo.segment_path.size()){
+                    if (act.is_bomb_task) {
+                        // 炸弹已陷入废墟墙壁，触发爆炸摧毁周围 3x3 的格子
+                        point tw = act.bomb.target_wall;
+                        point bs = act.bomb.bomb_start;
+
+                        for(int dy = -1; dy <= 1; dy++) {
+                            for(int dx = -1; dx <= 1; dx++) {
+                                int ny = tw.y + dy, nx = tw.x + dx;
+                                if (ny > 0 && ny < MAP_MAX_HEIGHT-1 && nx > 0 && nx < MAP_MAX_WIDTH-1) {
+                                    demo.map_state.map[ny][nx] = 0; 
+                                    logical_level.map[ny][nx] = 0;   // 同步更新逻辑地图，保持动画和求解器的一致性
+                                }
+                            }
+                        }
+
+                        demo_remove_bomb(tw);    // 从 UI 中彻底抹除这颗炸弹
+                        for (int i = 0; i < logical_level.bomb_count; ++i) {
+                            if (logical_level.bombs[i].x == bs.x && logical_level.bombs[i].y == bs.y) {
+                                logical_level.bombs[i] = {-1, -1};
+                                demo.map_state.bombs[i] = {-1, -1}; // 同步更新 demo 的炸弹缓存，保持动画和求解器的一致性
+                                break;
+                            }
+                        }
+
+                        force_bg_redraw = true;  // 唤醒 UI 线程重绘地砖
+                        
+                    } else {
+                        // 观测到达，上帝视角瞬间注入答案
+                        uint8_t current_entity = act.obs.entity_id;
+                        vision_data.semantic_labels[current_entity] = mock_truth_labels[current_entity];
+                    }
+
+                    // 真实逻辑基准点同步
                     logical_patrol_pos = demo.player;
 
-                    // 准备去下一个观测点
+                    // 准备进行下一个宏动作
                     demo.segment_path.clear();
                     demo.patrol_target_idx++;
-                } else {
-                    // 我们还没到观测点，需要往前开
-                    if (demo.segment_path.empty() || demo.segment_idx >= demo.segment_path.size()) {
-                        // 请求局部 BFS 算出绕开箱子前往观测点的网格路径
-                        patrol_planner.get_grid_path(demo.player, patrol_path[demo.patrol_target_idx].pos, demo.segment_path);
-                        demo.segment_idx = 0;
-                    }
-                    
-                    // 让虚拟小车走一步
-                    if (demo.segment_idx < demo.segment_path.size()) {
-                        demo.player = demo.segment_path[demo.segment_idx++];
-                    }
                 }
             }
             break;
         }
 
-        // 拦截 2: 测算推箱子耗时并开启推箱动画
+        // ====================================================================
+        // 拦截 2: 测算 IDA* 推箱子耗时并开启推箱动画
+        // ====================================================================
         case GamePhase::PLAN_SOKOBAN: {
             // 开始规划并记录时间
-            uint32_t start_time = TaskScheduler::get_sys_tick_ms();
+            uint32_t t0 = TaskScheduler::get_sys_tick_ms();
             bool success = false;
             if (competition_stage == 1) success = solver.solve(GameMode::PHASE1_ANY); 
-            else if (competition_stage == 2) success = solver.solve(GameMode::PHASE2_SPECIFIC);
-            push_plan_time_ms = TaskScheduler::get_sys_tick_ms() - start_time;
+            else if (competition_stage == 2 || competition_stage == 3) success = solver.solve(GameMode::PHASE2_SPECIFIC);
+            push_plan_time_ms = TaskScheduler::get_sys_tick_ms() - t0;
 
             if (success) {
-                // 拦截成功，不立刻发车，而是初始化动画状态机
+                // 拦截成功，初始化动画状态机
                 demo.player = logical_patrol_pos;
-                demo.box_count = vision_data.box_count;
-                demo.target_count = vision_data.box_count;
+                demo.map_state = logical_level;
+                demo.box_count = logical_level.box_count;
+                demo.target_count = logical_level.target_count;
                 for (int i = 0; i < demo.box_count; i++) {
-                    demo.boxes[i] = vision_data.boxes[i];
-                    demo.targets[i] = vision_data.targets[i];
+                    demo.boxes[i] = logical_level.boxes[i];
+                    demo.targets[i] = logical_level.targets[i];
                 }
                 demo.path_idx = 0;
                 demo.last_tick = TaskScheduler::get_sys_tick_ms();
                 
-                // 将状态转入我们派生类独有的演示状态
                 phase = GamePhase::ANIMATE_DEMO; 
             } else {
                 // 求解失败，走原逻辑
@@ -352,7 +480,9 @@ __attribute__((section(".ramfunc"))) void DebugGameManager::update() {
             break;
         }
 
-        // 新增状态: 播放推箱子动画
+        // ====================================================================
+        // 新增状态: 播放推箱子动画 
+        // ====================================================================
         case GamePhase::ANIMATE_DEMO: {
             // 每 100ms 刷新一帧动画 (非阻塞)
             if (TaskScheduler::get_sys_tick_ms() - demo.last_tick > 100) {
@@ -363,8 +493,7 @@ __attribute__((section(".ramfunc"))) void DebugGameManager::update() {
                 if (demo.path_idx >= path.size() - 1) {
                     
                     demo.player = logical_patrol_pos;           // 动画结束：将虚拟小车变回原点     
-                    path_tracker.load_path(path);               // 将计算好的路径真正加载给底层 Tracker
-                    phase = GamePhase::EXEC_SOKOBAN;            // 状态机切入 EXEC_SOKOBAN，接下来基类就会接管真实的物理小车移动
+                    phase = GamePhase::FINISHED;                // 直接进入完成状态，等待重置
                     break;
                 }
 
@@ -418,16 +547,20 @@ void DebugGameManager::inject_mock_semantics() {
     // 把数组全清为 -1，模拟真实开局
     std::memset(mock_truth_labels, -1, sizeof(mock_truth_labels));
 
-    // 假设场上最多8个箱子，8个目标。
-    // 这里故意给个乱序配对，用来验证你的 N-1 逻辑推理是否牛逼
-    mock_truth_labels[0] = 7;  // 0号箱子写着7
-    mock_truth_labels[1] = 2;  // 1号箱子写着2
-    mock_truth_labels[2] = 9;  // 2号箱子写着9
-    
-    // 假设 0~7 是箱子，8~15是目标点 (取决于你总实体数，为了安全我们可以把后面的也填了)
-    mock_truth_labels[3]  = 9; // 0号目标点写着9 -> 对应2号箱
-    mock_truth_labels[4]  = 7; // 1号目标点写着7 -> 对应0号箱
-    mock_truth_labels[5] = 2;  // 2号目标点写着2 -> 对应1号箱
+    // 自适应配对虚拟数据：把前 N 个箱子和后 N 个目标点完美赋予相同的标签 1, 2, 3...
+    for(int i = 0; i < 3; i++) {
+        mock_truth_labels[i] = i + 1;         // 箱子 ID (0~7) 赋予标签 1~8
+        mock_truth_labels[3 + i] = i + 1;     // 目标 ID (8~15) 赋予标签 1~8
+    }
+
+    // // 假设场上最多3个箱子，3个目标。
+    // mock_truth_labels[0] = 7;  // 0号箱子写着7
+    // mock_truth_labels[1] = 2;  // 1号箱子写着2
+    // mock_truth_labels[2] = 9;  // 2号箱子写着9
+    // // 假设 0~7 是箱子，8~15是目标点 (取决于你总实体数，为了安全我们可以把后面的也填了)
+    // mock_truth_labels[3]  = 9; // 0号目标点写着9 -> 对应2号箱
+    // mock_truth_labels[4]  = 7; // 1号目标点写着7 -> 对应0号箱
+    // mock_truth_labels[5] = 2;  // 2号目标点写着2 -> 对应1号箱
 }
 
 
@@ -453,5 +586,17 @@ void DebugGameManager::demo_remove_target(point p) {
             demo.target_count--;
             return;
         }
+    }
+}
+int DebugGameManager::demo_find_bomb(point p) {
+    for (int i = 0; i < demo.bomb_count; ++i) 
+        if (demo.bombs[i].x == p.x && demo.bombs[i].y == p.y) return i;
+    return -1;
+}
+void DebugGameManager::demo_remove_bomb(point p) {
+    int idx = demo_find_bomb(p);
+    if (idx != -1) {
+        demo.bombs[idx] = demo.bombs[demo.bomb_count - 1]; // 尾部置换法，极致性能
+        demo.bomb_count--;
     }
 }

@@ -48,7 +48,7 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
     
     // Tracker 几何预测参数
     {
-        4.0f,     // reach_radius: 10cm 切弯
+        2.0f,     // reach_radius: 10cm 切弯
         1.0f       // reach_radius_min: 终点停稳极小宽容度
     },
     
