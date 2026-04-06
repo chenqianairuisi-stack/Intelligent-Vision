@@ -13,8 +13,6 @@ float planned_v_debug = 0.0f;     // 当前规划的速度大小，供 telemetry
 float current_local_x = 0.0f;     // 当前局部 X 位移，供调试用
 float current_local_y = 0.0f;     // 当前局部 Y 位移，供调试用     
 
-char last_rx_cmd[32] = "WAITING CMD...";
-
 void Telemetry::init() {
     // 初始化无线串口 (波特率默认115200)
     wireless_uart_init();
@@ -24,31 +22,56 @@ void Telemetry::init() {
     tx_packet.tail = 0xBB;
 }
 
-// 发送波形数据 (主循环)
+// 发送波形数据
 void Telemetry::send_wave_data() {
-    Point2D current_pos = chassis_odometry.get_position();
-    Pose2D  target_pos  = chassis_task.get_target_pose();  
-    
-    Velocity2D avg_speed = Kinematics::forward_kinematics(
-        encoders.get_speed_cm_s(0),
-        encoders.get_speed_cm_s(1),
-        encoders.get_speed_cm_s(2),
-        encoders.get_speed_cm_s(3)
-    );
-    float avg_speed_mag = std::sqrt(avg_speed.vx * avg_speed.vx + avg_speed.vy * avg_speed.vy);
+    if (telemetry_display_mode == 0) {
+        // 【模式 0】：底盘动力学监控
+        Point2D current_pos = chassis_odometry.get_position();
+        Pose2D  target_pos  = chassis_task.get_target_pose();  
+        
+        Velocity2D avg_speed = Kinematics::forward_kinematics(
+            encoders.get_speed_cm_s(0), encoders.get_speed_cm_s(1),
+            encoders.get_speed_cm_s(2), encoders.get_speed_cm_s(3)
+        );
+        float avg_speed_mag = std::sqrt(avg_speed.vx * avg_speed.vx + avg_speed.vy * avg_speed.vy);
 
-    // 填充数据通道
-    tx_packet.target_v = planned_v_debug;            // 梯形规划的当前标量速度
-    tx_packet.actual_v = avg_speed_mag;              // 轮子实际反馈速度
-    tx_packet.target_x = target_pos.x;               // 目标点 X
-    tx_packet.actual_x = current_pos.x;              // 实际里程计 X
-    tx_packet.target_y = target_pos.y;               // 目标点 Y
-    tx_packet.actual_y = current_pos.y;              // 实际里程计 Y
+        tx_packet.data_1 = planned_v_debug;            
+        tx_packet.data_2 = avg_speed_mag;              
+        tx_packet.data_3 = target_pos.x;               
+        tx_packet.data_4 = current_pos.x;              
+        tx_packet.data_5 = target_pos.y;               
+        tx_packet.data_6 = current_pos.y;              
+        
+    } 
+    else if (telemetry_display_mode == 1) {
+        // 【模式 1】：ART1 视觉定位与地图监控
+        tx_packet.data_1 = vision_data.current_x;      // CH1: 视觉 X 坐标
+        tx_packet.data_2 = vision_data.current_y;      // CH2: 视觉 Y 坐标
+        tx_packet.data_3 = vision_data.box_count;      // CH4: 解析出的箱子总数
+        tx_packet.data_4 = vision_data.bomb_count;     // CH5: 解析出的炸弹总数
+        // CH5: 地图就绪脉冲信号 (视觉模块每次解析出新地图时会置位一次，发送后立即清零)
+        tx_packet.data_5 = vision_data.art1_map_ready ? 10.0f : 0.0f; 
+        vision_data.art1_map_ready = false;
+        // CH6: 定位更新脉冲信号
+        tx_packet.data_6 = vision_data.art1_pose_updated ? 10.0f : 0.0f; 
+        vision_data.art1_pose_updated = false;
+        
+    } 
+    else if (telemetry_display_mode == 2) {
+        // 【模式 2】：ART2 语义识别监控
+        tx_packet.data_1 = (float)vision_data.semantic_labels[0]; // CH1: 实体 0 的标签
+        tx_packet.data_2 = (float)vision_data.semantic_labels[1]; // CH2: 实体 1 的标签
+        tx_packet.data_3 = (float)vision_data.semantic_labels[2]; // CH3: 实体 2 的标签
+        tx_packet.data_4 = (float)vision_data.semantic_labels[3]; // CH4: 实体 3 的标签
+        tx_packet.data_5 = (float)vision_data.semantic_labels[4]; // CH5: 实体 4 的标签
+        tx_packet.data_6 = (float)vision_data.semantic_labels[5]; // CH6: 实体 5 的标签
+        vision_data.capture_ack_received = false;
+    }
 
     wireless_uart_send_buffer((uint8*)&tx_packet, sizeof(VofaJustFloat));
 }
 
-// 接收并解析上位机命令 (主循环)
+// 接收上位机命令
 void Telemetry::receive_and_parse_task() {
     uint8_t temp_buf[32]; 
     
@@ -64,9 +87,6 @@ void Telemetry::receive_and_parse_task() {
             if (byte == '\n' || byte == '\r') {
                 if (rx_idx > 0) {
                     rx_cmd_buf[rx_idx] = '\0';     // 加上字符串结束符
-
-                    strncpy(last_rx_cmd, rx_cmd_buf, sizeof(last_rx_cmd) - 1);  // 更新全局变量供 TFT 显示
-                    last_rx_cmd[sizeof(last_rx_cmd) - 1] = '\0';
                     
                     execute_command(rx_cmd_buf);   // 解析并执行命令
                     rx_idx = 0;                    // 清空缓冲区，准备下一次接收
@@ -79,6 +99,7 @@ void Telemetry::receive_and_parse_task() {
         }
     }
 }
+
 
 
 // 解析并执行上位机发来的字符串命令 (格式示例: "!S Q 1.5" 表示设置速度环 KP=1.5)
@@ -99,12 +120,16 @@ void Telemetry::execute_command(const char* cmd) {
                 case 'W': tune.pid_speed.ki = value; break;
                 case 'E': tune.pid_yaw.kp = value; break;
                 case 'R': tune.pid_yaw.kd = value; break;
+
                 case 'A': tune.dynamics.max_speed = value; break;
                 case 'S': tune.dynamics.max_acc = value; break;
                 case 'D': tune.dynamics.max_jerk = value; break;
                 case 'F': tune.dynamics.max_ang_speed = value; break;
+
                 case 'Z': tune.tracker.reach_radius = value; break;
                 case 'X': tune.tracker.reach_radius_min = value; break;
+
+                case 'V': telemetry_display_mode = (int)value; break; 
                 default: return;
             }
             break;
@@ -113,6 +138,8 @@ void Telemetry::execute_command(const char* cmd) {
             switch (sub) {
                 case 'M': vision_manager.request_map_ART1();  break;
                 case 'P': vision_manager.request_pose_ART1(); break;
+                case 'T': vision_manager.request_capture_ART2((uint8_t)value, true); break;
+                case 'L': vision_manager.test_loopback_map(); break;
             }
             break;
 
@@ -148,3 +175,4 @@ void Telemetry::execute_command(const char* cmd) {
         }
     }
 }
+

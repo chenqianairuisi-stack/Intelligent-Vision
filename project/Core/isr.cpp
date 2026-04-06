@@ -55,7 +55,8 @@ extern "C" void LPUART1_IRQHandler(void)
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART1))
     {
         // 接收中断触发：调用 uart_cam1 的中断服务函数
-        uart_cam1.rxisr();
+        uart_cam2.rxisr();
+        
 
     // #if DEBUG_UART_USE_INTERRUPT                        // 如果开启 debug 串口中断
     //     debug_interrupr_handler();                      // 调用 debug 串口接收处理函数 数据会被 debug 环形缓冲区读取
@@ -92,7 +93,7 @@ extern "C" void LPUART4_IRQHandler(void)
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART4))
     {
         // 接收中断触发：调用 uart_cam2 的中断服务函数
-        uart_cam2.rxisr();
+        uart_cam1.rxisr();
 
         // 接收中断 
         // flexio_camera_uart_handler();

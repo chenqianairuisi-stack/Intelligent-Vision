@@ -298,8 +298,8 @@ void TftMenu::draw_game_status() {
 
     tft180_show_string(0, 4 * UI_ROW_H, "GAME STAGE:");
     tft180_show_int(16 * UI_COL_W, 4 * UI_ROW_H, game_manager.get_stage(), 1); 
-    tft180_show_string(0, 6 * UI_ROW_H, "DEBUG STAGE:");
-    tft180_show_int(16 * UI_COL_W, 6 * UI_ROW_H, debug_manager.get_stage(), 1); 
+    tft180_show_string(0, 5 * UI_ROW_H, "DEBUG STAGE:");
+    tft180_show_int(16 * UI_COL_W, 5 * UI_ROW_H, debug_manager.get_stage(), 1); 
 }
 
 

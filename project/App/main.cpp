@@ -18,10 +18,10 @@ extern "C" int main(void) {
     // game_manager.init();                      // 管理模块初始化 (gpio)
 
     // IMU 开机静态标定，累计 500 次数据求平均，得到 gyro_z_offset
-    system_delay_ms(500); // 等待imu芯片稳定
+    system_delay_ms(500);
     while(!imu_sensor.calibrate_step()) {
-        imu_icm42688.update_gyro_only();   // 主动提供数据给标定函数
-        system_delay_ms(5);                // 模拟 5ms 等待
+        imu_icm42688.update_gyro_only();  // 主动提供数据给标定函数
+        system_delay_ms(5);                
     }
 
     pit_ms_init(PIT_CH0, 5);                  // 初始化 PIT_CH0 为 5ms 周期中断
@@ -30,9 +30,9 @@ extern "C" int main(void) {
     interrupt_global_enable(0);               // 全局使能中断
 
 
-    debug_manager.init();                      // 管理模块初始化 (gpio)
-    debug_manager.inject_mock_semantics();     // 注入虚拟视觉标签，供没有摄像头时的调试使用
-    debug_manager.set_phase(GamePhase::WAIT_FOR_VISION);
+    debug_manager.init(); 
+    debug_manager.set_phase(GamePhase::WAIT_FOR_VISION);   // ~~~ 调试用：直接进入等待视觉阶段，测试串口和状态机 ~~~        
+    debug_manager.inject_mock_semantics();    // 注入虚拟视觉标签，供没有摄像头时的调试使用
 
     while(1) {
         vision_manager.update();             // 视觉地图/位置解析

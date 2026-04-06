@@ -198,42 +198,7 @@ __attribute__((section(".ramfunc"))) void VisionManager::process_art2_packet() {
 
 // 加载本地 ASCII 字符测试地图
 void VisionManager::load_mock_map() {
-    // const char* map_layout[SystemConfig::MAP_MAX_HEIGHT] = {
-    //     "############",
-    //     "#----------#",
-    //     "#-######---#",
-    //     "#-#----#---#",
-    //     "#-#-##$----#",
-    //     "#-#..$-----#",
-    //     "#-####---#-#",
-    //     "#----#---#-#",
-    //     "#----#---#-#",
-    //     "#----#---#-#",
-    //     "#--###-----#",
-    //     "#--#-------#",
-    //     "#--#-------#",
-    //     "#-.$-------#",
-    //     "##-#-------#",
-    //     "############"
-    // };
-    // const char* map_layout[SystemConfig::MAP_MAX_HEIGHT] = {
-    //     "############",
-    //     "#----------#",
-    //     "#-####-----#",
-    //     "#-#--#-----#",
-    //     "#-#.-#-----#",
-    //     "#-####-----#",
-    //     "#--------#-#",
-    //     "#------$-#-#",
-    //     "#--*-----#-#",
-    //     "#--------#-#",
-    //     "#-------.--#",
-    //     "#-$--------#",
-    //     "#-------$--#",
-    //     "#-.--------#",
-    //     "##-#-------#",
-    //     "############"
-    // };
+
     const char* map_layout[SystemConfig::MAP_MAX_HEIGHT] = {
         "############",
         "#.-$-------#",
@@ -252,7 +217,7 @@ void VisionManager::load_mock_map() {
         "#--#-------#",
         "############"
     };
-    // 清空原有的统计数据
+
     vision_data.box_count = 0;
     vision_data.bomb_count = 0;
     uint8_t target_count = 0;
@@ -269,28 +234,24 @@ void VisionManager::load_mock_map() {
                 case '#': 
                     vision_data.map[y][x] = 1; // 墙壁
                     break;
-                    
                 case '.': 
                     if (target_count < SystemConfig::MAX_BOXES) {
                         vision_data.targets[target_count] = {(int8_t)x, (int8_t)y};
                         target_count++;
                     }
                     break;
-                    
                 case '$': 
                     if (vision_data.box_count < SystemConfig::MAX_BOXES) {
                         vision_data.boxes[vision_data.box_count] = {(int8_t)x, (int8_t)y};
                         vision_data.box_count++;
                     }
                     break;
-                    
                 case '*': 
                     if (vision_data.bomb_count < SystemConfig::MAX_BOMBS) {
                         vision_data.bombs[vision_data.bomb_count] = {(int8_t)x, (int8_t)y};
                         vision_data.bomb_count++;
                     }
                     break;
-                    
                 default: 
                     break;
             }
@@ -300,3 +261,62 @@ void VisionManager::load_mock_map() {
     // 拉起就绪标志位，瞬间触发 GameManager 进入 PLAN_SOKOBAN 寻路状态
     vision_data.art1_map_ready = true; 
 }
+
+// 构造一个测试包，测试串口自环回功能（无需摄像头时的调试使用）
+void VisionManager::test_loopback_map() {
+    // 构造一个包含 1个箱子、1个目标、1个炸弹的测试包
+    // 长度 = 24(墙壁) + 1(数量) + 1(箱子) + 1(目标) + 1(炸弹) = 28字节
+    uint8_t payload[28] = {0}; 
+
+    // 1. 铺设墙壁 (前24字节)
+    // 假设在 X=0, Y=0 (第0个bit) 和 X=1, Y=0 (第1个bit) 放墙壁
+    payload[0] = 0x03; // 二进制 00000011
+
+    // 2. 设置数量 (第24字节)
+    // 高4位是箱子(1), 低4位是炸弹(1) -> 0x11
+    payload[24] = 0x11;
+
+    // 3. 设置坐标 (X << 4 | Y)
+    payload[25] = 0x34; // 箱子坐标：X=3, Y=4
+    payload[26] = 0x56; // 目标坐标：X=5, Y=6
+    payload[27] = 0x78; // 炸弹坐标：X=7, Y=8
+
+    // 4. 调用底层的串口发送函数发给自己
+    uart_cam1.send_packet(MSG_MAP_DATA, payload, 28);
+}
+
+
+
+    //     "############",
+    //     "#----------#",
+    //     "#-######---#",
+    //     "#-#----#---#",
+    //     "#-#-##$----#",
+    //     "#-#..$-----#",
+    //     "#-####---#-#",
+    //     "#----#---#-#",
+    //     "#----#---#-#",
+    //     "#----#---#-#",
+    //     "#--###-----#",
+    //     "#--#-------#",
+    //     "#--#-------#",
+    //     "#-.$-------#",
+    //     "##-#-------#",
+    //     "############"
+    //
+    //     "############",
+    //     "#----------#",
+    //     "#-####-----#",
+    //     "#-#--#-----#",
+    //     "#-#.-#-----#",
+    //     "#-####-----#",
+    //     "#--------#-#",
+    //     "#------$-#-#",
+    //     "#--*-----#-#",
+    //     "#--------#-#",
+    //     "#-------.--#",
+    //     "#-$--------#",
+    //     "#-------$--#",
+    //     "#-.--------#",
+    //     "##-#-------#",
+    //     "############"

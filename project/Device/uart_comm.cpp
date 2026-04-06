@@ -1,8 +1,8 @@
 #include "uart_comm.h"
 
 
-__attribute__((section(".dtcm_data"))) UartComm uart_cam1(UART_1, 115200, UART1_TX_B12,  UART1_RX_B13, LPUART1_IRQn);
-__attribute__((section(".dtcm_data"))) UartComm uart_cam2(UART_4, 115200, UART4_TX_C16, UART4_RX_C17, LPUART4_IRQn);
+__attribute__((section(".dtcm_data"))) UartComm uart_cam2(UART_1, 115200, UART1_TX_B12,  UART1_RX_B13, LPUART1_IRQn);
+__attribute__((section(".dtcm_data"))) UartComm uart_cam1(UART_4, 115200, UART4_TX_C16, UART4_RX_C17, LPUART4_IRQn);
 
 
 UartComm::UartComm(uart_index_enum idx_, uint32_t baud_, uart_tx_pin_enum tx_, uart_rx_pin_enum rx_, IRQn_Type irq_)

@@ -23,13 +23,12 @@ void GameManager::init() {
     if (!sw1_on && !sw2_on) competition_stage = 1;       // 00 -> 阶段一
     else if ( sw1_on && !sw2_on) competition_stage = 2;  // 10 -> 阶段二
     else if (!sw1_on &&  sw2_on) competition_stage = 3;  // 01 -> 阶段三
-    else competition_stage = 1;                          // 11 -> 默认回退到阶段一
+    else competition_stage = 4;                          // 11 -> 调试阶段(本地导入地图数据)
 }
 
 
 // 全局业务状态机，放在 main 循环中高频调用
 __attribute__((section(".ramfunc"))) void GameManager::update() {
-    
     // 获取当前物理坐标，用于判断是否到位
     Point2D current_pos = chassis_odometry.get_position();
     
@@ -58,9 +57,12 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             
             // 如果到达了地图的第一格
             if (dist < tune.tracker.reach_radius_min) {
-                // 请求视觉模块发送地图数据
-                vision_manager.request_map_ART1();
-                // vision_manager.load_mock_map();     // ~~~ 调试用：直接导入本地地图 ~~~
+                if (competition_stage == 4) {
+                    vision_manager.load_mock_map();      // ~~~ 调试用：直接导入本地地图 ~~~
+                } else {
+                    vision_manager.request_map_ART1();   // 请求视觉模块发送地图数据
+                }
+                
                 phase = GamePhase::WAIT_FOR_VISION;
             }
             break;
@@ -98,7 +100,14 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     solver.load_from_vision(logical_level);    // 将视觉数据加载到推箱求解器
                     phase = GamePhase::PLAN_SOKOBAN;           // 直接进入推箱子阶段
                 }
+            } else {
+                static uint32_t last_request_tick = TaskScheduler::get_sys_tick_ms();
+                if (TaskScheduler::get_sys_tick_ms() - last_request_tick > 1000) {
+                    last_request_tick = TaskScheduler::get_sys_tick_ms();
+                    vision_manager.request_map_ART1();  // 超时重试请求地图数据
+                }
             }
+
             break;
         }
 
