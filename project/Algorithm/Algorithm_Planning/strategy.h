@@ -10,6 +10,16 @@ struct BombTask {
     int net_profit;      // 净收益评估值
 };
 
+// 用于对合法墙壁进行排序
+struct BombCandidate {
+    uint8_t bomb_idx;
+    int8_t x, y;
+    int score;
+    bool operator<(const BombCandidate& other) const {
+        return score > other.score; // 分数高的排前面
+    }
+};
+
 // DFS 最优结果
 struct DFSResult {
     StaticArray<BombTask, MAX_BOMBS> tasks;

@@ -35,6 +35,136 @@ StaticArray<BombTask, MAX_BOMBS> StrategicPlanner::evaluate_and_assign_bombs(con
 }
 
 
+// DFS 推演核心
+__attribute__((section(".ramfunc")))
+void StrategicPlanner::dfs_bomb_sequence(
+    const SokobanLevel& current_lvl, point player_start,
+    StaticArray<BombTask, MAX_BOMBS> current_seq, int cost_so_far, 
+    int depth, DFSResult& best_res) 
+{
+    // 1) 统计当前状态
+    int current_deadlocks = 0;
+    int current_distance = 0;
+
+    this->calc_player_reach(current_lvl, player_start, {-1,-1}, {-1,-1}, dfs_player_vis[depth]);
+
+    for (int b = 0; b < current_lvl.box_count; ++b) {
+        this->fast_push_bfs(current_lvl, current_lvl.boxes[b], player_start, false, dfs_dist_box[depth][b]);
+        point target = current_lvl.targets[b];
+        if (dfs_dist_box[depth][b][target.y][target.x] == INF_DIST) current_deadlocks++;
+        else current_distance += dfs_dist_box[depth][b][target.y][target.x];
+    }
+
+    int profit = -current_distance - cost_so_far;
+    if (current_deadlocks < best_res.deadlocks_remaining || 
+       (current_deadlocks == best_res.deadlocks_remaining && profit > best_res.net_profit)) {
+        best_res.deadlocks_remaining = current_deadlocks;
+        best_res.net_profit = profit;
+        best_res.tasks = current_seq;
+    }
+
+    if (current_seq.size() == current_lvl.bomb_count || depth >= MAX_BOMBS) return;
+
+    // 2) 计算存活炸弹可达爆破点
+    for (int m = 0; m < current_lvl.bomb_count; ++m) {
+        if (current_lvl.bombs[m].x != -1) {
+            this->fast_push_bfs(current_lvl, current_lvl.bombs[m], player_start, true, dfs_dist_bomb[depth][m]);
+        }
+    }
+
+    // 建立候选动作队列，避免无脑展开几百个分支
+    StaticArray<BombCandidate, 64> candidates;
+
+    // 3) 枚举可爆破墙体 
+    for (int m = 0; m < current_lvl.bomb_count; ++m) {
+        if (current_lvl.bombs[m].x == -1) continue;
+
+        for (int y = 1; y < MAP_MAX_HEIGHT - 1; ++y) {
+            for (int x = 1; x < MAP_MAX_WIDTH - 1; ++x) {
+                if (current_lvl.map[y][x] == 1 && dfs_dist_bomb[depth][m][y][x] != INF_DIST) {
+                    
+                    bool opens_new = false;
+                    bool touches_entity = false;
+                    int min_shortcut = INF_DIST, max_shortcut = -1;
+
+                    for (int dy = -2; dy <= 2; ++dy) {
+                        for (int dx = -2; dx <= 2; ++dx) {
+                            int ny = y + dy, nx = x + dx;
+                            if (ny >= 0 && ny < MAP_MAX_HEIGHT && nx >= 0 && nx < MAP_MAX_WIDTH) {
+                                
+                                // (A) 爆炸区是否覆盖实体
+                                if (std::abs(dy) <= 1 && std::abs(dx) <= 1) {
+                                    if (this->has_entity(current_lvl, nx, ny, m)) touches_entity = true;
+                                }
+                                // (B) 是否打通玩家原不可达区域
+                                if (current_lvl.map[ny][nx] == 0 && !dfs_player_vis[depth][ny][nx]) {
+                                    if (std::abs(dy) <= 1 && std::abs(dx) <= 1) opens_new = true;
+                                    else if ((std::abs(dy) <= 1 && std::abs(dx) == 2) || (std::abs(dx) <= 1 && std::abs(dy) == 2)) opens_new = true;
+                                }
+                                // (C) 统计局部捷径差异
+                                if (std::abs(dy) <= 1 && std::abs(dx) <= 1) {
+                                    for (int b = 0; b < current_lvl.box_count; ++b) {
+                                        int d = dfs_dist_box[depth][b][ny][nx];
+                                        if (d != INF_DIST) {
+                                            if (d < min_shortcut) min_shortcut = d;
+                                            if (d > max_shortcut) max_shortcut = d;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // 剪枝：无连通收益、无实体收益、无明显捷径收益
+                    if (!opens_new && !touches_entity && (max_shortcut - min_shortcut <= 4)) continue;
+
+                    // 4) 综合评估打分：优先级 = 实体覆盖 > 新区域 > 捷径提升 - 距离惩罚
+                    int score = (max_shortcut - min_shortcut) * 10;
+                    if (touches_entity) score += 500;
+                    if (opens_new) score += 300;
+                    score -= dfs_dist_bomb[depth][m][y][x] * 15; // 严厉惩罚远距离推行
+
+                    candidates.push_back({(uint8_t)m, (int8_t)x, (int8_t)y, score});
+                }
+            }
+        }
+    }
+
+    // 对通过你原版筛选出的候选墙壁进行排序
+    std::sort(candidates.begin(), candidates.end());
+
+    // 每层只取最靠谱的 Top 4 动作进行递归
+    int branch_limit = candidates.size() < 4 ? candidates.size() : 4;
+
+    for (int i = 0; i < branch_limit; ++i) {
+        BombCandidate c = candidates[i];
+        int m = c.bomb_idx;
+        int x = c.x;
+        int y = c.y;
+
+        // 构造下一层状态 
+        SokobanLevel next_lvl = current_lvl;
+        next_lvl.bombs[m] = {-1, -1}; 
+        
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                int ny = y + dy, nx = x + dx;
+                if (ny > 0 && ny < MAP_MAX_HEIGHT - 1 && nx > 0 && nx < MAP_MAX_WIDTH - 1) {
+                    next_lvl.map[ny][nx] = 0;
+                }
+            }
+        }
+
+        StaticArray<BombTask, MAX_BOMBS> next_seq = current_seq;
+        next_seq.push_back({current_lvl.bombs[m], { (int8_t)x, (int8_t)y }, false, 0});
+        
+        int execution_cost = dfs_dist_bomb[depth][m][y][x] * 1.5f; 
+
+        this->dfs_bomb_sequence(next_lvl, { (int8_t)x, (int8_t)y }, next_seq, cost_so_far + execution_cost, depth + 1, best_res);
+    }
+}
+
+
 // 物理检测辅助
 inline bool StrategicPlanner::is_obstacle(const SokobanLevel& lvl, point p, point ignored_obj) const {
     if (p.x < 0 || p.x >= MAP_MAX_WIDTH || p.y < 0 || p.y >= MAP_MAX_HEIGHT) return true;
@@ -183,118 +313,6 @@ void StrategicPlanner::fast_push_bfs(const SokobanLevel& lvl, point start_obj, p
                 state_cost[next_p.y][next_p.x][nd] = ncost;
                 if (ncost < out_dist[next_p.y][next_p.x]) out_dist[next_p.y][next_p.x] = ncost;
                 q[tail++] = {next_p.x, next_p.y, (int8_t)nd, ncost};
-            }
-        }
-    }
-}
-
-
-// DFS 推演核心（支持多级连锁爆破）
-__attribute__((section(".ramfunc")))
-void StrategicPlanner::dfs_bomb_sequence(
-    const SokobanLevel& current_lvl, point player_start,
-    StaticArray<BombTask, MAX_BOMBS> current_seq, int cost_so_far, 
-    int depth, DFSResult& best_res) 
-{
-    // 1) 统计当前状态
-    int current_deadlocks = 0;
-    int current_distance = 0;
-
-    this->calc_player_reach(current_lvl, player_start, {-1,-1}, {-1,-1}, dfs_player_vis[depth]);
-
-    for (int b = 0; b < current_lvl.box_count; ++b) {
-        this->fast_push_bfs(current_lvl, current_lvl.boxes[b], player_start, false, dfs_dist_box[depth][b]);
-        point target = current_lvl.targets[b];
-        if (dfs_dist_box[depth][b][target.y][target.x] == INF_DIST) current_deadlocks++;
-        else current_distance += dfs_dist_box[depth][b][target.y][target.x];
-    }
-
-    // 更新最优解：死锁更少优先，同死锁时收益更高优先
-    int profit = -current_distance - cost_so_far;
-    if (current_deadlocks < best_res.deadlocks_remaining || 
-       (current_deadlocks == best_res.deadlocks_remaining && profit > best_res.net_profit)) {
-        best_res.deadlocks_remaining = current_deadlocks;
-        best_res.net_profit = profit;
-        best_res.tasks = current_seq;
-    }
-
-    // 终止条件：炸弹耗尽或达到深度上限
-    if (current_seq.size() == current_lvl.bomb_count || depth >= MAX_BOMBS) return;
-
-    // 2) 计算存活炸弹可达爆破点
-    for (int m = 0; m < current_lvl.bomb_count; ++m) {
-        if (current_lvl.bombs[m].x != -1) {
-            this->fast_push_bfs(current_lvl, current_lvl.bombs[m], player_start, true, dfs_dist_bomb[depth][m]);
-        }
-    }
-
-    // 3) 枚举可爆破墙体并递归
-    for (int m = 0; m < current_lvl.bomb_count; ++m) {
-        if (current_lvl.bombs[m].x == -1) continue;
-
-        for (int y = 1; y < MAP_MAX_HEIGHT - 1; ++y) {
-            for (int x = 1; x < MAP_MAX_WIDTH - 1; ++x) {
-                if (current_lvl.map[y][x] == 1 && dfs_dist_bomb[depth][m][y][x] != INF_DIST) {
-                    
-                    // 战略过滤器
-                    bool opens_new = false;
-                    bool touches_entity = false;
-                    int min_shortcut = INF_DIST, max_shortcut = -1;
-
-                    for (int dy = -2; dy <= 2; ++dy) {
-                        for (int dx = -2; dx <= 2; ++dx) {
-                            int ny = y + dy, nx = x + dx;
-                            if (ny >= 0 && ny < MAP_MAX_HEIGHT && nx >= 0 && nx < MAP_MAX_WIDTH) {
-                                
-                                // (A) 爆炸区是否覆盖实体
-                                if (std::abs(dy) <= 1 && std::abs(dx) <= 1) {
-                                    if (this->has_entity(current_lvl, nx, ny, m)) touches_entity = true;
-                                }
-
-                                // (B) 是否打通玩家原不可达区域
-                                if (current_lvl.map[ny][nx] == 0 && !dfs_player_vis[depth][ny][nx]) {
-                                    if (std::abs(dy) <= 1 && std::abs(dx) <= 1) opens_new = true;
-                                    else if ((std::abs(dy) <= 1 && std::abs(dx) == 2) || (std::abs(dx) <= 1 && std::abs(dy) == 2)) opens_new = true;
-                                }
-
-                                // (C) 统计局部捷径差异
-                                if (std::abs(dy) <= 1 && std::abs(dx) <= 1) {
-                                    for (int b = 0; b < current_lvl.box_count; ++b) {
-                                        int d = dfs_dist_box[depth][b][ny][nx];
-                                        if (d != INF_DIST) {
-                                            if (d < min_shortcut) min_shortcut = d;
-                                            if (d > max_shortcut) max_shortcut = d;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // 剪枝：无连通收益、无实体收益、无明显捷径收益
-                    if (!opens_new && !touches_entity && (max_shortcut - min_shortcut <= 4)) continue;
-
-                    // 构造下一层状态
-                    SokobanLevel next_lvl = current_lvl;
-                    next_lvl.bombs[m] = {-1, -1}; // 消耗炸弹
-                    
-                    // 模拟 3x3 爆破，保留地图外边框
-                    for (int dy = -1; dy <= 1; ++dy) {
-                        for (int dx = -1; dx <= 1; ++dx) {
-                            int ny = y + dy, nx = x + dx;
-                            if (ny > 0 && ny < MAP_MAX_HEIGHT - 1 && nx > 0 && nx < MAP_MAX_WIDTH - 1) {
-                                next_lvl.map[ny][nx] = 0;
-                            }
-                        }
-                    }
-
-                    StaticArray<BombTask, MAX_BOMBS> next_seq = current_seq;
-                    next_seq.push_back({current_lvl.bombs[m], { (int8_t)x, (int8_t)y }, false, 0});
-                    
-                    int execution_cost = dfs_dist_bomb[depth][m][y][x] * 1.5f; // 加上推物阻力惩罚
-
-                    this->dfs_bomb_sequence(next_lvl, { (int8_t)x, (int8_t)y }, next_seq, cost_so_far + execution_cost, depth + 1, best_res);
-                }
             }
         }
     }
