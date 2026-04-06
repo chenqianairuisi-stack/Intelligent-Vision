@@ -1,71 +1,154 @@
-# 第21届全国大学生智能汽车竞赛 - 智能视觉组 (推箱子) 
+# 第21届全国大学生智能汽车竞赛 - 智能视觉组推箱子主控工程
 
-本仓库包含了智能视觉组推箱子赛题的底层主控源码。项目采用 C++17(gnu17) 编写，深度优化了 RT1064 的存储性能，并实现了基于 IDA* 的寻路算法与高精度底盘控制系统。
+本仓库是 RT1064 主控侧完整工程，面向智能视觉组推箱子赛题，覆盖了视觉通信、巡图规划、推箱求解、底盘控制、调参与调试显示等核心链路。
 
-## 🏎️ 硬件环境
-- **主控**: NXP i.MX RT1064 (Cortex-M7, 600MHz)
-- **FlexRAM 配置**: 64KB ITCM / 448KB DTCM / 488KB OCRAM
-- **底盘**: 四轮麦克纳姆轮 (带增量式编码器)
-- **传感器**: IMU660RA 陀螺仪
-- **视觉**: 双 OpenART 方案 (UART DMA 通信)
-- **显示**: 1.8寸 TFT (用于实时监控与调参)
+当前工程重点：
 
-## 🏗️ 软件架构规范 (协作必读)
-本项目严格遵守**四层解耦架构**，任何新增代码必须归属于以下目录之一：
+- 双 OpenART 串口协议联动（ART1 地图与定位，ART2 语义识别）
+- 巡图阶段路径规划与动作分发
+- 基于 IDA* 的推箱子求解
+- 麦轮底盘运动学、轨迹规划与闭环控制
+- 面向嵌入式内存约束的静态分配与高性能区段优化
 
-| 目录 | 功能描述 | 协作要求 |
-| :--- | :--- | :--- |
-| `App/` | 主循环、业务状态机、底盘控制、通信 | 严禁包含底层寄存器操作 |
-| `Algorithm/` | **纯逻辑层**: IDA* 寻路、运动学解算、轨迹规划、PID等 | 必须跨平台兼容，不依赖特定硬件宏 |
-| `Device/` | 外设 C++ 封装 (Motor, Encoder, Imu, Flash, Uart 等) | 隐藏硬件库细节，提供标准接口 |
-| `Core/` | 中断分发 (isr.cpp)、系统配置、全局调参黑板 | 仅允许定义全局硬件句柄 |
+## 1. 硬件与平台
 
-### 🛠️ 开发黄金准则
-1. **内存零分配**: 禁止使用 `new`/`malloc` 及 `std` 动态容器。所有数组需使用静态定长数组。
-2. **性能加速**: 核心运算函数（如 PID、轨迹规划）必须使用 `AT_ITCM_SECTION_INIT` 放入 ITCM。
-3. **参数黑板**: 调参变量统一放在 `g_tune` (TuningConfig) 结构体中，支持 Flash 掉电保存。
-4. **C/C++ 混编**: 中断服务函数必须带 `extern "C"`。
+- 主控：NXP i.MX RT1064（Cortex-M7, 600MHz）
+- 存储布局：ITCM / DTCM / OCRAM 分区优化
+- 底盘：四轮麦克纳姆轮（编码器闭环）
+- 视觉：双 OpenART（UART）
+- 惯导：IMU 模块（工程内含 ICM42688 与通用 IMU 封装）
+- 显示：TFT 菜单与状态可视化
 
-## 🚀 核心算法模块
-- **Sokoban Solver**: 基于 **IDA* (Iterative Deepening A*)** 算法。
-  - 支持宏动作 (Macro-moves) 与连推判定。
-  - 使用 Zobrist 哈希与置换表 (TT) 实现极速剪枝。
-- **Trajectory Planner**: 标量速度**梯形加减速规划**。
-  - 自动分解 2D 直线速度，解决麦轮启动打滑与停车不准问题。
-- **Chassis Control**: 级联闭环系统。
-  - 外环：位置/轨迹跟踪。
-  - 内环：基于增量式 PID 的四轮转速控制。
- 
-## 📁 目录结构
+## 2. 工程结构
+
 ```text
 .
-├── libraries/              # 逐飞科技底层库与 NXP SDK
 ├── project/
-    ├── Algorithm/          # 算法库：寻路、PID、轨迹规划
-    ├── App/                # 业务逻辑：状态机、TFT菜单、视觉处理
-    ├── Device/             # 硬件驱动封装
-    ├── Core/               # 中断、系统配置、存储管理
-    ├── mdk/                # Keil 工程文件 (uvprojx)
-    └── 
+│   ├── App/                    # 业务状态机、任务调度、视觉任务、显示与遥测
+│   ├── Algorithm/
+│   │   ├── Algorithm_Control/  # 运动学、PID、轨迹、跟踪
+│   │   ├── Algorithm_Perception/# 里程计、IMU 数据处理
+│   │   └── Algorithm_Planning/ # 巡图、策略、Sokoban(IDA*)
+│   ├── Device/                 # 电机、编码器、串口、存储、IMU 等设备封装
+│   ├── Core/                   # 系统配置、中断、全局调参定义
+│   └── mdk/                    # Keil 工程（rt1064.uvprojx）
+├── libraries/                  # 底层库、SDK 与外设驱动
+├── Algorithm_Planning_Memory_Analysis.md
+└── README.md
 ```
 
-## 💡 提示：
-在 GitHub 协作时，建议你在 `.gitignore` 文件中忽略以下 Keil 产生的临时文件，避免提交冲突：
-```gitignore
-*.bak
-*.dep
-*.py_bak
-*.uvgui.*
-*.uvguix.*
-JLinkLog.txt
-*.lst
-*.obj
-*.o
-*.d
-*.crf
-*.lnp
-*.axf
-*.htm
-*.sct
-*.map
+## 3. 软件分层约束
+
+建议继续遵循四层职责边界，减少耦合并提升可维护性：
+
+| 层级目录 | 职责 | 约束 |
+| :--- | :--- | :--- |
+| `project/App/` | 主循环、状态机、调度、任务编排 | 不直接写寄存器细节 |
+| `project/Algorithm/` | 纯算法逻辑（规划、控制、感知融合） | 避免硬件相关宏依赖 |
+| `project/Device/` | 外设驱动封装与抽象接口 | 对上层屏蔽底层实现 |
+| `project/Core/` | 中断入口、系统配置、全局参数 | 保持稳定、少改动 |
+
+
+## 4. 运行机制概览
+
+### 4.1 启动初始化顺序（摘自主循环）
+
+- 时钟与调试初始化
+- IMU、编码器、存储、通信、菜单、调度器初始化
+- 视觉管理与底盘控制初始化
+- IMU 开机静态标定
+- 启动周期中断（5ms / 20ms）
+- 进入主循环：视觉更新 + 游戏状态机更新 + 调度器运行
+
+### 4.2 调度任务（当前配置）
+
+| 任务 | 周期 |
+| :--- | :--- |
+| 上位机指令解析 | 10ms |
+| 波形数据发送 | 20ms |
+| TFT UI 刷新 | 100ms |
+
+### 4.3 状态机流程图（GamePhase）
+
+```mermaid
+flowchart TD
+   A[INIT_CALIBRATE] --> B[EXIT_START_ZONE]
+   B -->|到达出发目标点| C[WAIT_FOR_VISION]
+
+   C -->|地图就绪 且 阶段2/3| D[PLAN_PATROL]
+   C -->|地图就绪 且 阶段1| K[PLAN_SOKOBAN]
+
+   D --> E[EXEC_ACTION_DISPATCH]
+   E -->|动作耗尽| J[BIND_SEMANTICS]
+   E -->|观测动作| F[EXEC_PATROL_MOVE]
+   E -->|炸弹动作| H[EXEC_BOMB_PUSH]
+   E -->|路径失败| Z[ERROR_OCCURRED]
+
+   F -->|到达观测点| G[EXEC_ALIGN_YAW]
+   G -->|对准后触发ART2抓拍| G2[WAIT_ART2_CAPTURE_ACK]
+   G2 -->|收到ACK| E
+
+   H -->|动作完成| I[UPDATE_MAP]
+   I --> E
+
+   J -->|语义绑定完成| K
+
+   K -->|求解成功| L[EXEC_SOKOBAN]
+   K -->|求解失败 重新感知| C
+
+   L -->|路径执行完成| M[FINISHED]
+
+   subgraph DebugGameManager 拦截分支
+      D --> D1[ANIMATE_PATROL_DEMO]
+      D1 -->|巡图动画结束| J
+      K --> K1[ANIMATE_DEMO]
+      K1 -->|推箱动画结束| M
+   end
 ```
+
+说明：
+
+- 主流程状态机位于 `GameManager::update()`。
+- 调试动画分支由 `DebugGameManager::update()` 拦截 `PLAN_PATROL` 与 `PLAN_SOKOBAN` 两个状态实现。
+- `ERROR_OCCURRED` 与 `FINISHED` 均会将底盘目标锁定为当前位置，进入停车保持。
+
+## 5. 视觉通信协议摘要
+
+主控与视觉模块采用统一帧格式：
+
+```text
+[0xAA][0x55][MsgType][Len][Payload...][Checksum]
+Checksum = MsgType + Len + Sum(Payload)
+```
+
+关键消息方向：
+
+- 主控 -> ART1：请求地图、请求定位
+- 主控 -> ART2：触发抓拍（实体 ID + 是否箱子）
+- ART1 -> 主控：地图包、定位包
+- ART2 -> 主控：抓拍 ACK、语义识别结果
+
+## 6. 算法与性能说明
+
+- 推箱求解：IDA* + 剪枝策略（含哈希与置换表）
+- 巡图规划：结合动作序列分发与执行
+- 控制模块：轨迹规划 + 运动学解算 + PID 闭环
+- 内存分析参考：`Algorithm_Planning_Memory_Analysis.md`
+
+## 7. 开发规范建议
+
+- 以静态内存为主，避免运行期动态分配
+- ISR 与 C/C++ 混编边界保持清晰（必要时使用 `extern "C"`）
+- 高频核心函数放置在合适存储区（如 RAM 函数段）
+- 调参与状态变量集中管理，避免分散硬编码
+
+## 8. 协作与提交建议
+
+- 仓库已包含 `.gitignore`，用于过滤 Keil 产物与日志
+- `project/mdk/MDK删除临时文件.bat` 可用于本地清理临时文件
+- 提交前建议至少完成一次全量编译，确认无新增告警与错误
+
+## 9. 许可说明
+
+- 本项目业务代码版权归所属参赛团队。
+- 第三方库与 SDK 许可见 `libraries/` 目录及其文档说明。

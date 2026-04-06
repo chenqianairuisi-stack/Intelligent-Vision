@@ -2,7 +2,6 @@
 #include "tracker.h"
 #include "odometry.h" // 依赖你的里程计获取当前物理坐标
 
-// 放入 DTCM 加速内存访问
 __attribute__((section(".dtcm_data"))) PathTracker path_tracker;
 
 PathTracker::PathTracker() : current_wp_idx(0), state(TrackerState::NONE) {}
@@ -55,6 +54,7 @@ void PathTracker::load_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path)
 }
 
 
+// 更新跟踪状态并获取当前目标位姿，供控制模块调用
 __attribute__((section(".ramfunc"))) Pose2D PathTracker::update_and_get_target(const Point2D& current_pos) {
     // 没在循迹就返回最后一次的目标
     if (state != TrackerState::TRACKING) { return current_target;}

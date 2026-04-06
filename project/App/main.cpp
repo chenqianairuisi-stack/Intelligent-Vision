@@ -32,6 +32,7 @@ extern "C" int main(void) {
 
     debug_manager.init();                      // 管理模块初始化 (gpio)
     debug_manager.inject_mock_semantics();     // 注入虚拟视觉标签，供没有摄像头时的调试使用
+    debug_manager.set_phase(GamePhase::WAIT_FOR_VISION);
 
     while(1) {
         vision_manager.update();             // 视觉地图/位置解析

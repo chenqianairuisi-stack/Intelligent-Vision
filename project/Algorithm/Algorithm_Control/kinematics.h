@@ -1,7 +1,6 @@
 #pragma once
 #include "system_config.h"
 
-
 class Kinematics {
 public:
     // 麦轮逆运动学解算：底盘速度 -> 四轮独立速度
