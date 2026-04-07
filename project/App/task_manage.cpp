@@ -1,6 +1,7 @@
-#include "game_manage.h"
+#include "task_manage.h"
 #include "task_control.h"
-#include "scheduler.h"
+#include "task_schedule.h"
+#include "test_loadmap.h"
 #include "odometry.h"
 #include "imu_process.h"
 #include <cmath>
@@ -58,7 +59,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             // 如果到达了地图的第一格
             if (dist < tune.tracker.reach_radius_min) {
                 if (competition_stage == 4) {
-                    vision_manager.load_mock_map();      // ~~~ 调试用：直接导入本地地图 ~~~
+                    TestMap::load_mock_map(0);      // ~~~ 调试用：直接导入本地地图 ~~~
                 } else {
                     vision_manager.request_map_ART1();   // 请求视觉模块发送地图数据
                 }
@@ -107,7 +108,6 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     vision_manager.request_map_ART1();  // 超时重试请求地图数据
                 }
             }
-
             break;
         }
 

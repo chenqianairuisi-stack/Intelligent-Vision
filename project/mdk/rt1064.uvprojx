@@ -414,24 +414,14 @@
               <FilePath>..\App\main.cpp</FilePath>
             </File>
             <File>
-              <FileName>scheduler.cpp</FileName>
+              <FileName>task_manage.cpp</FileName>
               <FileType>8</FileType>
-              <FilePath>..\App\scheduler.cpp</FilePath>
+              <FilePath>..\App\task_manage.cpp</FilePath>
             </File>
             <File>
-              <FileName>scheduler.h</FileName>
+              <FileName>task_manage.h</FileName>
               <FileType>5</FileType>
-              <FilePath>..\App\scheduler.h</FilePath>
-            </File>
-            <File>
-              <FileName>game_manage.cpp</FileName>
-              <FileType>8</FileType>
-              <FilePath>..\App\game_manage.cpp</FilePath>
-            </File>
-            <File>
-              <FileName>game_manage.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\App\game_manage.h</FilePath>
+              <FilePath>..\App\task_manage.h</FilePath>
             </File>
             <File>
               <FileName>task_control.cpp</FileName>
@@ -454,14 +444,24 @@
               <FilePath>..\App\task_vision.h</FilePath>
             </File>
             <File>
-              <FileName>telemetry.cpp</FileName>
+              <FileName>task_schedule.cpp</FileName>
               <FileType>8</FileType>
-              <FilePath>..\App\telemetry.cpp</FilePath>
+              <FilePath>..\App\task_schedule.cpp</FilePath>
             </File>
             <File>
-              <FileName>telemetry.h</FileName>
+              <FileName>task_schedule.h</FileName>
               <FileType>5</FileType>
-              <FilePath>..\App\telemetry.h</FilePath>
+              <FilePath>..\App\task_schedule.h</FilePath>
+            </File>
+            <File>
+              <FileName>test_loadmap.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\App\test_loadmap.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>test_loadmap.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\App\test_loadmap.h</FilePath>
             </File>
             <File>
               <FileName>display.cpp</FileName>
@@ -473,31 +473,21 @@
               <FileType>5</FileType>
               <FilePath>..\App\display.h</FilePath>
             </File>
+            <File>
+              <FileName>telemetry.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\App\telemetry.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>telemetry.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\App\telemetry.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
           <GroupName>Algorithm_Control</GroupName>
           <Files>
-            <File>
-              <FileName>kinematics.cpp</FileName>
-              <FileType>8</FileType>
-              <FilePath>..\Algorithm\Algorithm_Control\kinematics.cpp</FilePath>
-            </File>
-            <File>
-              <FileName>kinematics.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Algorithm\Algorithm_Control\kinematics.h</FilePath>
-            </File>
-            <File>
-              <FileName>pid.cpp</FileName>
-              <FileType>8</FileType>
-              <FilePath>..\Algorithm\Algorithm_Control\pid.cpp</FilePath>
-            </File>
-            <File>
-              <FileName>pid.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Algorithm\Algorithm_Control\pid.h</FilePath>
-            </File>
             <File>
               <FileName>tracker.cpp</FileName>
               <FileType>8</FileType>
@@ -518,11 +508,41 @@
               <FileType>5</FileType>
               <FilePath>..\Algorithm\Algorithm_Control\trajectory.h</FilePath>
             </File>
+            <File>
+              <FileName>kinematics.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\Algorithm\Algorithm_Control\kinematics.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>kinematics.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Algorithm\Algorithm_Control\kinematics.h</FilePath>
+            </File>
+            <File>
+              <FileName>pid.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\Algorithm\Algorithm_Control\pid.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>pid.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Algorithm\Algorithm_Control\pid.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
           <GroupName>Algorithm_Planning</GroupName>
           <Files>
+            <File>
+              <FileName>strategy.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\Algorithm\Algorithm_Planning\strategy.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>strategy.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Algorithm\Algorithm_Planning\strategy.h</FilePath>
+            </File>
             <File>
               <FileName>exploration.cpp</FileName>
               <FileType>8</FileType>
@@ -542,16 +562,6 @@
               <FileName>sokoban.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\Algorithm\Algorithm_Planning\sokoban.h</FilePath>
-            </File>
-            <File>
-              <FileName>strategy.cpp</FileName>
-              <FileType>8</FileType>
-              <FilePath>..\Algorithm\Algorithm_Planning\strategy.cpp</FilePath>
-            </File>
-            <File>
-              <FileName>strategy.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Algorithm\Algorithm_Planning\strategy.h</FilePath>
             </File>
           </Files>
         </Group>
@@ -584,6 +594,16 @@
           <GroupName>Device</GroupName>
           <Files>
             <File>
+              <FileName>icm42688.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\Device\icm42688.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>icm42688.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Device\icm42688.h</FilePath>
+            </File>
+            <File>
               <FileName>encoder.cpp</FileName>
               <FileType>8</FileType>
               <FilePath>..\Device\encoder.cpp</FilePath>
@@ -592,16 +612,6 @@
               <FileName>encoder.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\Device\encoder.h</FilePath>
-            </File>
-            <File>
-              <FileName>imu.cpp</FileName>
-              <FileType>8</FileType>
-              <FilePath>..\Device\imu.cpp</FilePath>
-            </File>
-            <File>
-              <FileName>imu.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Device\imu.h</FilePath>
             </File>
             <File>
               <FileName>motor.cpp</FileName>
@@ -632,16 +642,6 @@
               <FileName>storage.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\Device\storage.h</FilePath>
-            </File>
-            <File>
-              <FileName>icm42688.cpp</FileName>
-              <FileType>8</FileType>
-              <FilePath>..\Device\icm42688.cpp</FilePath>
-            </File>
-            <File>
-              <FileName>icm42688.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Device\icm42688.h</FilePath>
             </File>
           </Files>
         </Group>

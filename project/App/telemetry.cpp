@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include "test_loadmap.h"
 
 Telemetry telemetry;
 float planned_v_debug = 0.0f;     // 当前规划的速度大小，供 telemetry 模块发送波形数据
@@ -139,7 +140,7 @@ void Telemetry::execute_command(const char* cmd) {
                 case 'M': vision_manager.request_map_ART1();  break;
                 case 'P': vision_manager.request_pose_ART1(); break;
                 case 'T': vision_manager.request_capture_ART2((uint8_t)value, true); break;
-                case 'L': vision_manager.test_loopback_map(); break;
+                case 'L': TestMap::test_loopback_map(); break;  // 注：这个指令会直接调用测试函数，发送一个模拟地图包到自己，测试解析流程
             }
             break;
 

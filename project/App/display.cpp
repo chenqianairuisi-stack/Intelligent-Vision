@@ -1,12 +1,13 @@
 #include "display.h"
 #include "task_control.h"
 #include "tuning_config.h"
-#include "game_manage.h"
+#include "task_manage.h"
 #include "odometry.h"
 #include "encoder.h"
 #include "imu_process.h"
 #include "storage.h"
 #include "telemetry.h"
+#include "test_loadmap.h"
 
 
 // ===================================================== 初始化与全局变量 =====================================================
@@ -47,9 +48,12 @@ void TftMenu::init() {
     current_page = MenuPage::MAIN_MENU;
     cursor_idx = 0;
     scroll_offset = 0;
+    map_cursor_idx = 0;
+    map_scroll_offset = 0;
     is_editing = false;
     need_full_redraw = true;  
     ui_dirty = true;           
+    is_closed = false;
     last_k1 = true; last_k2 = true; last_k3 = true; last_k4 = true;
 
     gpio_init(KEY1, GPI, GPIO_HIGH, GPI_PULL_UP);
@@ -59,7 +63,7 @@ void TftMenu::init() {
 
     tft180_set_dir(TFT180_PORTAIT);                  // 竖屏
     tft180_set_font(TFT180_6X8_FONT);                // 设置字库
-    tft180_set_color(RGB565_BLACK, RGB565_WHITE);     // 白底黑字
+    tft180_set_color(RGB565_BLACK, RGB565_WHITE);    // 白底黑字
     tft180_init();
     
     tft180_full(RGB565_WHITE);
@@ -180,15 +184,41 @@ void TftMenu::process_logic() {
         case MenuPage::VISION_DATA:
             // 按确认键注入本地地图
             if (key_enter_pressed) {
-                debug_manager.set_phase(GamePhase::WAIT_FOR_VISION);  // 直接跳过视觉模块，进入寻路阶段，方便调试 UI 和算法
-                vision_manager.load_mock_map();
-                // 在屏幕中间打个提示，延时防抖
-                tft180_show_string(12, 80, "Local Map Loaded");
-                system_delay_ms(300);
-                need_full_redraw = true;   
+                current_page = MenuPage::MAP_SELECT;
+                map_cursor_idx = 0;       // 光标复位
+                map_scroll_offset = 0;
+                need_full_redraw = true;  
             }
             if (key_back_pressed) { 
                 current_page = MenuPage::MAIN_MENU; 
+                need_full_redraw = true; 
+            }
+            break;
+
+        case MenuPage::MAP_SELECT:
+            if (key_down_pressed) map_cursor_idx = (map_cursor_idx + 1) % TestMap::get_mock_map_count();
+            if (key_up_pressed)   map_cursor_idx = (map_cursor_idx == 0) ? (TestMap::get_mock_map_count() - 1) : map_cursor_idx - 1;
+            
+            // 滚动窗口保护计算
+            if (map_cursor_idx < map_scroll_offset) map_scroll_offset = map_cursor_idx;
+            if (map_cursor_idx >= map_scroll_offset + PARAMS_PER_PAGE) map_scroll_offset = map_cursor_idx - PARAMS_PER_PAGE + 1;
+
+            // 确认选择：加载对应的地图并跳回 VISION_DATA 监视结果
+            if (key_enter_pressed) {
+                debug_manager.set_phase(GamePhase::WAIT_FOR_VISION); // 直接跳过视觉模块，进入寻路阶段
+                TestMap::load_mock_map(map_cursor_idx); // 载入选中的地图
+                
+                // 屏幕中间打个提示框
+                tft180_full(RGB565_WHITE);
+                tft180_show_string(10, 80, "[ Map Loaded ]");
+                system_delay_ms(200);
+                
+                current_page = MenuPage::VISION_DATA; // 自动跳回视图层看地图
+                need_full_redraw = true;
+            }
+            // 按返回键：取消选择，退回 Vision 层
+            if (key_back_pressed) { 
+                current_page = MenuPage::VISION_DATA; 
                 need_full_redraw = true; 
             }
             break;
@@ -199,18 +229,6 @@ void TftMenu::process_logic() {
     }
 }
 
-// 硬件报错挂起
-void TftMenu::halt_with_error(const char* err_msg) {
-    tft180_full(RGB565_WHITE);
-    tft180_show_string(0, 50, "!!! FATAL ERROR !!!");
-    tft180_show_string(0, 70, (char*)err_msg);
-    
-    // 彻底死循环，避免主循环里的 sys_menu.run() 覆盖屏幕
-    while (1) {
-        // 可以在这里加个蜂鸣器报警代码
-        system_delay_ms(100);
-    }
-}
 
 
 // ===================================================== UI 渲染 =====================================================
@@ -230,6 +248,7 @@ void TftMenu::render_ui() {
         case MenuPage::ODOMETRY_DATA:  draw_odometry_data(); break;
         case MenuPage::VISION_DATA:    draw_vision_data(); break;
         case MenuPage::TUNE_PARAMS:    draw_tune_params(); break;
+        case MenuPage::MAP_SELECT:     draw_map_select(); break;
     }
     ui_dirty = false; 
 }
@@ -246,11 +265,34 @@ void TftMenu::draw_main_menu() {
     draw_item(8, "Close Menu", cursor_idx == 6); 
 }
 
+void TftMenu::draw_map_select() {
+    tft180_show_string(0, 0, "-- SELECT MAP --");
+    
+    uint8_t count = TestMap::get_mock_map_count();
+
+    // 进度提示 (例如 1/3)，放在右上角
+    tft180_show_int(14 * UI_COL_W, 0, map_cursor_idx + 1, 2);
+    tft180_show_string(16 * UI_COL_W, 0, "/");
+    tft180_show_int(17 * UI_COL_W, 0, count, 2);
+    
+    // 利用已有的 PARAMS_PER_PAGE 行数限制渲染滚动列表
+    for (int i = 0; i < PARAMS_PER_PAGE; i++) {
+        int item_idx = map_scroll_offset + i;
+        if (item_idx >= count) {
+            // 清理多余行，打印 21 个空格覆盖一整行
+            tft180_show_string(0, (i + 1) * UI_ROW_H, "                     ");
+            continue;
+        }
+
+        draw_item(i + 1, TestMap::get_mock_map_name(item_idx), map_cursor_idx == item_idx);
+    }
+}
+
 // 绘制参数调节页面
 void TftMenu::draw_tune_params() {
     tft180_show_string(0, 0, "PARAMETERS");
     
-    // 进度提示 (例如 1/8)，放在右上角第 15 列开始
+    // 进度提示 (例如 1/8)，放在右上角
     tft180_show_int(14 * UI_COL_W, 0, cursor_idx + 1, 2);
     tft180_show_string(16 * UI_COL_W, 0, "/");
     tft180_show_int(17 * UI_COL_W, 0, DICT_SIZE, 2);

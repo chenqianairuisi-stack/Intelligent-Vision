@@ -5,7 +5,7 @@
 #include "system_config.h"
 #include <stdint.h>
 
-extern char last_rx_cmd[32];    // 全局变量，用于保存最后一次接收到的命令字符串，供 TFT 显示
+extern char last_rx_cmd[32];  // 全局变量，用于保存最后一次接收到的命令字符串，供 TFT 显示
 
 class Telemetry {
 public:
@@ -23,14 +23,14 @@ private:
     // 格式：N 个 float + 1 个 4 字节的 Tail (0x7F800000)
     #pragma pack(push, 1)
     struct VofaJustFloat {
-        uint8_t head;        // 帧头，固定为 0xAA
+        uint8_t head;      // 帧头，固定为 0xAA
         float data_1;      // 通道 0: 期望速度
         float data_2;      // 通道 1: 实际速度
         float data_3;      // 通道 2: 期望 X
         float data_4;      // 通道 3: 实际 X
         float data_5;      // 通道 4: 期望 Y
         float data_6;      // 通道 5: 实际 Y
-        uint8_t tail;        // 帧尾，固定为 0xBB
+        uint8_t tail;      // 帧尾，固定为 0xBB
     };
     #pragma pack(pop)
     VofaJustFloat tx_packet; 

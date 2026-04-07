@@ -65,10 +65,6 @@ public:
 
     // 寻图前清空缓存
     void reset_semantic_labels() { for(int i=0; i<SystemConfig::MAX_ENTITIES; ++i) vision_data.semantic_labels[i] = -1;};  
-
-    // 本地脱机测试使用的函数
-    void load_mock_map();       // 注入本地脱机测试地图数据
-    void test_loopback_map();   // 构造一个测试包，测试串口自环回功能
  
 private:
     // 协议指令类型 (MCU -> OpenART)
@@ -93,4 +89,5 @@ private:
 };
 
 
+extern VisionData vision_data;
 extern VisionManager vision_manager;

@@ -1,9 +1,9 @@
-#include "scheduler.h"
+#include "task_schedule.h"
 #include "task_control.h"
 #include "display.h"
 #include "telemetry.h"
 #include "task_vision.h"
-#include "game_manage.h"
+#include "task_manage.h"
 #include "zf_common_headfile.h"
 
 TaskScheduler scheduler;
