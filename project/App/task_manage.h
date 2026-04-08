@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <cstdint>
 #include "system_config.h"
 #include "tracker.h"
@@ -47,6 +48,8 @@ public:
     GamePhase get_phase() const { return phase; }
     uint8_t get_stage() const { return competition_stage; }
     void set_phase(GamePhase new_phase) { phase = new_phase; }
+    const SokobanLevel& get_logical_level() const { return logical_level; }
+    uint8_t get_action_idx() const { return action_idx; }
 
     // 游戏状态机更新函数，放在 main 循环中高频调用
     virtual void update();  
@@ -92,6 +95,37 @@ struct DemoState {
     uint8_t patrol_target_idx;                         // 正在执行第几个宏动作 (对应 patrol_actions 索引)
 };
 
+constexpr uint8_t TILE_WALL  = 1 << 0;  // 墙壁
+constexpr uint8_t TILE_TGT   = 1 << 1;  // 目标点
+constexpr uint8_t TILE_PATH  = 1 << 2;  // 路径蓝点
+constexpr uint8_t TILE_CROSS = 1 << 3;  // 未观测叉叉
+constexpr uint8_t TILE_BOX   = 1 << 4;  // 箱子
+constexpr uint8_t TILE_BOMB  = 1 << 5;  // 炸弹
+constexpr uint8_t TILE_CAR   = 1 << 6;  // 小车
+
+struct RenderContext {
+    // 0. HUD 文本投影
+    char hud_line0[22];  // 第一行：比赛状态
+    char hud_line1[22];  // 第二行：赛段
+    char hud_line2[22];  // 第三行：耗时
+    
+    // 1. 地图与实体指针
+    const std::array<std::array<int8_t, SystemConfig::MAP_MAX_WIDTH>, SystemConfig::MAP_MAX_HEIGHT>* map;
+    const point* boxes;     uint8_t box_count;
+    const point* targets;   uint8_t target_count;
+    const point* bombs;     uint8_t bomb_count;
+    
+    // 2. 动态轨迹与小车
+    point player_pos;
+    const StaticArray<point, MAX_PATH_LENGTH>* path_ptr; 
+    uint16_t path_start_idx;                             
+    
+    // 3. 宏动作与炸弹任务投影
+    const StaticArray<PatrolAction, 32>* actions_ptr;
+    uint8_t action_start_idx;
+    const StaticArray<BombTask, MAX_BOMBS>* bomb_tasks_ptr;  // 用于画彩色炸弹框
+};
+
 
 class DebugGameManager : public GameManager {
 public:
@@ -111,6 +145,8 @@ public:
 
     // 注入虚拟视觉标签的接口
     void inject_mock_semantics();
+    // 同步逻辑状态到 UI 的接口
+    RenderContext get_render_context() const; // 获取当前帧的渲染投影
 
     bool force_bg_redraw = true;  // 发生爆炸摧毁墙壁时置 true，提示 UI 重绘底图废墟
 
@@ -132,3 +168,4 @@ private:
 };
 
 extern DebugGameManager debug_manager;
+extern RenderContext dashboard_vm;  // 仪表盘数据模型，供 Dashboard 页面渲染使用

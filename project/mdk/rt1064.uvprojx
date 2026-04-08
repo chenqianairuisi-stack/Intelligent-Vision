@@ -419,6 +419,11 @@
               <FilePath>..\App\task_manage.cpp</FilePath>
             </File>
             <File>
+              <FileName>task_manage_debug.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\App\task_manage_debug.cpp</FilePath>
+            </File>
+            <File>
               <FileName>task_manage.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\App\task_manage.h</FilePath>

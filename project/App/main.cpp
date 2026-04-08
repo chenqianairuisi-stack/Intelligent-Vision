@@ -1,6 +1,8 @@
 #include "zf_common_headfile.h"
 #include "code_headfile.h"
 
+bool is_debug_mode = true; 
+
 extern "C" int main(void) {
 
     clock_init(SYSTEM_CLOCK_600M);
@@ -15,7 +17,6 @@ extern "C" int main(void) {
     scheduler.init();                         // 任务调度器初始化 (timer)
     vision_manager.init();                    // 视觉模块初始化 (uart)
     chassis_task.init();                      // 控制模块初始化 (motor)
-    // game_manager.init();                      // 管理模块初始化 (gpio)
 
     // IMU 开机静态标定，累计 500 次数据求平均，得到 gyro_z_offset
     system_delay_ms(500);
@@ -35,10 +36,13 @@ extern "C" int main(void) {
     debug_manager.inject_mock_semantics();    // 注入虚拟视觉标签，供没有摄像头时的调试使用
 
     while(1) {
-        vision_manager.update();             // 视觉地图/位置解析
-        debug_manager.update();              // 游戏状态机更新（包含动画演示）
-        // game_manager.update();               // 游戏状态机更新
+        vision_manager.update();  // 视觉信息处理
+        scheduler.run();   // 任务调度器，负责调用各个模块的周期性任务
 
-        scheduler.run();
+        if (is_debug_mode) {
+            debug_manager.update();              // 调试模式：进入拦截器，执行动画逻辑
+        } else {
+            debug_manager.GameManager::update(); // 正赛模式：直接穿透到基类，执行纯物理/控制逻辑
+        }
     }
 }

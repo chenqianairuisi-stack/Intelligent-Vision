@@ -15,8 +15,7 @@ enum class MenuPage {
     MAP_SELECT,         // 地图选择
 
     // --- 状态监控组 (只读) ---
-    GAME_STATUS,        // 比赛总控监控 (阶段, 目标点, 地图接收状态)
-    VISION_DATA,        // 视觉通讯监控 (箱子ID, 炸弹位置)
+    DASHBOARD,          // 全局状态监控 (游戏进程、地图信息、规划展示等)
     ODOMETRY_DATA,      // 里程计+硬件监控 (全局位姿、编码器速度、IMU)
 
     // --- 参数调节组 (可编辑) ---
@@ -49,9 +48,8 @@ private:
 
     // --- 页面绘制函数 ---
     void draw_main_menu();          // 主菜单
+    void draw_dashboard();          // 全局状态监控页
     void draw_map_select();         // 绘制地图选择页
-    void draw_game_status();        // 比赛状态监控页
-    void draw_vision_data();        // 视觉监控页
     void draw_odometry_data();      // 里程计+硬件数据监控页
     void draw_tune_params();        // 参数调节页
 
@@ -64,3 +62,4 @@ private:
 };
 
 extern TftMenu sys_menu;
+extern bool is_debug_mode; // 全局调试模式标志，控制是否启用测试功能和显示额外信息

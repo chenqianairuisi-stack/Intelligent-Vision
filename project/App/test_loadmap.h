@@ -72,8 +72,8 @@ static constexpr MockMapDef mock_map_library[] = {
             "##-#-------#",
             "############"
         }
-    }
-        {
+    },
+    {
         "3. Map3_1",
         {
             "############",
@@ -93,7 +93,7 @@ static constexpr MockMapDef mock_map_library[] = {
             "#--##------#",
             "############"
         }
-    },
+    }
 };
 
 // 自动计算地图总数

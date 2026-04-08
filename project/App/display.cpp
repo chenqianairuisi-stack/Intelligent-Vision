@@ -10,7 +10,7 @@
 #include "test_loadmap.h"
 
 
-// ===================================================== 初始化与全局变量 =====================================================
+// ===================================================== 全局常量与参数字典 =====================================================
 
 TftMenu sys_menu;
 
@@ -42,6 +42,7 @@ static ParamItem tune_dict[] = {
 static constexpr int DICT_SIZE = sizeof(tune_dict) / sizeof(tune_dict[0]);     // 自动计算字典大小
 static constexpr int PARAMS_PER_PAGE = 12;                                     // 每页显示的参数数量，超过会自动滚动
 // ======================================================================
+
 
 
 void TftMenu::init() {
@@ -98,7 +99,7 @@ void TftMenu::scan_keys() {
     bool cur_k3 = gpio_get_level(KEY3);
     bool cur_k4 = gpio_get_level(KEY4);
 
-    // 只有在按键从 高电平(true) 变到 低电平(false) 的瞬间，才触发一次 true
+    // 边缘检测触发：只有在按键从 高电平(true) 变到 低电平(false) 的瞬间，才触发一次 true
     key_down_pressed  = (last_k1 && !cur_k1);
     key_enter_pressed = (last_k2 && !cur_k2);
     key_up_pressed    = (last_k3 && !cur_k3);
@@ -114,10 +115,8 @@ void TftMenu::scan_keys() {
 
 // 核心逻辑控制器：状态跳转与参数修改
 void TftMenu::process_logic() {
-    // 如果是监控页面，哪怕没有按键，也要刷新数据
-    if (current_page == MenuPage::GAME_STATUS ||
-        current_page == MenuPage::VISION_DATA ||
-        current_page == MenuPage::ODOMETRY_DATA) {
+    // 高频刷新监控页面
+    if (current_page == MenuPage::DASHBOARD || current_page == MenuPage::ODOMETRY_DATA) {
         ui_dirty = true;
     }
 
@@ -129,10 +128,15 @@ void TftMenu::process_logic() {
             if (key_up_pressed)   cursor_idx = (cursor_idx == 0) ? 6 : cursor_idx - 1;
 
             if (key_enter_pressed) {
-                if (cursor_idx == 0) current_page = MenuPage::GAME_STATUS;
+                if (cursor_idx == 0) current_page = MenuPage::DASHBOARD;
                 if (cursor_idx == 1) current_page = MenuPage::ODOMETRY_DATA;
-                if (cursor_idx == 2) current_page = MenuPage::VISION_DATA;
-                if (cursor_idx == 3) { current_page = MenuPage::TUNE_PARAMS; cursor_idx = 0; scroll_offset = 0; }
+                if (cursor_idx == 2) { current_page = MenuPage::TUNE_PARAMS; cursor_idx = 0; scroll_offset = 0; }
+                // --- 运行模式切换 ---
+                if (cursor_idx == 3) {
+                    is_debug_mode = !is_debug_mode;
+                    tft180_show_string(14 * UI_COL_W, 5 * UI_ROW_H, "[SWAP]");
+                    system_delay_ms(300);
+                }
                 // --- Flash 存储触发 ---
                 if (cursor_idx == 4) {
                     Storage::save_params();
@@ -145,19 +149,16 @@ void TftMenu::process_logic() {
                     tft180_show_string(15 * UI_COL_W, 7 * UI_ROW_H, "[OK]");
                     system_delay_ms(300);
                 }
+                // --- 息屏模式 ---
                 if (cursor_idx == 6) {
                     is_closed = true;
                     tft180_full(RGB565_WHITE); 
                     return; 
                 }
 
-                // 前4个是页面跳转，需要重置光标和清屏
-                if (cursor_idx < 4) {
-                    cursor_idx = 0; need_full_redraw = true;
-                } else {
-                    // 第5和第6项执行完只需局部刷新把 [OK] 擦掉
-                    need_full_redraw = true;
-                }
+                // 页面跳转后触发重绘
+                if (cursor_idx < 3) { cursor_idx = 0; need_full_redraw = true;} 
+                else { need_full_redraw = true;}
             }
             break;
 
@@ -181,7 +182,7 @@ void TftMenu::process_logic() {
             }
             break;
 
-        case MenuPage::VISION_DATA:
+        case MenuPage::DASHBOARD:
             // 按确认键注入本地地图
             if (key_enter_pressed) {
                 current_page = MenuPage::MAP_SELECT;
@@ -213,12 +214,12 @@ void TftMenu::process_logic() {
                 tft180_show_string(10, 80, "[ Map Loaded ]");
                 system_delay_ms(200);
                 
-                current_page = MenuPage::VISION_DATA; // 自动跳回视图层看地图
+                current_page = MenuPage::DASHBOARD; // 自动跳回视图层看地图
                 need_full_redraw = true;
             }
             // 按返回键：取消选择，退回 Vision 层
             if (key_back_pressed) { 
-                current_page = MenuPage::VISION_DATA; 
+                current_page = MenuPage::DASHBOARD; 
                 need_full_redraw = true; 
             }
             break;
@@ -244,9 +245,8 @@ void TftMenu::render_ui() {
 
     switch (current_page) {
         case MenuPage::MAIN_MENU:      draw_main_menu(); break;
-        case MenuPage::GAME_STATUS:    draw_game_status(); break;
+        case MenuPage::DASHBOARD:      draw_dashboard(); break;
         case MenuPage::ODOMETRY_DATA:  draw_odometry_data(); break;
-        case MenuPage::VISION_DATA:    draw_vision_data(); break;
         case MenuPage::TUNE_PARAMS:    draw_tune_params(); break;
         case MenuPage::MAP_SELECT:     draw_map_select(); break;
     }
@@ -256,10 +256,10 @@ void TftMenu::render_ui() {
 // 绘制主菜单
 void TftMenu::draw_main_menu() {
     tft180_show_string(0, 0, "-- COMMAND MENU --");
-    draw_item(2, "Game State", cursor_idx == 0);
+    draw_item(2, "Dashboard",  cursor_idx == 0);
     draw_item(3, "Odometry",   cursor_idx == 1);
-    draw_item(4, "Vision",     cursor_idx == 2);
-    draw_item(5, "Tuning",     cursor_idx == 3);
+    draw_item(4, "Tuning",     cursor_idx == 2);
+    draw_item(5, is_debug_mode ? "Mode: [DEBUG]" : "Mode: [PROD ]", cursor_idx == 3);
     draw_item(6, "Save Config",cursor_idx == 4);
     draw_item(7, "Load Config",cursor_idx == 5);
     draw_item(8, "Close Menu", cursor_idx == 6); 
@@ -313,37 +313,363 @@ void TftMenu::draw_tune_params() {
     }
 }
 
-// 绘制比赛状态监控页面
-void TftMenu::draw_game_status() {
-    tft180_show_string(0, 0, "-- GAME STATUS --");
-    tft180_show_string(0, 2 * UI_ROW_H, "Phase: ");
-    switch(game_manager.get_phase()) {
-        case GamePhase::INIT_CALIBRATE:        tft180_show_string(7 * UI_COL_W, 2 * UI_ROW_H, "INIT_CALIB"); break;
-        case GamePhase::EXIT_START_ZONE:       tft180_show_string(7 * UI_COL_W, 2 * UI_ROW_H, "EXIT_ZONE "); break;
-        case GamePhase::WAIT_FOR_VISION:       tft180_show_string(7 * UI_COL_W, 2 * UI_ROW_H, "WAIT_VIS  "); break;
-        case GamePhase::PLAN_PATROL:           tft180_show_string(7 * UI_COL_W, 2 * UI_ROW_H, "PLAN_PTRL "); break;
-        case GamePhase::EXEC_ACTION_DISPATCH:  tft180_show_string(7 * UI_COL_W, 2 * UI_ROW_H, "ACT_DISP  "); break;
-        case GamePhase::EXEC_PATROL_MOVE:      tft180_show_string(7 * UI_COL_W, 2 * UI_ROW_H, "MOVE_PTRL "); break;
-        case GamePhase::EXEC_ALIGN_YAW:        tft180_show_string(7 * UI_COL_W, 2 * UI_ROW_H, "ALIGN_YAW "); break;
-        case GamePhase::WAIT_ART2_CAPTURE_ACK: tft180_show_string(7 * UI_COL_W, 2 * UI_ROW_H, "WAIT_ART2 "); break;
-        case GamePhase::EXEC_BOMB_PUSH:        tft180_show_string(7 * UI_COL_W, 2 * UI_ROW_H, "PUSH_BOMB "); break;
-        case GamePhase::UPDATE_MAP:            tft180_show_string(7 * UI_COL_W, 2 * UI_ROW_H, "UPDATE_MAP"); break;
-        case GamePhase::BIND_SEMANTICS:        tft180_show_string(7 * UI_COL_W, 2 * UI_ROW_H, "BIND_SEM  "); break;
-        case GamePhase::PLAN_SOKOBAN:          tft180_show_string(7 * UI_COL_W, 2 * UI_ROW_H, "PLANNING  "); break;
-        case GamePhase::EXEC_SOKOBAN:          tft180_show_string(7 * UI_COL_W, 2 * UI_ROW_H, "TRACKING  "); break;
-        case GamePhase::FINISHED:              tft180_show_string(7 * UI_COL_W, 2 * UI_ROW_H, "FINISHED  "); break;
-        case GamePhase::ERROR_OCCURRED:        tft180_show_string(7 * UI_COL_W, 2 * UI_ROW_H, "ERROR     "); break;
-        case GamePhase::ANIMATE_PATROL_DEMO:   tft180_show_string(7 * UI_COL_W, 2 * UI_ROW_H, "DEMO_PTRL "); break;
-        case GamePhase::ANIMATE_DEMO:          tft180_show_string(7 * UI_COL_W, 2 * UI_ROW_H, "DEMO_PUSH "); break;
-        default:                               tft180_show_string(7 * UI_COL_W, 2 * UI_ROW_H, "UNKNOWN   "); break;
+
+// // 融合后的仪表盘绘制：集比赛状态、规划耗时、动态地图于一体
+// void TftMenu::draw_dashboard() {
+//     GamePhase phase = debug_manager.get_phase();
+//     const DemoState& demo = debug_manager.get_demo_state();
+
+//     // ========================================================================
+//     // Row 0: 顶部状态展示
+//     // ========================================================================
+//     tft180_show_string(0, 0, "                    "); // 清行
+//     if (is_debug_mode) {
+//         // Debug 模式的简短提示
+//         if (phase <= GamePhase::WAIT_FOR_VISION)           tft180_show_string(0, 0, "Phase: WAITING MAP");
+//         else if (phase == GamePhase::PLAN_PATROL)          tft180_show_string(0, 0, "Phase: PLAN PATROL");
+//         else if (phase == GamePhase::ANIMATE_PATROL_DEMO)  tft180_show_string(0, 0, "Phase: DEMO PATROL");
+//         else if (phase == GamePhase::BIND_SEMANTICS)       tft180_show_string(0, 0, "Phase: BINDING... ");
+//         else if (phase == GamePhase::PLAN_SOKOBAN)         tft180_show_string(0, 0, "Phase: PLAN SOKO  ");
+//         else if (phase == GamePhase::ANIMATE_DEMO)         tft180_show_string(0, 0, "Phase: DEMO PUSH  ");
+//         else if (phase == GamePhase::FINISHED)             tft180_show_string(0, 0, "Phase: FINISHED   ");
+//         else if (phase == GamePhase::ERROR_OCCURRED)       tft180_show_string(0, 0, "Phase: ERROR      ");
+//     } else {
+//         // Prod 模式的详尽物理机状态
+//         tft180_show_string(0, 0, "P: ");
+//         switch(phase) {
+//             case GamePhase::INIT_CALIBRATE:        tft180_show_string(3 * UI_COL_W, 0, "INIT      "); break;
+//             case GamePhase::EXIT_START_ZONE:       tft180_show_string(3 * UI_COL_W, 0, "EXIT_ZONE "); break;
+//             case GamePhase::WAIT_FOR_VISION:       tft180_show_string(3 * UI_COL_W, 0, "WAIT_ART1 "); break;
+//             case GamePhase::EXEC_ACTION_DISPATCH:  tft180_show_string(3 * UI_COL_W, 0, "ACT_DISP  "); break;
+//             case GamePhase::EXEC_PATROL_MOVE:      tft180_show_string(3 * UI_COL_W, 0, "MOVE_PTRL "); break;
+//             case GamePhase::EXEC_ALIGN_YAW:        tft180_show_string(3 * UI_COL_W, 0, "ALIGN_YAW "); break;
+//             case GamePhase::WAIT_ART2_CAPTURE_ACK: tft180_show_string(3 * UI_COL_W, 0, "WAIT_ART2 "); break;
+//             case GamePhase::EXEC_BOMB_PUSH:        tft180_show_string(3 * UI_COL_W, 0, "PUSH_BOMB "); break;
+//             case GamePhase::EXEC_SOKOBAN:          tft180_show_string(3 * UI_COL_W, 0, "TRACKING  "); break;
+//             case GamePhase::FINISHED:              tft180_show_string(3 * UI_COL_W, 0, "FINISHED  "); break;
+//             case GamePhase::ERROR_OCCURRED:        tft180_show_string(3 * UI_COL_W, 0, "ERROR     "); break;
+//             default:                               tft180_show_string(3 * UI_COL_W, 0, "COMPUTING "); break;
+//         }
+//     }
+
+//     // ========================================================================
+//     // Row 1: 比赛阶段 Stage
+//     // ========================================================================
+//     tft180_show_string(0, 1 * UI_ROW_H, "Stage: ");
+//     tft180_show_int(7 * UI_COL_W, 1 * UI_ROW_H, debug_manager.get_stage(), 1); 
+
+//     // ========================================================================
+//     // Row 2: 耗时展示 (根据模式区分)
+//     // ========================================================================
+//     if (is_debug_mode) {
+//         if (phase == GamePhase::ANIMATE_PATROL_DEMO || phase == GamePhase::BIND_SEMANTICS || phase == GamePhase::PLAN_SOKOBAN) {
+//             tft180_show_string(0, 2 * UI_ROW_H, "Bm:    ms GT:    ms");
+//             tft180_show_int(3 * UI_COL_W,  2 * UI_ROW_H, debug_manager.get_bomb_plan_time_ms(), 3);
+//             tft180_show_int(13 * UI_COL_W, 2 * UI_ROW_H, debug_manager.get_patrol_plan_time_ms(), 3);
+//         } else if (phase == GamePhase::ANIMATE_DEMO || phase == GamePhase::FINISHED) {
+//             tft180_show_string(0, 2 * UI_ROW_H, "IDA* Time:       ms"); 
+//             tft180_show_string(11 * UI_COL_W, 2 * UI_ROW_H, "    "); 
+//             tft180_show_int(11 * UI_COL_W, 2 * UI_ROW_H, debug_manager.get_push_plan_time_ms(), 4);
+//         } else {
+//             tft180_show_string(0, 2 * UI_ROW_H, "Plan Time: --    ms");
+//         }
+//     } else {
+//         // Prod 模式固定显示
+//         tft180_show_string(0, 2 * UI_ROW_H, "Plan Time: --    ms");
+//     }
+
+//     // 地图未就绪拦截
+//     bool is_anim_patrol = is_debug_mode && (phase == GamePhase::ANIMATE_PATROL_DEMO);
+//     bool is_anim_push   = is_debug_mode && (phase == GamePhase::ANIMATE_DEMO);
+//     bool is_animating   = is_anim_patrol || is_anim_push;
+
+//     if (!vision_data.art1_map_ready && vision_data.box_count == 0 && !is_animating) return;
+
+//     // ========================================================================
+//     // Map Rendering
+//     // ========================================================================
+//     int map_start_y = 3 * UI_ROW_H + 4;  // 地图起始于 y = 34
+
+//     const SokobanLevel& level = debug_manager.get_logical_level();
+
+//     // --- 动态地图渲染 ---
+//     if (debug_manager.force_bg_redraw) {
+//         for (int map_x = 0; map_x < MAP_MAX_WIDTH; ++map_x) {
+//             for (int map_y = 0; map_y < MAP_MAX_HEIGHT; ++map_y) {
+//                 int screen_x = map_y * 8;
+//                 int screen_y = map_x * 8 + map_start_y;
+//                 // Debug 模式画被炸毁的地图，Prod 模式画原生视觉地图
+//                 bool is_wall = is_debug_mode ? (demo.map_state.map[map_y][map_x] == 1) : (vision_data.map[map_y][map_x] == 1);
+//                 fill_rect(screen_x+1, screen_y+1, 7, 7, is_wall ? RGB565_GRAY : RGB565_WHITE); 
+//             }
+//         }
+//         // 网格线 (每8像素一条)，覆盖在地图上，增强视觉效果
+//         for (int i = 0; i <= 12; ++i) tft180_draw_line(0, i * 8 + map_start_y, 127, i * 8 + map_start_y, RGB565_BLACK); 
+//         for (int i = 1; i <= 15; ++i) tft180_draw_line(i * 8, map_start_y, i * 8,  96 + map_start_y, RGB565_BLACK); 
+//         debug_manager.force_bg_redraw = false; 
+//     }
+
+//     // --- 数据源动态绑定 ---
+//     const point* current_boxes = is_anim_push ? demo.boxes : level.boxes;
+//     uint8_t current_box_count  = is_anim_push ? demo.box_count : level.box_count;
+//     const point* current_bombs = is_animating ? demo.bombs : level.bombs;
+//     uint8_t current_bomb_count = is_animating ? demo.bomb_count : level.bomb_count;
+//     const point* current_tgts  = is_anim_push ? demo.targets : level.targets;
+//     uint8_t current_tgt_count  = is_anim_push ? demo.target_count : level.target_count;
+
+//     // --- 擦除逻辑：只擦除上一次出现但这次消失的元素，避免全图刷新导致的闪烁 ---
+//     static point last_boxes[SystemConfig::MAX_BOXES];  
+//     static point last_bombs[SystemConfig::MAX_BOMBS];
+//     static bool init_done = false;
+//     if (!init_done) {
+//         for(int i=0; i<SystemConfig::MAX_BOXES; ++i) last_boxes[i] = {-1, -1};
+//         for(int i=0; i<SystemConfig::MAX_BOMBS; ++i) last_bombs[i] = {-1, -1};
+//         init_done = true;
+//     }
+
+//     auto erase_ghost = [&](point* last_arr, const point* curr_arr, uint8_t curr_count, int max_size) {
+//         for (int i = 0; i < max_size; ++i) {
+//             if (last_arr[i].x != -1) {
+//                 bool moved_or_vanished = true;
+//                 for (int j = 0; j < curr_count; ++j) {
+//                     if (last_arr[i] == curr_arr[j]) { moved_or_vanished = false; break; }
+//                 }
+//                 if (moved_or_vanished) {
+//                     fill_rect(last_arr[i].y * 8 + 1, map_start_y + last_arr[i].x * 8 + 1, 6, 6, RGB565_WHITE);
+//                     last_arr[i] = {-1, -1}; // BUG FIX: 擦除后立刻标记为空，防止重复擦除导致花屏
+//                 }
+//             }
+//         }
+//     };
+//     erase_ghost(last_boxes, current_boxes, current_box_count, SystemConfig::MAX_BOXES);
+//     erase_ghost(last_bombs, current_bombs, current_bomb_count, SystemConfig::MAX_BOMBS);
+
+//     // --- 绘制彩色炸弹匹配边框 ---
+//     const auto& bomb_tasks = debug_manager.get_cached_bomb_tasks();
+//     uint16_t b_colors[] = {RGB565_RED, RGB565_BLUE, RGB565_CYAN, RGB565_MAGENTA}; 
+
+//     for (int i = 0; i < bomb_tasks.size(); ++i) {
+//         uint16_t color = b_colors[i % 4];
+//         point bs = bomb_tasks[i].bomb_start;
+//         point tw = bomb_tasks[i].target_wall;
+
+//         // 炸弹起点边框
+//         int bs_sx = bs.y * 8, bs_sy = map_start_y + bs.x * 8;
+//         tft180_draw_line(bs_sx, bs_sy, bs_sx + 7, bs_sy, color);
+//         tft180_draw_line(bs_sx, bs_sy + 7, bs_sx + 7, bs_sy + 7, color);
+//         tft180_draw_line(bs_sx, bs_sy, bs_sx, bs_sy + 7, color);
+//         tft180_draw_line(bs_sx + 7, bs_sy, bs_sx + 7, bs_sy + 7, color);
+
+//         // 墙壁目标边框
+//         if (demo.map_state.map[tw.y][tw.x] == 1) {
+//             int tw_sx = tw.y * 8, tw_sy = map_start_y + tw.x * 8;
+//             tft180_draw_line(tw_sx, tw_sy, tw_sx + 7, tw_sy, color);
+//             tft180_draw_line(tw_sx, tw_sy + 7, tw_sx + 7, tw_sy + 7, color);
+//             tft180_draw_line(tw_sx, tw_sy, tw_sx, tw_sy + 7, color);
+//             tft180_draw_line(tw_sx + 7, tw_sy, tw_sx + 7, tw_sy + 7, color);
+//         }
+//     }
+
+//     // --- 绘制底层实体要素 [目标点(紫色) / 箱子(黄色) / 炸弹(黑+红心)] ---
+//     for (int i = 0; i < current_tgt_count; ++i) {
+//         fill_rect(current_tgts[i].y * 8 + 1, map_start_y + current_tgts[i].x * 8 + 1, 6, 6, RGB565_PURPLE);
+//     }
+//     for (int i = 0; i < current_box_count; ++i) {
+//         last_boxes[i] = current_boxes[i]; 
+//         fill_rect(current_boxes[i].y * 8 + 1, map_start_y + current_boxes[i].x * 8 + 1, 6, 6, RGB565_YELLOW);
+//     }
+//     for (int i = 0; i < current_bomb_count; ++i) {
+//         if (current_bombs[i].x != -1) {
+//             last_bombs[i] = current_bombs[i]; 
+//             int sx = current_bombs[i].y * 8 + 1, sy = map_start_y + current_bombs[i].x * 8 + 1;
+//             fill_rect(sx, sy, 6, 6, RGB565_BLACK); 
+//             fill_rect(sx + 2, sy + 2, 2, 2, RGB565_RED); 
+//         }
+//     }
+
+//     // --- PROD 与 DEBUG 模式的轨迹与观测点自适应渲染 ---
+//     if (phase >= GamePhase::PLAN_PATROL) {
+//         const auto& actions = debug_manager.get_patrol_actions();
+        
+//         // 绘制尚未到达的观测点大叉
+//         // Prod 模式从 GameManager 获取真实进度，动画模式从 Demo 状态机获取虚拟进度
+//         uint8_t cur_action_idx = is_animating ? demo.patrol_target_idx : debug_manager.get_action_idx(); 
+        
+//         for (size_t i = cur_action_idx; i < actions.size(); ++i) {
+//             if (!actions[i].is_bomb_task) {
+//                 int sx = actions[i].obs.pos.y * 8; 
+//                 int sy = map_start_y + actions[i].obs.pos.x * 8;
+//                 tft180_draw_line(sx + 2, sy + 2, sx + 6, sy + 6, RGB565_BLUE);
+//                 tft180_draw_line(sx + 2, sy + 6, sx + 6, sy + 2, RGB565_BLUE);
+//             }
+//         }
+
+//         // 绘制底层 Tracker 运行的网格路径豆子
+//         if (is_animating) {
+//             // 动画模式下，从虚拟内存读取
+//             if (is_anim_patrol) {
+//                 for (size_t i = demo.segment_idx; i < demo.segment_path.size(); ++i) 
+//                     fill_rect(demo.segment_path[i].y * 8 + 3, map_start_y + demo.segment_path[i].x * 8 + 3, 2, 2, RGB565_BLUE);
+//             } else if (is_anim_push) {
+//                 const auto& push_path = solver.get_result_path();
+//                 for (size_t i = demo.path_idx; i < push_path.size(); ++i) 
+//                     fill_rect(push_path[i].y * 8 + 3, map_start_y + push_path[i].x * 8 + 3, 2, 2, RGB565_BLUE);
+//             }
+//         } else {
+//             // PROD 模式下，直接抓取 Tracker 内部正在跟踪的坐标数据
+//             if (phase == GamePhase::EXEC_PATROL_MOVE || phase == GamePhase::EXEC_BOMB_PUSH) {
+//                 const auto& current_path = path_tracker.grid_path; 
+//                 for (size_t i = 0; i < current_path.size(); ++i) {
+//                     fill_rect(current_path[i].y * 8 + 3, map_start_y + current_path[i].x * 8 + 3, 2, 2, RGB565_BLUE);
+//                 }
+//             } else if (phase == GamePhase::EXEC_SOKOBAN) {
+//                 const auto& current_path = solver.get_result_path(); 
+//                 for (size_t i = 0; i < current_path.size(); ++i) {
+//                     fill_rect(current_path[i].y * 8 + 3, map_start_y + current_path[i].x * 8 + 3, 2, 2, RGB565_BLUE);
+//                 }
+//             }
+//         }
+//     }
+
+//     // --- 绘制小车位姿 ---
+//     static point last_player_pos = {-1, -1}; // 上一帧小车位置，初始为无效坐标
+//     point car_pos = {-1, -1};
+
+//     if (is_debug_mode) {
+//         // Debug 模式使用动画逻辑的虚拟小车坐标
+//         if (is_animating) car_pos = demo.player;
+//     } else {
+//         // Prod 模式使用真实底盘里程计坐标并转为网格
+//         Point2D real_pos = chassis_odometry.get_position();
+//         int8_t grid_x = static_cast<int8_t>(std::round((real_pos.x - MAP_OFFSET_X) / GRID_SIZE_CM));
+//         int8_t grid_y = static_cast<int8_t>(std::round((real_pos.y - MAP_OFFSET_Y) / GRID_SIZE_CM));
+        
+//         // 限幅约束
+//         if (grid_x < 0) grid_x = 0; else if (grid_x >= MAP_MAX_WIDTH) grid_x = MAP_MAX_WIDTH - 1;
+//         if (grid_y < 0) grid_y = 0; else if (grid_y >= MAP_MAX_HEIGHT) grid_y = MAP_MAX_HEIGHT - 1;
+//         car_pos = {grid_x, grid_y};
+//     }
+
+//     // 渲染小车绿块并擦除上一帧
+//     if (car_pos.x != -1) {
+//         if (last_player_pos.x != -1 && !(last_player_pos == car_pos)) {
+//             fill_rect(last_player_pos.y * 8 + 2, map_start_y + last_player_pos.x * 8 + 2, 4, 4, RGB565_WHITE);
+//         }
+//         fill_rect(car_pos.y * 8 + 2, map_start_y + car_pos.x * 8 + 2, 4, 4, RGB565_GREEN);
+//         last_player_pos = car_pos;
+//     }
+// }
+
+// 掩码定义（可放在 display.cpp 顶部）
+constexpr uint8_t TL_WALL=1<<0, TL_TGT=1<<1, TL_BOX=1<<2, TL_BOMB=1<<3, TL_PATH=1<<4, TL_CRS=1<<5, TL_CAR=1<<6;
+static uint8_t back_buffer[16][12] = {0}; // 显存缓冲，用于防闪烁
+
+void TftMenu::draw_dashboard() {
+    // 1. 获取上帝视角的“数据投影”
+    RenderContext ctx = debug_manager.get_render_context();
+
+    // ====================================================================
+    // 2. 顶部 HUD 渲染 (带缓存的局部刷新，告别闪烁)
+    // ====================================================================
+    static char last_hud0[22] = {0}, last_hud1[22] = {0}, last_hud2[22] = {0};
+    
+    if (strncmp(last_hud0, ctx.hud_line0, 22) != 0) {
+        tft180_show_string(0, 0, "                     "); // 先用空格擦除
+        tft180_show_string(0, 0, ctx.hud_line0);
+        strncpy(last_hud0, ctx.hud_line0, 22);
+    }
+    if (strncmp(last_hud1, ctx.hud_line1, 22) != 0) {
+        tft180_show_string(0, 1 * UI_ROW_H, "                     ");
+        tft180_show_string(0, 1 * UI_ROW_H, ctx.hud_line1);
+        strncpy(last_hud1, ctx.hud_line1, 22);
+    }
+    if (strncmp(last_hud2, ctx.hud_line2, 22) != 0) {
+        tft180_show_string(0, 2 * UI_ROW_H, "                     ");
+        tft180_show_string(0, 2 * UI_ROW_H, ctx.hud_line2);
+        strncpy(last_hud2, ctx.hud_line2, 22);
     }
 
-    tft180_show_string(0, 4 * UI_ROW_H, "GAME STAGE:");
-    tft180_show_int(16 * UI_COL_W, 4 * UI_ROW_H, game_manager.get_stage(), 1); 
-    tft180_show_string(0, 5 * UI_ROW_H, "DEBUG STAGE:");
-    tft180_show_int(16 * UI_COL_W, 5 * UI_ROW_H, debug_manager.get_stage(), 1); 
-}
+    // ====================================================================
+    // 3. 在内存中合成 192 字节的语义画布 (无任何 if-else 业务分支！)
+    // ====================================================================
+    uint8_t canvas[16][12] = {0};
+    
+    for(int y=0; y<MAP_MAX_HEIGHT; y++) for(int x=0; x<MAP_MAX_WIDTH; x++) if((*ctx.map)[y][x]) canvas[y][x] |= TL_WALL;
+    for(int i=0; i<ctx.target_count; i++) if(ctx.targets[i].x != -1) canvas[ctx.targets[i].y][ctx.targets[i].x] |= TL_TGT;
+    for(int i=0; i<ctx.box_count; i++)    if(ctx.boxes[i].x != -1)   canvas[ctx.boxes[i].y][ctx.boxes[i].x] |= TL_BOX;
+    for(int i=0; i<ctx.bomb_count; i++)   if(ctx.bombs[i].x != -1)   canvas[ctx.bombs[i].y][ctx.bombs[i].x] |= TL_BOMB;
+    
+    if (ctx.path_ptr) {
+        for(size_t i = ctx.path_start_idx; i < ctx.path_ptr->size(); i++) 
+            canvas[(*ctx.path_ptr)[i].y][(*ctx.path_ptr)[i].x] |= TL_PATH;
+    }
+    if (ctx.actions_ptr) {
+        for(size_t i = ctx.action_start_idx; i < ctx.actions_ptr->size(); i++) 
+            if(!(*ctx.actions_ptr)[i].is_bomb_task) canvas[(*ctx.actions_ptr)[i].obs.pos.y][(*ctx.actions_ptr)[i].obs.pos.x] |= TL_CRS;
+    }
+    canvas[ctx.player_pos.y][ctx.player_pos.x] |= TL_CAR;
 
+    // ====================================================================
+    // 4. O(1) 脏矩形增量渲染 
+    // ====================================================================
+    int map_start_y = 3 * UI_ROW_H + 4;
+    
+    if (debug_manager.force_bg_redraw) { 
+        memset(back_buffer, 0xFF, sizeof(back_buffer)); // 失效显存，强制全刷
+        
+        // --- 静态背景上的附加涂装：彩色炸弹框 ---
+        if (ctx.bomb_tasks_ptr) {
+            uint16_t b_colors[] = {RGB565_RED, RGB565_BLUE, RGB565_CYAN, RGB565_MAGENTA}; 
+            for (int i = 0; i < ctx.bomb_tasks_ptr->size(); ++i) {
+                uint16_t color = b_colors[i % 4];
+                point bs = (*ctx.bomb_tasks_ptr)[i].bomb_start;
+                point tw = (*ctx.bomb_tasks_ptr)[i].target_wall;
+
+                int bs_sx = bs.y * 8, bs_sy = map_start_y + bs.x * 8;
+                tft180_draw_line(bs_sx, bs_sy, bs_sx + 7, bs_sy, color);
+                tft180_draw_line(bs_sx, bs_sy + 7, bs_sx + 7, bs_sy + 7, color);
+                tft180_draw_line(bs_sx, bs_sy, bs_sx, bs_sy + 7, color);
+                tft180_draw_line(bs_sx + 7, bs_sy, bs_sx + 7, bs_sy + 7, color);
+
+                if ((*ctx.map)[tw.y][tw.x] == 1) { // 墙还没被炸毁的话，画框
+                    int tw_sx = tw.y * 8, tw_sy = map_start_y + tw.x * 8;
+                    tft180_draw_line(tw_sx, tw_sy, tw_sx + 7, tw_sy, color);
+                    tft180_draw_line(tw_sx, tw_sy + 7, tw_sx + 7, tw_sy + 7, color);
+                    tft180_draw_line(tw_sx, tw_sy, tw_sx, tw_sy + 7, color);
+                    tft180_draw_line(tw_sx + 7, tw_sy, tw_sx + 7, tw_sy + 7, color);
+                }
+            }
+        }
+        debug_manager.force_bg_redraw = false; 
+    }
+
+    // 核心渲染循环：比较 canvas 与 back_buffer，谁变了就盖谁
+    for(int y=0; y<16; y++) {
+        for(int x=0; x<12; x++) {
+            if (canvas[y][x] != back_buffer[y][x]) {  
+                int sx = y * 8, sy = x * 8 + map_start_y;
+                
+                // 第一层：铺底色 (自带清空残影功能)
+                fill_rect(sx + 1, sy + 1, 7, 7, (canvas[y][x] & TL_WALL) ? RGB565_GRAY : RGB565_WHITE);
+                
+                // 第二层：贴花 (紫框、蓝豆、蓝叉叉)
+                if (canvas[y][x] & TL_TGT)  fill_rect(sx + 1, sy + 1, 6, 6, RGB565_PURPLE);
+                if (canvas[y][x] & TL_PATH) fill_rect(sx + 3, sy + 3, 2, 2, RGB565_BLUE);
+                if (canvas[y][x] & TL_CRS)  { tft180_draw_line(sx+2, sy+2, sx+6, sy+6, RGB565_BLUE); tft180_draw_line(sx+2, sy+6, sx+6, sy+2, RGB565_BLUE); }
+                
+                // 第三层：3D实体 (箱子、炸弹)
+                if (canvas[y][x] & TL_BOX)  fill_rect(sx + 1, sy + 1, 6, 6, RGB565_YELLOW);
+                if (canvas[y][x] & TL_BOMB) { fill_rect(sx + 1, sy + 1, 6, 6, RGB565_BLACK); fill_rect(sx + 3, sy + 3, 2, 2, RGB565_RED); }
+                
+                // 第四层：Actor小车本身 (强制最顶层展示)
+                if (canvas[y][x] & TL_CAR)  fill_rect(sx + 2, sy + 2, 4, 4, RGB565_GREEN);
+
+                // 更新显存记录
+                back_buffer[y][x] = canvas[y][x]; 
+            }
+        }
+    }
+}
 
 // 里程计和硬件监控页面
 void TftMenu::draw_odometry_data() {
@@ -364,188 +690,6 @@ void TftMenu::draw_odometry_data() {
 }
 
 
-// 视觉数据监控页面：地图格子、箱子、目标、炸弹、小车位置等的实时绘制
-void TftMenu::draw_vision_data() {
-    
-    GamePhase current_phase = debug_manager.get_phase();  
-    bool is_animating = (current_phase == GamePhase::ANIMATE_PATROL_DEMO || current_phase == GamePhase::ANIMATE_DEMO);  
-    const DemoState& demo = debug_manager.get_demo_state();  // 获取演示状态机数据，里面有动画模式下的箱子和目标位置
-
-    // ========================================================================
-    // Step 1: 顶部状态栏与规划时间展示
-    // ========================================================================
-    tft180_show_string(0, 0, "                     "); 
-    if (current_phase <= GamePhase::WAIT_FOR_VISION)           tft180_show_string(0, 0, "Phase: WAITING MAP");
-    else if (current_phase == GamePhase::PLAN_PATROL)          tft180_show_string(0, 0, "Phase: PLAN PATROL");
-    else if (current_phase == GamePhase::ANIMATE_PATROL_DEMO)  tft180_show_string(0, 0, "Phase: DEMO PATROL");
-    else if (current_phase == GamePhase::BIND_SEMANTICS)       tft180_show_string(0, 0, "Phase: BINDING... ");
-    else if (current_phase == GamePhase::PLAN_SOKOBAN)         tft180_show_string(0, 0, "Phase: PLAN SOKO  ");
-    else if (current_phase == GamePhase::ANIMATE_DEMO)         tft180_show_string(0, 0, "Phase: DEMO PUSH  ");
-    else if (current_phase >= GamePhase::FINISHED)             tft180_show_string(0, 0, "Phase: FINISHED   ");
-
-    // 耗时分类展示：巡图阶段展示 [炸弹分配] + [3D GTSP] 的耗时
-    if (current_phase == GamePhase::ANIMATE_PATROL_DEMO || current_phase == GamePhase::BIND_SEMANTICS ||  current_phase == GamePhase::PLAN_SOKOBAN) {
-        tft180_show_string(0, 1 * UI_ROW_H, "Bm:    ms GT:    ms");
-        tft180_show_int(3 * UI_COL_W,  1 * UI_ROW_H, debug_manager.get_bomb_plan_time_ms(), 3);
-        tft180_show_int(13 * UI_COL_W, 1 * UI_ROW_H, debug_manager.get_patrol_plan_time_ms(), 3);
-    } else if (current_phase == GamePhase::ANIMATE_DEMO || current_phase == GamePhase::FINISHED) {
-        tft180_show_string(0, 1 * UI_ROW_H, "IDA* Time:       ms"); 
-        tft180_show_string(11 * UI_COL_W, 1 * UI_ROW_H, "    "); 
-        tft180_show_int(11 * UI_COL_W, 1 * UI_ROW_H, debug_manager.get_push_plan_time_ms(), 4);
-    } else {
-        tft180_show_string(0, 1 * UI_ROW_H, "Plan Time: --  ms");
-    }
-
-    if (!vision_data.art1_map_ready && vision_data.box_count == 0 && !is_animating) return;   // 地图未就绪，退出
-
-
-    // ========================================================================
-    // Step 2: 动态背景绘制 (支持炸弹毁墙重绘)
-    // ========================================================================
-    int map_start_y = 2 * UI_ROW_H + 4;
-
-    if (debug_manager.force_bg_redraw) {
-
-        // 根据 demo 状态机里实时被炸弹破坏的地图来画墙壁
-        for (int map_x = 0; map_x < MAP_MAX_WIDTH; ++map_x) {
-            for (int map_y = 0; map_y < MAP_MAX_HEIGHT; ++map_y) {
-                int screen_x = map_y * 8;
-                int screen_y = map_x * 8 + map_start_y;
-                uint16_t color = (demo.map_state.map[map_y][map_x] == 1) ? RGB565_GRAY : RGB565_WHITE;
-                fill_rect(screen_x+1, screen_y+1, 7, 7, color); 
-            }
-        }
-
-        // 画网格线
-        for (int i = 0; i <= 12; ++i) tft180_draw_line(0, i * 8 + map_start_y, 127, i * 8 + map_start_y, RGB565_BLACK); 
-        for (int i = 1; i <= 15; ++i)  tft180_draw_line(i * 8, map_start_y, i * 8,  96 + map_start_y, RGB565_BLACK); 
-
-        debug_manager.force_bg_redraw = false; 
-    }
-
-    // ========================================================================
-    // Step 3: 彩色炸弹匹配边框
-    // ========================================================================
-    const auto& bomb_tasks = debug_manager.get_cached_bomb_tasks();
-    uint16_t b_colors[] = {RGB565_RED, RGB565_BLUE, RGB565_CYAN, RGB565_MAGENTA}; 
-
-    for (int i = 0; i < bomb_tasks.size(); ++i) {
-        uint16_t color = b_colors[i % 4];
-        point bs = bomb_tasks[i].bomb_start;
-        point tw = bomb_tasks[i].target_wall;
-
-        // 炸弹起点边框 (严格遵循 screen_x = map.y, screen_y = map.x)
-        int bs_sx = bs.y * 8, bs_sy = map_start_y + bs.x * 8;
-        tft180_draw_line(bs_sx, bs_sy, bs_sx + 7, bs_sy, color);
-        tft180_draw_line(bs_sx, bs_sy + 7, bs_sx + 7, bs_sy + 7, color);
-        tft180_draw_line(bs_sx, bs_sy, bs_sx, bs_sy + 7, color);
-        tft180_draw_line(bs_sx + 7, bs_sy, bs_sx + 7, bs_sy + 7, color);
-
-        // 墙壁目标边框
-        if (demo.map_state.map[tw.y][tw.x] == 1) {
-            int tw_sx = tw.y * 8, tw_sy = map_start_y + tw.x * 8;
-            tft180_draw_line(tw_sx, tw_sy, tw_sx + 7, tw_sy, color);
-            tft180_draw_line(tw_sx, tw_sy + 7, tw_sx + 7, tw_sy + 7, color);
-            tft180_draw_line(tw_sx, tw_sy, tw_sx, tw_sy + 7, color);
-            tft180_draw_line(tw_sx + 7, tw_sy, tw_sx + 7, tw_sy + 7, color);
-        }
-    }
-
-    // ========================================================================
-    // Step 4: 动态图层擦除与重绘
-    // ========================================================================
-    static point last_player_pos = {-1, -1};  
-    static point last_boxes[SystemConfig::MAX_BOXES] = {{-1, -1}};  
-    static point last_bombs[SystemConfig::MAX_BOMBS] = {{-1, -1}};
-
-    // 根据不同的物理阶段，切换渲染数据源
-    const point* current_boxes = is_animating ? demo.boxes : vision_data.boxes;
-    uint8_t current_box_count  = is_animating ? demo.box_count : vision_data.box_count;
-    
-    const point* current_bombs = is_animating ? demo.bombs : vision_data.bombs;
-    uint8_t current_bomb_count = is_animating ? demo.bomb_count : vision_data.bomb_count;
-
-    const point* current_tgts = is_animating ? demo.targets : vision_data.targets;
-    uint8_t current_tgt_count = is_animating ? demo.target_count : vision_data.box_count;
-    
-    auto erase_ghost = [&](point* last_arr, const point* curr_arr, uint8_t curr_count, int max_size) {
-        for (int i = 0; i < max_size; ++i) {
-            if (last_arr[i].x != -1) {
-                bool moved_or_vanished = true;
-                for (int j = 0; j < curr_count; ++j) {
-                    if (last_arr[i] == curr_arr[j]) { moved_or_vanished = false; break; }
-                }
-                if (moved_or_vanished) {
-                    fill_rect(last_arr[i].y * 8 + 1, map_start_y + last_arr[i].x * 8 + 1, 6, 6, RGB565_WHITE);
-                    last_arr[i] = {-1, -1}; // BUG FIX: 擦除后立刻标记为空，防止重复擦除导致花屏
-                }
-            }
-        }
-    };
-    erase_ghost(last_boxes, current_boxes, current_box_count, SystemConfig::MAX_BOXES);
-    erase_ghost(last_bombs, current_bombs, current_bomb_count, SystemConfig::MAX_BOMBS);
-
-    if (is_animating && last_player_pos.x != -1 && !(last_player_pos == demo.player)) {
-        fill_rect(last_player_pos.y * 8 + 2, map_start_y + last_player_pos.x * 8 + 2, 4, 4, RGB565_WHITE);
-    }
-
-    // 绘制固定目标点 (紫色)
-    for (int i = 0; i < current_tgt_count; ++i) {
-        fill_rect(current_tgts[i].y * 8 + 1, map_start_y + current_tgts[i].x * 8 + 1, 6, 6, RGB565_PURPLE);
-    }
-
-    // 绘制箱子 (黄色)
-    for (int i = 0; i < current_box_count; ++i) {
-        last_boxes[i] = current_boxes[i];
-        fill_rect(current_boxes[i].y * 8 + 1, map_start_y + current_boxes[i].x * 8 + 1, 6, 6, RGB565_YELLOW);
-    }
-
-    // 绘制炸弹 (黑底红心)
-    for (int i = 0; i < current_bomb_count; ++i) {
-        if (current_bombs[i].x != -1) {
-            last_bombs[i] = current_bombs[i];
-            int sx = current_bombs[i].y * 8 + 1;
-            int sy = map_start_y + current_bombs[i].x * 8 + 1;
-            fill_rect(sx, sy, 6, 6, RGB565_BLACK);
-            fill_rect(sx + 2, sy + 2, 2, 2, RGB565_RED); 
-        }
-    }
-    
-    // ========================================================================
-    // Step 5: 小车与路径轨迹绘制
-    // ========================================================================
-    if (is_animating) {
-        last_player_pos = demo.player;
-        // 画小车
-        fill_rect(demo.player.y * 8 + 2, map_start_y + demo.player.x * 8 + 2, 4, 4, RGB565_GREEN);
-
-        if (current_phase == GamePhase::ANIMATE_PATROL_DEMO) {
-            const auto& actions = debug_manager.get_patrol_actions();
-            
-            // 画所有未走过的观测点大叉
-            for (size_t i = demo.patrol_target_idx; i < actions.size(); ++i) {
-                if (!actions[i].is_bomb_task) {
-                    int sx = actions[i].obs.pos.y * 8; 
-                    int sy = map_start_y + actions[i].obs.pos.x * 8;
-                    tft180_draw_line(sx + 2, sy + 2, sx + 6, sy + 6, RGB565_BLUE);
-                    tft180_draw_line(sx + 2, sy + 6, sx + 6, sy + 2, RGB565_BLUE);
-                }
-            }
-
-            // 画微观寻路网格点 (小豆子)
-            for (size_t i = demo.segment_idx; i < demo.segment_path.size(); ++i) {
-                fill_rect(demo.segment_path[i].y * 8 + 3, map_start_y + demo.segment_path[i].x * 8 + 3, 2, 2, RGB565_BLUE);
-            }
-
-            tft180_show_string(0, 140, "Macro Action: ");
-            tft180_show_int(14 * UI_COL_W, 140, demo.patrol_target_idx, 2);
-        } 
-        else {
-            tft180_show_string(0, 140, "IDA* Step:    ");
-            tft180_show_int(11 * UI_COL_W, 140, demo.path_idx, 3);
-        }
-    }
-}
 
 // ===================================================== 局部刷新辅助函数 =====================================================
 
