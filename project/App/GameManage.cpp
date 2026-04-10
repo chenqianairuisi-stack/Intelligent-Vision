@@ -1,16 +1,15 @@
 #include "GameManage.h"
-#include "Vision.h"
-#include "ChassisControl.h"
-#include "CoreScheduler.h"
-#include "zf_common_headfile.h"
-#include "TestMap.h"
-#include "PoseEstimate.h"
 #include "tuning_config.h"
-#include "system_config.h"
+#include "ChassisControl.h"
+#include "PoseEstimate.h"
+#include "Vision.h"
+#include "CoreScheduler.h"
+#include "TestMap.h"
 #include "Tracker.h"
-#include "Exploration.h"
 #include <cmath>
 #include <cstring>
+#include "zf_common_headfile.h"
+
 
 
 __attribute__((section(".dtcm_data"))) GameManager game_manager;
@@ -23,13 +22,14 @@ void GameManager::init() {
 
     system_delay_ms(10); 
 
-    bool sw1_on = !gpio_get_level(C27); 
-    bool sw2_on = !gpio_get_level(C26); 
+    bool sw1_on = !gpio_get_level(C26); 
+    bool sw2_on = !gpio_get_level(C27); 
 
-    if (!sw1_on && !sw2_on) App::g_state.game.stage = 1;       // 00 -> 阶段一
-    else if ( sw1_on && !sw2_on) App::g_state.game.stage = 2;  // 10 -> 阶段二
-    else if (!sw1_on &&  sw2_on) App::g_state.game.stage = 3;  // 01 -> 阶段三
-    else App::g_state.game.stage = 4;                          // 11 -> 调试阶段(本地导入地图数据)
+    if (!sw1_on) App::g_state.game.is_advanced_stage = false;   // 阶段一
+    else App::g_state.game.is_advanced_stage = true;            // 阶段二/三兼容
+
+    if (!sw2_on) App::g_state.game.is_demo_mode = false;    // 正常模式
+    else App::g_state.game.is_demo_mode = true;             // 演示模式（强制动画演示，不进行实际控制）
 }
 
 
@@ -49,7 +49,6 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             // 直接设置目标位姿为出库点，准备发车
             ctrl.current_target = {OUT_TARGET_X, OUT_TARGET_Y, ENTRY_YAW};
             ctrl.mode = ControlMode::MANUAL_DEBUG; // 让底盘脱离 Tracker，强行追击这个点
-            ctrl.tracker_state = TrackerState::NONE;
 
             game.phase = GamePhase::EXIT_START_ZONE;
             break;
@@ -62,7 +61,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             
             // 如果到达了地图的第一格
             if (dist < tune.tracker.reach_radius_min) {
-                if (game.stage == 4) {
+                if (game.is_debug_mode) {
                     TestMap::load_mock_map(0);      // ~~~ 调试用：直接导入本地地图 ~~~
                 } else {
                     Subsystem::Vision::request_map_ART1();   // 请求视觉模块发送地图数据
@@ -97,12 +96,12 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 
                 logical_level = level_cache;            // 同步当前真实地图到逻辑引擎
 
-                if (game.stage == 2 || game.stage == 3) {  
+                if (game.is_advanced_stage) {  
                     patrol_planner.load_level(logical_level);  // 将视觉数据加载到巡图规划引擎
-                    game.phase = GamePhase::PLAN_PATROL;            // 进入巡图
+                    game.phase = GamePhase::PLAN_PATROL;       // 进入巡图
                 } else {
                     solver.load_from_vision(logical_level);    // 将视觉数据加载到推箱求解器
-                    game.phase = GamePhase::PLAN_SOKOBAN;           // 直接进入推箱子阶段
+                    game.phase = GamePhase::PLAN_SOKOBAN;      // 直接进入推箱子阶段
                 }
             } else {
                 static uint32_t last_request_tick = Core::Scheduler::get_sys_tick_ms();
@@ -115,19 +114,13 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
         }
 
         case GamePhase::PLAN_PATROL: {
-            if (game.stage == 3) {
-                // 【阶段三】先算炸弹，再融进 GTSP
-                StaticArray<BombTask, MAX_BOMBS> bombs = strategic_planner.evaluate_and_assign_bombs(logical_level, {PLAN_START_X, PLAN_START_Y});
-                patrol_actions = patrol_planner.plan_optimal_patrol({PLAN_START_X, PLAN_START_Y}, bombs);
-            } else {
-                // 【阶段二兼容】下发空炸弹数组
-                StaticArray<BombTask, MAX_BOMBS> empty_bombs;
-                patrol_actions = patrol_planner.plan_optimal_patrol({PLAN_START_X, PLAN_START_Y}, empty_bombs);
-            }
+            // 解算炸弹任务，融进 GTSP (若无炸弹会直接返回空序列，不影响后续规划)
+            StaticArray<BombTask, MAX_BOMBS> bombs = strategic_planner.evaluate_and_assign_bombs(logical_level, {PLAN_START_X, PLAN_START_Y});
+            patrol_actions = patrol_planner.plan_optimal_patrol({PLAN_START_X, PLAN_START_Y}, bombs);
 
             game.action_idx = 0;
-            logical_patrol_pos = {PLAN_START_X, PLAN_START_Y};  // 逻辑位置从规划起点开始
-            Subsystem::Vision::reset_semantic_labels();             // 清空语义缓存，准备接受新的识别结果
+            logical_patrol_pos = {PLAN_START_X, PLAN_START_Y};   // 逻辑位置从规划起点开始
+            Subsystem::Vision::reset_semantic_labels();          // 清空语义缓存，准备接受新的识别结果
             game.phase = GamePhase::EXEC_ACTION_DISPATCH;
             break;
         }
@@ -149,6 +142,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     ctrl.mode = ControlMode::AUTO_TRACKING; // 恢复自动循迹模式
                     game.phase = act.is_bomb_task ? GamePhase::EXEC_BOMB_PUSH : GamePhase::EXEC_PATROL_MOVE;
                 } else {
+                    game.error_stage = 1; // 定位问题阶段：路径生成失败
                     game.phase = GamePhase::ERROR_OCCURRED; 
                 }
             }
@@ -222,8 +216,8 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
 
             // 直接获取小车当前的物理里程计位置，转换成网格坐标更新逻辑位置
             const auto& real_pos = App::g_state.physical.pose;
-            int8_t grid_x = static_cast<int8_t>(std::round((real_pos.x - MAP_OFFSET_X) / GRID_SIZE_CM));
-            int8_t grid_y = static_cast<int8_t>(std::round((real_pos.y - MAP_OFFSET_Y) / GRID_SIZE_CM));
+            int8_t grid_x = static_cast<int8_t>((real_pos.x - MAP_OFFSET_X) / GRID_SIZE_CM + 0.5f);  // static_cast会直接截断小数，这里的 +0.5 是为了四舍五入
+            int8_t grid_y = static_cast<int8_t>((real_pos.y - MAP_OFFSET_Y) / GRID_SIZE_CM + 0.5f);
             if (grid_x < 0) grid_x = 0; else if (grid_x >= MAP_MAX_WIDTH) grid_x = MAP_MAX_WIDTH - 1;
             if (grid_y < 0) grid_y = 0; else if (grid_y >= MAP_MAX_HEIGHT) grid_y = MAP_MAX_HEIGHT - 1;
             logical_patrol_pos = {grid_x, grid_y}; 
@@ -255,7 +249,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 bool is_perfect = patrol_planner.match_semantics(vision_data.semantic_labels, matched_ids);
                 
                 solver.load_from_vision(logical_level);   // 将爆炸后改变了地形的 logical_level 导入求解器
-                solver.bind_semantics(matched_ids, logical_patrol_pos);
+                solver.bind_semantics(matched_ids, logical_patrol_pos);   // 将语义标签绑定到求解器，并传入小车最新坐标，准备求解阶段一
                 game.phase = GamePhase::PLAN_SOKOBAN;
             }
             break;
@@ -264,22 +258,21 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
         case GamePhase::PLAN_SOKOBAN: {
             bool success = false;
 
-            // 根据赛段调用不同的底层 C++ 模板机器码
-            if (game.stage == 1 || game.stage == 4) {
-                success = solver.solve(GameMode::PHASE1_ANY);
-            } else if (game.stage == 2 || game.stage == 3) {
+            // 根据赛段调用不同的底层 C++ 模板机器码                
+            if (game.is_advanced_stage) {
                 success = solver.solve(GameMode::PHASE2_SPECIFIC);
+            } else {
+                success = solver.solve(GameMode::PHASE1_ANY);
             }
 
             if (success) {
                 // 求解成功，将生成的网格路径加载到追踪器
                 PathTracker::load_path(solver.get_result_path());
-                ctrl.mode = ControlMode::AUTO_TRACKING;
+                ctrl.mode = ControlMode::AUTO_TRACKING;  // 进入自动循迹模式，开始执行推箱子路径
                 game.phase = GamePhase::EXEC_SOKOBAN;
             } else {
-                // 求解失败，重新请求视觉的逻辑
-                Subsystem::Vision::request_map_ART1();
-                game.phase = GamePhase::WAIT_FOR_VISION;
+                game.error_stage = 2; // 定位问题阶段：求解失败
+                game.phase = GamePhase::ERROR_OCCURRED;
             }
             break;
         }
@@ -287,18 +280,58 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
         case GamePhase::EXEC_SOKOBAN: {
             // 监控 PathTracker 是否跑完
             if (ctrl.tracker_state == TrackerState::FINISHED) {
-                game.phase = GamePhase::FINISHED;
+
+                const auto& grid_path = App::g_state.planning.grid_path;
+                if (!grid_path.empty()) {
+                    logical_patrol_pos = grid_path.back();  // 同步小车最终位置到逻辑层
+                }
+
+                game.phase = GamePhase::PLAN_RETURN_HOME;
+            }
+            break;
+        }
+
+        case GamePhase::PLAN_RETURN_HOME: {
+
+            // 注销掉所有箱子，防止它们成为返回路径的障碍物
+            for (int i = 0; i < logical_level.box_count; ++i) {
+                logical_level.boxes[i] = {-1, -1}; 
+            }
+            logical_level.box_count = 0;
+
+            StaticArray<point, SystemConfig::MAX_PATH_LENGTH> return_path;
+            point target_point = {SystemConfig::PLAN_END_X, SystemConfig::PLAN_END_Y};  // 入库点
+
+            bool found = patrol_planner.get_grid_path(logical_level, logical_patrol_pos, target_point, return_path);
+
+            if (found) {
+                PathTracker::load_path(return_path);
+                ctrl.mode = ControlMode::AUTO_TRACKING;
+                game.phase = GamePhase::EXEC_RETURN_HOME;
+            } else {
+                game.error_stage = 3; // 定位问题阶段：返回路径生成失败
+                game.phase = GamePhase::ERROR_OCCURRED;
+            }
+
+            break;
+        }
+
+        case GamePhase::EXEC_RETURN_HOME: {
+            if (ctrl.tracker_state == TrackerState::FINISHED) {
+                game.phase = GamePhase::FINISHED; 
             }
             break;
         }
 
         case GamePhase::FINISHED: {
             ctrl.current_target = {pos.x, pos.y, SystemConfig::ENTRY_YAW};
+            ctrl.mode = ControlMode::MANUAL_DEBUG;
             break;
         }
 
         case GamePhase::ERROR_OCCURRED: {
             ctrl.current_target = {pos.x, pos.y, SystemConfig::ENTRY_YAW};
+            ctrl.mode = ControlMode::MANUAL_DEBUG;
             break;
         }
 
@@ -321,28 +354,22 @@ DebugGameManager::DebugGameManager() : GameManager(), push_plan_time_ms(0), patr
 
 // 多态拦截器
 __attribute__((section(".ramfunc"))) void DebugGameManager::update() {
-    auto& phase = App::g_state.game.phase;
-    auto& competition_stage = App::g_state.game.stage;
-    
+    auto& game = App::g_state.game;
+    auto& phase = game.phase;
+
     switch (phase) {  
 
         // ====================================================================
         // 拦截 1: 测算 [炸弹战略] +[GTSP巡图] 耗时并开启巡图动画
         // ====================================================================
         case GamePhase::PLAN_PATROL: {
+            // 先算炸弹任务，记录耗时
             uint32_t t0 = Core::Scheduler::get_sys_tick_ms();
+            cached_bomb_tasks = strategic_planner.evaluate_and_assign_bombs(logical_level, {PLAN_START_X, PLAN_START_Y});
+            bomb_plan_time_ms = Core::Scheduler::get_sys_tick_ms() - t0;
 
-            if (competition_stage == 3) {
-                // 先算炸弹任务，记录耗时
-                cached_bomb_tasks = strategic_planner.evaluate_and_assign_bombs(logical_level, {PLAN_START_X, PLAN_START_Y});
-                bomb_plan_time_ms = Core::Scheduler::get_sys_tick_ms() - t0;
-            } else {
-                cached_bomb_tasks.clear();
-                bomb_plan_time_ms = 0;
-            }
-
-            uint32_t t1 = Core::Scheduler::get_sys_tick_ms();
             // 结合炸弹任务，生成含宏动作的 3D 动作流
+            uint32_t t1 = Core::Scheduler::get_sys_tick_ms();
             patrol_actions = patrol_planner.plan_optimal_patrol({PLAN_START_X, PLAN_START_Y}, cached_bomb_tasks);
             patrol_plan_time_ms = Core::Scheduler::get_sys_tick_ms() - t1;
 
@@ -389,7 +416,10 @@ __attribute__((section(".ramfunc"))) void DebugGameManager::update() {
                     if (act.is_bomb_task) success = patrol_planner.get_bomb_push_path(demo.map_state, demo.player, act.bomb, demo.segment_path);
                     else success = patrol_planner.get_grid_path(demo.map_state, demo.player, act.obs.pos, demo.segment_path);
                     
-                    if (!success) { phase = GamePhase::ERROR_OCCURRED; break; } // 死锁防御
+                    if (!success) { 
+                        game.error_stage = 1; // 定位问题阶段：路径生成失败
+                        phase = GamePhase::ERROR_OCCURRED; break; 
+                    }
                     demo.segment_idx = 0;
                 }
 
@@ -412,7 +442,7 @@ __attribute__((section(".ramfunc"))) void DebugGameManager::update() {
                 // 3. 终点结算
                 if (demo.segment_idx >= demo.segment_path.size()){
                     if (act.is_bomb_task) {
-                        // 炸弹已陷入废墟墙壁，触发爆炸摧毁周围 3x3 的格子
+                        // 炸弹已陷入墙壁，触发爆炸摧毁周围 3x3 的格子
                         point tw = act.bomb.target_wall;
                         point bs = act.bomb.bomb_start;
 
@@ -461,8 +491,11 @@ __attribute__((section(".ramfunc"))) void DebugGameManager::update() {
             // 开始规划并记录时间
             uint32_t t0 = Core::Scheduler::get_sys_tick_ms();
             bool success = false;
-            if (competition_stage == 1) success = solver.solve(GameMode::PHASE1_ANY); 
-            else if (competition_stage == 2 || competition_stage == 3) success = solver.solve(GameMode::PHASE2_SPECIFIC);
+            if (game.is_advanced_stage) {
+                success = solver.solve(GameMode::PHASE2_SPECIFIC);
+            } else {
+                success = solver.solve(GameMode::PHASE1_ANY);
+            }
             push_plan_time_ms = Core::Scheduler::get_sys_tick_ms() - t0;
 
             if (success) {
@@ -498,9 +531,8 @@ __attribute__((section(".ramfunc"))) void DebugGameManager::update() {
                 const auto& path = solver.get_result_path(); 
                 
                 if (demo.path_idx >= path.size() - 1) {
-                    
-                    demo.player = logical_patrol_pos;           // 动画结束：将虚拟小车变回原点     
-                    phase = GamePhase::FINISHED;                // 直接进入完成状态，等待重置
+                    logical_patrol_pos = path.back(); 
+                    phase = GamePhase::PLAN_RETURN_HOME;               
                     break;
                 }
 
@@ -541,6 +573,50 @@ __attribute__((section(".ramfunc"))) void DebugGameManager::update() {
             break;
         }
 
+        // ====================================================================
+        // 拦截 3: 测算回程路径耗时并开启回程动画
+        // ====================================================================
+        case GamePhase::PLAN_RETURN_HOME: {
+            logical_level.box_count = 0; 
+            demo.segment_path.clear();
+            point target_point = {SystemConfig::PLAN_END_X, SystemConfig::PLAN_END_Y};
+
+            bool found = patrol_planner.get_grid_path(logical_level, logical_patrol_pos, target_point, demo.segment_path);
+            
+            if (found) {
+                demo.path_idx = 0;                // 重置动画步数索引，洗刷推箱子阶段的遗留数据
+                demo.segment_idx = 0;
+                demo.player = logical_patrol_pos; // 动画起点对齐推箱子终点
+                demo.last_tick = Core::Scheduler::get_sys_tick_ms();
+                phase = GamePhase::ANIMATE_RETURN_DEMO;
+            } else {
+                phase = GamePhase::ERROR_OCCURRED;
+            }
+            break;
+        }
+
+        // ====================================================================
+        // 新增状态: 播放回程动画
+        // ====================================================================
+        case GamePhase::ANIMATE_RETURN_DEMO: {
+            if (Core::Scheduler::get_sys_tick_ms() - demo.last_tick > 100) {
+                demo.last_tick = Core::Scheduler::get_sys_tick_ms();
+                
+                const auto& path = demo.segment_path; // 使用我们拦截得到的长生命周期路径
+
+                // 2. 终点判定：所有拐点都走完了
+                if (demo.segment_idx >= path.size()) {
+                    demo.player = {SystemConfig::PLAN_END_X, SystemConfig::PLAN_END_Y}; // 强对齐入库点
+                    phase = GamePhase::FINISHED;
+                    logical_patrol_pos = demo.player; // 同步更新逻辑位置，保持动画和逻辑的一致性
+                    break;
+                }
+
+                demo.player = path[demo.segment_idx++]; // 小车沿着路径前进一步
+            }
+            break;
+        }
+
         default:
             // 对于发车、等待视觉、底层追踪等所有逻辑，直接调用基类的 update()
             GameManager::update();
@@ -552,15 +628,15 @@ __attribute__((section(".ramfunc"))) void DebugGameManager::update() {
 RenderContext DebugGameManager::get_render_context() const {
     RenderContext ctx = {0}; 
     auto& phase = App::g_state.game.phase;
-    auto& is_debug_mode = App::g_state.game.is_debug_mode;
+    auto& is_demo_mode = App::g_state.game.is_demo_mode;
     auto& action_idx = App::g_state.game.action_idx;
 
     ctx.bomb_plan_time_ms = bomb_plan_time_ms;
     ctx.patrol_plan_time_ms = patrol_plan_time_ms;
     ctx.push_plan_time_ms = push_plan_time_ms;
 
-    bool is_anim = is_debug_mode && (phase == GamePhase::ANIMATE_PATROL_DEMO || phase == GamePhase::ANIMATE_DEMO);
-    bool is_push = is_debug_mode && (phase == GamePhase::ANIMATE_DEMO);
+    bool is_anim = is_demo_mode && (phase == GamePhase::ANIMATE_PATROL_DEMO || phase == GamePhase::ANIMATE_DEMO || phase == GamePhase::ANIMATE_RETURN_DEMO);
+    bool is_push = is_demo_mode && (phase == GamePhase::ANIMATE_DEMO);
 
 
     // ====================================================================
@@ -568,20 +644,37 @@ RenderContext DebugGameManager::get_render_context() const {
     // ====================================================================
     const SokobanLevel& lvl = is_anim ? demo.map_state : logical_level;
     ctx.map          = &lvl.map;
-    ctx.boxes        = is_push ? demo.boxes : lvl.boxes;
-    ctx.box_count    = is_push ? demo.box_count : lvl.box_count;
-    ctx.targets      = is_push ? demo.targets : lvl.targets;
-    ctx.target_count = is_push ? demo.target_count : lvl.target_count;
     ctx.bombs        = is_anim ? demo.bombs : lvl.bombs;
     ctx.bomb_count   = is_anim ? demo.bomb_count : lvl.bomb_count;
 
-    if (is_debug_mode && is_anim) {
-        ctx.player_pos = demo.player;
+    // 判断是否进入了回程或结束阶段 (屏蔽一切箱子和目标点)
+    bool is_returning = (phase == GamePhase::PLAN_RETURN_HOME || 
+                         phase == GamePhase::ANIMATE_RETURN_DEMO ||
+                         phase == GamePhase::EXEC_RETURN_HOME);
+
+    if (is_returning) {
+        ctx.boxes        = nullptr;
+        ctx.box_count    = 0;
+        ctx.targets      = nullptr;
+        ctx.target_count = 0;
+    } else {
+        ctx.boxes        = is_push ? demo.boxes : lvl.boxes;
+        ctx.box_count    = is_push ? demo.box_count : lvl.box_count;
+        ctx.targets      = is_push ? demo.targets : lvl.targets;
+        ctx.target_count = is_push ? demo.target_count : lvl.target_count;
+    }
+
+    if (is_demo_mode) {
+        if (is_anim) {
+            ctx.player_pos = demo.player;          // 动画播放时，跟随动画引擎的虚拟小车
+        } else {
+            ctx.player_pos = logical_patrol_pos;   // 解算/绑定阶段，小车静止在逻辑停靠点，防止瞬移！
+        }
     } else {
         const auto& rp = App::g_state.physical.pose;
         ctx.player_pos = {
-            (int8_t)std::clamp((int)std::round((rp.x - MAP_OFFSET_X)/GRID_SIZE_CM), 0, MAP_MAX_WIDTH-1),
-            (int8_t)std::clamp((int)std::round((rp.y - MAP_OFFSET_Y)/GRID_SIZE_CM), 0, MAP_MAX_HEIGHT-1)
+            (int8_t)std::clamp((int)((rp.x - MAP_OFFSET_X)/GRID_SIZE_CM + 0.5), 0, MAP_MAX_WIDTH-1),
+            (int8_t)std::clamp((int)((rp.y - MAP_OFFSET_Y)/GRID_SIZE_CM + 0.5), 0, MAP_MAX_HEIGHT-1)
         };
     }
 

@@ -73,7 +73,7 @@ __attribute__((section(".ramfunc"))) void PathTracker::update_target() {
     float dy = target_phys.y - current_pos.y;
     float dist_sq = dx * dx + dy * dy;
 
-    // 切弯半径选择：终点切弯半径更小(1 cm)，保证停稳；中途切弯半径较大(10 cm)，保证平滑
+    // 切弯半径选择：如果是最后一个点了，就用更小的半径要求，防止越过终点；否则用正常的半径要求
     bool is_last_point = (plan.current_wp_idx == plan.physical_path.size() - 1);
     float current_radius = is_last_point ? tune.tracker.reach_radius_min : tune.tracker.reach_radius;
 

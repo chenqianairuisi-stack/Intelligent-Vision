@@ -26,8 +26,10 @@ namespace SystemConfig {
     // 规划算法参数
     static constexpr int MAP_MAX_WIDTH = 12;                    // 地图最大宽度（网格坐标）
     static constexpr int MAP_MAX_HEIGHT = 16;                   // 地图最大高度（网格坐标）
-    static constexpr int PLAN_START_X = 5;                      // 规划起点 X 坐标（网格坐标）
-    static constexpr int PLAN_START_Y = 2;                      // 规划起点 Y 坐标（网格坐标）
+    static constexpr int PLAN_START_X = 5;                      // 出库点 X 坐标（网格坐标）
+    static constexpr int PLAN_START_Y = 2;                      // 出库点 Y 坐标（网格坐标）
+    static constexpr int PLAN_END_X = 5;                        // 入库点 X 坐标（网格坐标）
+    static constexpr int PLAN_END_Y = 1;                        // 入库点 Y 坐标（网格坐标）
     static constexpr int MAX_BOXES = 3;                         // 最大箱子数
     static constexpr int MAX_BOMBS = 3;                         // 最大炸弹数
     static constexpr int MAX_ENTITIES = 2 * MAX_BOXES;          // 最大实体数（箱子+目标点）

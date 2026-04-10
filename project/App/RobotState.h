@@ -4,12 +4,12 @@
 
 // 游戏全局状态机枚举
 enum class GamePhase : uint8_t {
-    // --- 发车阶段状态 ---
+    // --- 发车阶段 ---
     INIT_CALIBRATE,         // 初始化与校准里程计
     EXIT_START_ZONE,        // 出发车区
     WAIT_FOR_VISION,        // 等待摄像头返回地图
 
-    // --- 第二/三阶段状态 ---
+    // --- 第二/三阶段 ---
     PLAN_PATROL,            // GTSP 规划巡图观测路径
     EXEC_ACTION_DISPATCH,   // 分发：判断当前动作是去观测，还是去推炸弹
     EXEC_PATROL_MOVE,       // 动作 A1：底盘移动到观测点
@@ -18,18 +18,23 @@ enum class GamePhase : uint8_t {
     EXEC_BOMB_PUSH,         // 动作 B：执行推炸宏动作
     UPDATE_MAP,             // 完成推炸弹，更新地图状态
 
-    // --- 第一阶段状态 ---
+    // --- 第一阶段 ---
     BIND_SEMANTICS,         // 巡视完毕，将识别结果绑定到底层算法
     PLAN_SOKOBAN,           // 规划推箱子路径
     EXEC_SOKOBAN,           // 执行推箱子循迹
 
-    // --- 结束阶段状态 ---
+    // --- 返程状态 ---
+    PLAN_RETURN_HOME,       // 规划回发车区的路径
+    EXEC_RETURN_HOME,       // 执行回程
+
+    // --- 结束阶段 ---
     FINISHED,               // 比赛完成，停车
     ERROR_OCCURRED,         // 发生错误，停车
 
     // --- 调试专用状态 ---
     ANIMATE_PATROL_DEMO,    // 播放巡图过程动画
     ANIMATE_DEMO,           // 播放推箱子过程动画
+    ANIMATE_RETURN_DEMO,    // 播放回程动画
 };
 
 enum class TrackerState : uint8_t {
@@ -51,9 +56,11 @@ struct RobotState {
     // 1. 游戏业务层 (GameManager 写入，全局共享)
     struct {
         GamePhase phase = GamePhase::INIT_CALIBRATE;
-        uint8_t stage = 1;           // 当前赛段
-        uint8_t action_idx = 0;      // 当前宏动作索引
-        bool is_debug_mode = false;  // 调试模式标志
+        bool is_advanced_stage = false;  // 是否是第二/三阶段
+        bool is_demo_mode = false;       // 演示模式标志（强制动画演示，不进行实际控制）
+        bool is_debug_mode = false;      // 调试模式标志
+        uint8_t error_stage = 0;         // 发生错误的阶段（仅在 phase == ERROR_OCCURRED 时用于定位问题）
+        uint8_t action_idx = 0;          // 当前宏动作索引
     } game;
 
     // 2. 感知层 (视觉模块写入，其他模块读取)

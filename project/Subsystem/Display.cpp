@@ -262,7 +262,7 @@ void TftMenu::draw_main_menu() {
     draw_item(2, "Dashboard",  cursor_idx == 0);
     draw_item(3, "Odometry",   cursor_idx == 1);
     draw_item(4, "Tuning",     cursor_idx == 2);
-    draw_item(5, App::g_state.game.is_debug_mode ? "Mode: [DEBUG]" : "Mode: [PROD ]", cursor_idx == 3);
+    draw_item(5, App::g_state.game.is_debug_mode ? "Mode: [Local ]" : "Mode: [VISION]", cursor_idx == 3);
     draw_item(6, "Save Config",cursor_idx == 4);
     draw_item(7, "Load Config",cursor_idx == 5);
     draw_item(8, "Close Menu", cursor_idx == 6); 
@@ -328,18 +328,21 @@ void TftMenu::draw_dashboard() {
 
     // 1. 局部组装字符串
     char hud_line0[22] = {0}, hud_line1[22] = {0}, hud_line2[22] = {0};
-    snprintf(hud_line1, sizeof(hud_line1), "Stage: %d", game.stage);
+    snprintf(hud_line1, sizeof(hud_line1), "Stage: %d", game.is_advanced_stage ? 2 : 1);
 
-    if (game.is_debug_mode) {
+    if (game.is_demo_mode) {
         switch(game.phase) {
             case GamePhase::WAIT_FOR_VISION:       snprintf(hud_line0, 22, "Phase: WAITING MAP"); break;
             case GamePhase::PLAN_PATROL:           snprintf(hud_line0, 22, "Phase: PLAN PATROL"); break;
             case GamePhase::ANIMATE_PATROL_DEMO:   snprintf(hud_line0, 22, "Phase: DEMO PATROL"); break;
-            case GamePhase::BIND_SEMANTICS:        snprintf(hud_line0, 22, "Phase: BINDING... "); break;
+            case GamePhase::BIND_SEMANTICS:        snprintf(hud_line0, 22, "Phase: BINDING    "); break;
             case GamePhase::PLAN_SOKOBAN:          snprintf(hud_line0, 22, "Phase: PLAN SOKO  "); break;
             case GamePhase::ANIMATE_DEMO:          snprintf(hud_line0, 22, "Phase: DEMO PUSH  "); break;
+            case GamePhase::PLAN_RETURN_HOME:      snprintf(hud_line0, 22, "Phase: PLAN RTN   "); break;
+            case GamePhase::ANIMATE_RETURN_DEMO:   snprintf(hud_line0, 22, "Phase: DEMO RTN   "); break;
             case GamePhase::FINISHED:              snprintf(hud_line0, 22, "Phase: FINISHED   "); break;
-            default:                               snprintf(hud_line0, 22, "Phase: COMPUTING "); break;
+            case GamePhase::ERROR_OCCURRED:        snprintf(hud_line0, 22, "Phase: ERROR      "); break;
+            default:                               snprintf(hud_line0, 22, "Phase: Other     "); break;
         }
         if (game.phase == GamePhase::ANIMATE_PATROL_DEMO || game.phase == GamePhase::BIND_SEMANTICS || game.phase == GamePhase::PLAN_SOKOBAN) {
             snprintf(hud_line2, 22, "Bm:%3dms GT:%3dms", (int)ctx.bomb_plan_time_ms, (int)ctx.patrol_plan_time_ms);
@@ -351,14 +354,15 @@ void TftMenu::draw_dashboard() {
     } else {
         switch(game.phase) {
             case GamePhase::INIT_CALIBRATE:        snprintf(hud_line0, 22, "P: INIT      "); break;
-            case GamePhase::EXIT_START_ZONE:       snprintf(hud_line0, 22, "P: EXIT_ZONE "); break;
-            case GamePhase::WAIT_FOR_VISION:       snprintf(hud_line0, 22, "P: WAIT_ART1 "); break;
+            case GamePhase::EXIT_START_ZONE:       snprintf(hud_line0, 22, "P: EXIT 0    "); break;
+            case GamePhase::WAIT_FOR_VISION:       snprintf(hud_line0, 22, "P: WAIT ART1 "); break;
             case GamePhase::EXEC_ACTION_DISPATCH:  snprintf(hud_line0, 22, "P: ACT_DISP  "); break;
-            case GamePhase::EXEC_PATROL_MOVE:      snprintf(hud_line0, 22, "P: MOVE_PTRL "); break;
-            case GamePhase::EXEC_ALIGN_YAW:        snprintf(hud_line0, 22, "P: ALIGN_YAW "); break;
-            case GamePhase::WAIT_ART2_CAPTURE_ACK: snprintf(hud_line0, 22, "P: WAIT_ART2 "); break;
-            case GamePhase::EXEC_BOMB_PUSH:        snprintf(hud_line0, 22, "P: PUSH_BOMB "); break;
-            case GamePhase::EXEC_SOKOBAN:          snprintf(hud_line0, 22, "P: TRACKING  "); break;
+            case GamePhase::EXEC_PATROL_MOVE:      snprintf(hud_line0, 22, "P: EXEC 2    "); break;
+            case GamePhase::EXEC_ALIGN_YAW:        snprintf(hud_line0, 22, "P: EXEC YAW  "); break;
+            case GamePhase::WAIT_ART2_CAPTURE_ACK: snprintf(hud_line0, 22, "P: WAIT ART2 "); break;
+            case GamePhase::EXEC_BOMB_PUSH:        snprintf(hud_line0, 22, "P: EXEC 3    "); break;
+            case GamePhase::EXEC_SOKOBAN:          snprintf(hud_line0, 22, "P: EXEC 1    "); break;
+            case GamePhase::EXEC_RETURN_HOME:      snprintf(hud_line0, 22, "P: EXEC HOME "); break;
             case GamePhase::FINISHED:              snprintf(hud_line0, 22, "P: FINISHED  "); break;
             case GamePhase::ERROR_OCCURRED:        snprintf(hud_line0, 22, "P: ERROR     "); break;
             default:                               snprintf(hud_line0, 22, "P: COMPUTING "); break;
@@ -369,7 +373,7 @@ void TftMenu::draw_dashboard() {
     // 2. 顶部 HUD 防闪烁渲染
     static char last_hud0[22] = {0}, last_hud1[22] = {0}, last_hud2[22] = {0};
     
-    // 如果外部触发了强制重绘，顺便把文字的记忆清空！(解决问题2：文字消失)
+    // 如果外部触发了强制重绘，顺便把文字的记忆清空
     if (debug_manager.force_bg_redraw) {
         last_hud0[0] = '\0'; last_hud1[0] = '\0'; last_hud2[0] = '\0';
     }
@@ -390,7 +394,7 @@ void TftMenu::draw_dashboard() {
         strncpy(last_hud2, hud_line2, 22);
     }
 
-    // 3. 在内存中合成静态画布 (注意：这里彻底移除了 TL_CAR 小车掩码！)
+    // 3. 在内存中合成静态画布 （地图+目标+箱子+炸弹+路径+交叉点），一次性渲染到屏幕，避免多次调用绘制函数导致的闪烁
     uint8_t canvas[16][12] = {0};
     for(int y=0; y<MAP_MAX_HEIGHT; y++) for(int x=0; x<MAP_MAX_WIDTH; x++) if((*ctx.map)[y][x]) canvas[y][x] |= TL_WALL;
     for(int i=0; i<ctx.target_count; i++) if(ctx.targets[i].x != -1) canvas[ctx.targets[i].y][ctx.targets[i].x] |= TL_TGT;
@@ -406,9 +410,7 @@ void TftMenu::draw_dashboard() {
             if(!(*ctx.actions_ptr)[i].is_bomb_task) canvas[(*ctx.actions_ptr)[i].obs.pos.y][(*ctx.actions_ptr)[i].obs.pos.x] |= TL_CRS;
     }
 
-    // ====================================================================
-    // 新增：像素级小车独立计算系统 (Sprite Layer)
-    // ====================================================================
+    // 像素级小车独立计算系统 (Sprite Layer)
     int map_start_y = 3 * UI_ROW_H + 4;
     static float last_car_sx = -1.0f, last_car_sy = -1.0f;
     float current_car_sx = 0.0f, current_car_sy = 0.0f;
@@ -417,12 +419,11 @@ void TftMenu::draw_dashboard() {
     bool should_draw_car = (game.phase > GamePhase::WAIT_FOR_VISION);
 
     if (should_draw_car) {
-        if (game.is_debug_mode && (game.phase == GamePhase::ANIMATE_PATROL_DEMO || game.phase == GamePhase::ANIMATE_DEMO)) {
+        if (game.is_demo_mode) {
             // 动画模式下，直接按网格坐标投射到屏幕像素 (8个像素一格)
             current_car_sx = ctx.player_pos.y * 8.0f;
             current_car_sy = ctx.player_pos.x * 8.0f + map_start_y;
         } else {
-            // 解决问题3：真实物理模式下，进行亚像素级映射
             auto pos = App::g_state.physical.pose;
             // X轴物理坐标对应屏幕上的 Y方向 (sx)，Y轴对应 X方向 (sy)
             // 物理网格 1格 = 20cm，屏幕上 1格 = 8像素。缩放系数为 8/20 = 0.4
@@ -430,8 +431,8 @@ void TftMenu::draw_dashboard() {
             current_car_sy = (pos.x - SystemConfig::MAP_OFFSET_X) * 0.4f + map_start_y;
             
             // 安全限幅防越界
-            if (current_car_sx < 0) current_car_sx = 0; if (current_car_sx > 15*8) current_car_sx = 15*8;
-            if (current_car_sy < map_start_y) current_car_sy = map_start_y; if (current_car_sy > map_start_y + 11*8) current_car_sy = map_start_y + 11*8;
+            if (current_car_sx < 0) current_car_sx = 0; else if (current_car_sx > 15*8) current_car_sx = 15*8;
+            if (current_car_sy < map_start_y) current_car_sy = map_start_y; else if (current_car_sy > map_start_y + 11*8) current_car_sy = map_start_y + 11*8;
         }
 
         // 精髓：擦除小车的残影！强制小车上一帧所在的周边底图缓存失效，底图自动将其覆盖
@@ -514,146 +515,7 @@ void TftMenu::draw_dashboard() {
         last_car_sx = -1.0f; // 重置小车状态
     }
 }
-// void TftMenu::draw_dashboard() {
-//     RenderContext ctx = debug_manager.get_render_context();
-//     auto& game = App::g_state.game;
 
-//     // 1. 局部组装字符串 (完全脱离 600MHz 的高频区)
-//     char hud_line0[22] = {0}, hud_line1[22] = {0}, hud_line2[22] = {0};
-    
-//     snprintf(hud_line1, sizeof(hud_line1), "Stage: %d", game.stage);
-
-//     if (game.is_debug_mode) {
-//         switch(game.phase) {
-//             case GamePhase::WAIT_FOR_VISION:       snprintf(hud_line0, 22, "Phase: WAITING MAP"); break;
-//             case GamePhase::PLAN_PATROL:           snprintf(hud_line0, 22, "Phase: PLAN PATROL"); break;
-//             case GamePhase::ANIMATE_PATROL_DEMO:   snprintf(hud_line0, 22, "Phase: DEMO PATROL"); break;
-//             case GamePhase::BIND_SEMANTICS:        snprintf(hud_line0, 22, "Phase: BINDING... "); break;
-//             case GamePhase::PLAN_SOKOBAN:          snprintf(hud_line0, 22, "Phase: PLAN SOKO  "); break;
-//             case GamePhase::ANIMATE_DEMO:          snprintf(hud_line0, 22, "Phase: DEMO PUSH  "); break;
-//             case GamePhase::FINISHED:              snprintf(hud_line0, 22, "Phase: FINISHED   "); break;
-//             default:                               snprintf(hud_line0, 22, "Phase: COMPUTING "); break;
-//         }
-//         if (game.phase == GamePhase::ANIMATE_PATROL_DEMO || game.phase == GamePhase::BIND_SEMANTICS || game.phase == GamePhase::PLAN_SOKOBAN) {
-//             snprintf(hud_line2, 22, "Bm:%3dms GT:%3dms", (int)ctx.bomb_plan_time_ms, (int)ctx.patrol_plan_time_ms);
-//         } else if (game.phase == GamePhase::ANIMATE_DEMO || game.phase == GamePhase::FINISHED) {
-//             snprintf(hud_line2, 22, "IDA* Time: %4dms", (int)ctx.push_plan_time_ms);
-//         } else {
-//             snprintf(hud_line2, 22, "Plan Time: --  ms");
-//         }
-//     } else {
-//         switch(game.phase) {
-//             case GamePhase::INIT_CALIBRATE:        snprintf(hud_line0, 22, "P: INIT      "); break;
-//             case GamePhase::EXIT_START_ZONE:       snprintf(hud_line0, 22, "P: EXIT_ZONE "); break;
-//             case GamePhase::WAIT_FOR_VISION:       snprintf(hud_line0, 22, "P: WAIT_ART1 "); break;
-//             case GamePhase::EXEC_ACTION_DISPATCH:  snprintf(hud_line0, 22, "P: ACT_DISP  "); break;
-//             case GamePhase::EXEC_PATROL_MOVE:      snprintf(hud_line0, 22, "P: MOVE_PTRL "); break;
-//             case GamePhase::EXEC_ALIGN_YAW:        snprintf(hud_line0, 22, "P: ALIGN_YAW "); break;
-//             case GamePhase::WAIT_ART2_CAPTURE_ACK: snprintf(hud_line0, 22, "P: WAIT_ART2 "); break;
-//             case GamePhase::EXEC_BOMB_PUSH:        snprintf(hud_line0, 22, "P: PUSH_BOMB "); break;
-//             case GamePhase::EXEC_SOKOBAN:          snprintf(hud_line0, 22, "P: TRACKING  "); break;
-//             case GamePhase::FINISHED:              snprintf(hud_line0, 22, "P: FINISHED  "); break;
-//             case GamePhase::ERROR_OCCURRED:        snprintf(hud_line0, 22, "P: ERROR     "); break;
-//             default:                               snprintf(hud_line0, 22, "P: COMPUTING "); break;
-//         }
-//         snprintf(hud_line2, 22, "Plan Time: --  ms");
-//     }
-
-//     // 2. 顶部 HUD 渲染 (带缓存的局部刷新，告别闪烁)
-//     static char last_hud0[22] = {0}, last_hud1[22] = {0}, last_hud2[22] = {0};
-    
-//     if (strncmp(last_hud0, hud_line0, 22) != 0) {
-//         tft180_show_string(0, 0, "                     "); 
-//         tft180_show_string(0, 0, hud_line0);
-//         strncpy(last_hud0, hud_line0, 22);
-//     }
-//     if (strncmp(last_hud1, hud_line1, 22) != 0) {
-//         tft180_show_string(0, 1 * UI_ROW_H, "                     ");
-//         tft180_show_string(0, 1 * UI_ROW_H, hud_line1);
-//         strncpy(last_hud1, hud_line1, 22);
-//     }
-//     if (strncmp(last_hud2, hud_line2, 22) != 0) {
-//         tft180_show_string(0, 2 * UI_ROW_H, "                     ");
-//         tft180_show_string(0, 2 * UI_ROW_H, hud_line2);
-//         strncpy(last_hud2, hud_line2, 22);
-//     }
-
-//     // 3. 在内存中合成 192 字节的语义画布
-//     uint8_t canvas[16][12] = {0};
-//     for(int y=0; y<MAP_MAX_HEIGHT; y++) for(int x=0; x<MAP_MAX_WIDTH; x++) if((*ctx.map)[y][x]) canvas[y][x] |= TL_WALL;
-//     for(int i=0; i<ctx.target_count; i++) if(ctx.targets[i].x != -1) canvas[ctx.targets[i].y][ctx.targets[i].x] |= TL_TGT;
-//     for(int i=0; i<ctx.box_count; i++)    if(ctx.boxes[i].x != -1)   canvas[ctx.boxes[i].y][ctx.boxes[i].x] |= TL_BOX;
-//     for(int i=0; i<ctx.bomb_count; i++)   if(ctx.bombs[i].x != -1)   canvas[ctx.bombs[i].y][ctx.bombs[i].x] |= TL_BOMB;
-    
-//     if (ctx.path_ptr) {
-//         for(size_t i = ctx.path_start_idx; i < ctx.path_ptr->size(); i++) 
-//             canvas[(*ctx.path_ptr)[i].y][(*ctx.path_ptr)[i].x] |= TL_PATH;
-//     }
-//     if (ctx.actions_ptr) {
-//         for(size_t i = ctx.action_start_idx; i < ctx.actions_ptr->size(); i++) 
-//             if(!(*ctx.actions_ptr)[i].is_bomb_task) canvas[(*ctx.actions_ptr)[i].obs.pos.y][(*ctx.actions_ptr)[i].obs.pos.x] |= TL_CRS;
-//     }
-//     canvas[ctx.player_pos.y][ctx.player_pos.x] |= TL_CAR;
-
-//     // 4. O(1) 脏矩形增量渲染 
-//     int map_start_y = 3 * UI_ROW_H + 4;
-    
-//     if (debug_manager.force_bg_redraw) { 
-//         memset(back_buffer, 0xFF, sizeof(back_buffer)); // 失效显存，强制全刷
-        
-//         // --- 静态背景上的附加涂装：彩色炸弹框 ---
-//         if (ctx.bomb_tasks_ptr) {
-//             uint16_t b_colors[] = {RGB565_RED, RGB565_BLUE, RGB565_CYAN, RGB565_MAGENTA}; 
-//             for (int i = 0; i < ctx.bomb_tasks_ptr->size(); ++i) {
-//                 uint16_t color = b_colors[i % 4];
-//                 point bs = (*ctx.bomb_tasks_ptr)[i].bomb_start;
-//                 point tw = (*ctx.bomb_tasks_ptr)[i].target_wall;
-
-//                 int bs_sx = bs.y * 8, bs_sy = map_start_y + bs.x * 8;
-//                 tft180_draw_line(bs_sx, bs_sy, bs_sx + 7, bs_sy, color);
-//                 tft180_draw_line(bs_sx, bs_sy + 7, bs_sx + 7, bs_sy + 7, color);
-//                 tft180_draw_line(bs_sx, bs_sy, bs_sx, bs_sy + 7, color);
-//                 tft180_draw_line(bs_sx + 7, bs_sy, bs_sx + 7, bs_sy + 7, color);
-
-//                 if ((*ctx.map)[tw.y][tw.x] == 1) { // 墙还没被炸毁的话，画框
-//                     int tw_sx = tw.y * 8, tw_sy = map_start_y + tw.x * 8;
-//                     tft180_draw_line(tw_sx, tw_sy, tw_sx + 7, tw_sy, color);
-//                     tft180_draw_line(tw_sx, tw_sy + 7, tw_sx + 7, tw_sy + 7, color);
-//                     tft180_draw_line(tw_sx, tw_sy, tw_sx, tw_sy + 7, color);
-//                     tft180_draw_line(tw_sx + 7, tw_sy, tw_sx + 7, tw_sy + 7, color);
-//                 }
-//             }
-//         }
-//         debug_manager.force_bg_redraw = false; 
-//     }
-
-//     // 核心渲染循环：比较 canvas 与 back_buffer，谁变了就盖谁
-//     for(int y=0; y<16; y++) {
-//         for(int x=0; x<12; x++) {
-//             if (canvas[y][x] != back_buffer[y][x]) {  
-//                 int sx = y * 8, sy = x * 8 + map_start_y;
-                
-//                 // 第一层：铺底色 (自带清空残影功能)
-//                 fill_rect(sx + 1, sy + 1, 7, 7, (canvas[y][x] & TL_WALL) ? RGB565_GRAY : RGB565_WHITE);
-                
-//                 // 第二层：贴花 (紫框、蓝豆、蓝叉叉)
-//                 if (canvas[y][x] & TL_TGT)  fill_rect(sx + 1, sy + 1, 6, 6, RGB565_PURPLE);
-//                 if (canvas[y][x] & TL_PATH) fill_rect(sx + 3, sy + 3, 2, 2, RGB565_BLUE);
-//                 if (canvas[y][x] & TL_CRS)  { tft180_draw_line(sx+2, sy+2, sx+6, sy+6, RGB565_BLUE); tft180_draw_line(sx+2, sy+6, sx+6, sy+2, RGB565_BLUE); }
-                
-//                 // 第三层：3D实体 (箱子、炸弹)
-//                 if (canvas[y][x] & TL_BOX)  fill_rect(sx + 1, sy + 1, 6, 6, RGB565_YELLOW);
-//                 if (canvas[y][x] & TL_BOMB) { fill_rect(sx + 1, sy + 1, 6, 6, RGB565_BLACK); fill_rect(sx + 3, sy + 3, 2, 2, RGB565_RED); }
-                
-//                 // 第四层：Actor小车本身 (强制最顶层展示)
-//                 if (canvas[y][x] & TL_CAR)  fill_rect(sx + 2, sy + 2, 4, 4, RGB565_GREEN);
-
-//                 // 更新显存记录
-//                 back_buffer[y][x] = canvas[y][x]; 
-//             }
-//         }
-//     }
-// }
 
 // 里程计和硬件监控页面
 void TftMenu::draw_odometry_data() {

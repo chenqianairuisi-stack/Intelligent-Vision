@@ -42,8 +42,8 @@ extern "C" int main(void) {
         Subsystem::Vision::update(); 
         Core::Scheduler::run();      
 
-        if (App::g_state.game.is_debug_mode) {
-            debug_manager.update();              // 调试模式：进入拦截器，执行动画逻辑
+        if (App::g_state.game.is_demo_mode) {
+            debug_manager.update();              // 演示模式：进入拦截器，执行动画逻辑
         } else {
             debug_manager.GameManager::update(); // 正赛模式：直接穿透到基类，执行纯物理/控制逻辑
         }

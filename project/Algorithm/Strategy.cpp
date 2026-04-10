@@ -16,6 +16,10 @@ __attribute__((section(".dtcm_data"))) static bool dfs_player_vis[MAX_BOMBS + 1]
 // 对外入口：评估并生成炸弹任务序列
 __attribute__((section(".ramfunc")))
 StaticArray<BombTask, MAX_BOMBS> StrategicPlanner::evaluate_and_assign_bombs(const SokobanLevel& level, point player_start) {
+    if (level.bomb_count == 0) {
+        return StaticArray<BombTask, MAX_BOMBS>(); // 无炸弹直接返回空序列
+    }
+    
     this->cached_level = level;
 
     DFSResult best_res;
