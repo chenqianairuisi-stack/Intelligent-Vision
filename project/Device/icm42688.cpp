@@ -1,4 +1,4 @@
-#include "icm42688.h"
+#include "Icm42688.h"
 
 #ifdef __cplusplus
 extern "C" {

@@ -1,45 +1,48 @@
 #include "zf_common_headfile.h"
-#include "code_headfile.h"
+#include "CoreScheduler.h"
+#include "RobotState.h"
+#include "GameManage.h"
+#include "Vision.h"
+#include "ChassisControl.h"
+#include "Telemetry.h"
+#include "Display.h"
+#include "PoseEstimate.h"
+#include "Storage.h"
+#include "Icm42688.h"
 
-bool is_debug_mode = true; 
 
 extern "C" int main(void) {
 
     clock_init(SYSTEM_CLOCK_600M);
     debug_init();
     system_delay_ms(300);           
+    
+    Core::Scheduler::init();                  // 任务调度器初始化 (timer)
+    Subsystem::Telemetry::init();             // 通信模块初始化 (wireless_uart)
+    Subsystem::PoseEstimator::init();         // 定位模块初始化 (imu)
+    Subsystem::Vision::init();                // 视觉模块初始化 (uart)
+    Subsystem::Chassis::init();               // 控制模块初始化 (motor, encoder)
 
-    imu_icm42688.init();                      // ICM42688 IMU 初始化 (spi)
-    encoders.init();                          // 编码器初始化 (encoder)
-    Storage::init();                          // 存储模块初始化，加载参数 (flash)
-    telemetry.init();                         // 通信模块初始化 (wireless_uart)
+    // Storage::init();                          // 存储模块初始化，加载参数 (flash)
     sys_menu.init();                          // 系统菜单初始化 (tft180)
-    scheduler.init();                         // 任务调度器初始化 (timer)
-    vision_manager.init();                    // 视觉模块初始化 (uart)
-    chassis_task.init();                      // 控制模块初始化 (motor)
-
-    // IMU 开机静态标定，累计 500 次数据求平均，得到 gyro_z_offset
-    system_delay_ms(500);
-    while(!imu_sensor.calibrate_step()) {
-        imu_icm42688.update_gyro_only();  // 主动提供数据给标定函数
-        system_delay_ms(5);                
-    }
-
-    pit_ms_init(PIT_CH0, 5);                  // 初始化 PIT_CH0 为 5ms 周期中断
-    pit_ms_init(PIT_CH1, 20);                 // 初始化 PIT_CH1 为 20ms 周期中断
-    interrupt_set_priority(PIT_IRQn, 0);      // 设置 PIT1 优先级为 0
-    interrupt_global_enable(0);               // 全局使能中断
-
-
-    debug_manager.init(); 
-    debug_manager.set_phase(GamePhase::WAIT_FOR_VISION);   // ~~~ 调试用：直接进入等待视觉阶段，测试串口和状态机 ~~~        
+    debug_manager.init();                     // 游戏管理器初始化 (读取拨码开关，设置初始阶段)
     debug_manager.inject_mock_semantics();    // 注入虚拟视觉标签，供没有摄像头时的调试使用
 
-    while(1) {
-        vision_manager.update();  // 视觉信息处理
-        scheduler.run();   // 任务调度器，负责调用各个模块的周期性任务
+    // IMU 开机静态标定
+    system_delay_ms(500);
+    Subsystem::PoseEstimator::calibrate_gyro_step();
 
-        if (is_debug_mode) {
+    pit_ms_init(PIT_CH0, 5);                 
+    pit_ms_init(PIT_CH1, 20);               
+    interrupt_set_priority(PIT_IRQn, 0);    
+    interrupt_global_enable(0);
+    
+
+    while(1) {
+        Subsystem::Vision::update(); 
+        Core::Scheduler::run();      
+
+        if (App::g_state.game.is_debug_mode) {
             debug_manager.update();              // 调试模式：进入拦截器，执行动画逻辑
         } else {
             debug_manager.GameManager::update(); // 正赛模式：直接穿透到基类，执行纯物理/控制逻辑

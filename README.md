@@ -1,14 +1,6 @@
 # 第21届全国大学生智能汽车竞赛 - 智能视觉组推箱子主控工程
 
-本仓库是 RT1064 主控侧完整工程，面向智能视觉组推箱子赛题，覆盖了视觉通信、巡图规划、推箱求解、底盘控制、调参与调试显示等核心链路。
-
-当前工程重点：
-
-- 双 OpenART 串口协议联动（ART1 地图与定位，ART2 语义识别）
-- 巡图阶段路径规划与动作分发
-- 基于 IDA* 的推箱子求解
-- 麦轮底盘运动学、轨迹规划与闭环控制
-- 面向嵌入式内存约束的静态分配与高性能区段优化
+本仓库是 RT1064 主控侧完整工程，面向智能视觉组推箱子赛题，覆盖视觉通信、巡图规划、推箱求解、底盘控制、姿态与里程计、遥测与调参显示等核心链路。
 
 ## 1. 硬件与平台
 
@@ -23,44 +15,78 @@
 
 ```text
 .
-├── project/
-│   ├── App/                    # 业务状态机、任务调度、视觉任务、显示与遥测
-│   ├── Algorithm/
-│   │   ├── Algorithm_Control/  # 运动学、PID、轨迹、跟踪
-│   │   ├── Algorithm_Perception/# 里程计、IMU 数据处理
-│   │   └── Algorithm_Planning/ # 巡图、策略、Sokoban(IDA*)
-│   ├── Device/                 # 电机、编码器、串口、存储、IMU 等设备封装
-│   ├── Core/                   # 系统配置、中断、全局调参定义
-│   └── mdk/                    # Keil 工程（rt1064.uvprojx）
-├── libraries/                  # 底层库、SDK 与外设驱动
+├── README.md
 ├── Algorithm_Planning_Memory_Analysis.md
-└── README.md
+├── libraries/                        # SDK、驱动、组件库（第三方与平台层）
+│   ├── sdk/
+│   ├── zf_common/
+│   ├── zf_driver/
+│   ├── zf_device/
+│   ├── zf_components/
+│   ├── components/
+│   └── doc/
+└── project/                          # 业务主工程
+    ├── App/                          # 主循环、全局状态、业务状态机
+    │   ├── main.cpp
+    │   ├── GameManage.cpp/.h
+    │   ├── RobotState.h
+    │   └── TestMap.cpp/.h
+    ├── Algorithm/                    # 算法层（规划 + 控制）
+    │   ├── MotionControl.cpp/.h
+    │   ├── Tracker.cpp/.h
+    │   ├── Exploration.cpp/.h
+    │   ├── Strategy.cpp/.h
+    │   └── Sokoban.cpp/.h
+    ├── Subsystem/                    # 业务子系统编排层
+    │   ├── Vision.cpp/.h
+    │   ├── ChassisControl.cpp/.h
+    │   ├── PoseEstimate.cpp/.h
+    │   ├── Telemetry.cpp/.h
+    │   └── Display.cpp/.h
+    ├── Device/                       # 设备抽象封装层
+    │   ├── Motor.cpp/.h
+    │   ├── Encoder.cpp/.h
+    │   ├── Icm42688.cpp/.h
+    │   ├── UartComm.cpp/.h
+    │   └── Storage.cpp/.h
+    ├── Core/                         # 调度、中断、系统与调参配置
+    │   ├── CoreScheduler.cpp/.h
+    │   ├── isr.cpp
+    │   ├── system_config.h
+    │   └── tuning_config.h
+    └── mdk/                          # Keil 工程与构建输出
+        ├── rt1064.uvprojx
+        ├── rt1064.uvoptx
+        ├── Objects/
+        ├── Listings/
+        ├── scf/
+        └── MDK删除临时文件.bat
 ```
 
-## 3. 软件分层约束
+## 3. 分层职责
 
-建议继续遵循四层职责边界，减少耦合并提升可维护性：
-
-| 层级目录 | 职责 | 约束 |
+| 目录 | 职责 | 说明 |
 | :--- | :--- | :--- |
-| `project/App/` | 主循环、状态机、调度、任务编排 | 不直接写寄存器细节 |
-| `project/Algorithm/` | 纯算法逻辑（规划、控制、感知融合） | 避免硬件相关宏依赖 |
-| `project/Device/` | 外设驱动封装与抽象接口 | 对上层屏蔽底层实现 |
-| `project/Core/` | 中断入口、系统配置、全局参数 | 保持稳定、少改动 |
+| project/App | 主循环与比赛状态机 | 负责流程编排，不直接操作底层寄存器 |
+| project/Algorithm | 纯算法逻辑 | 包含轨迹、控制、巡图、推箱求解 |
+| project/Subsystem | 子系统协调层 | 连接算法层和设备层，承接业务接口 |
+| project/Device | 设备抽象层 | 封装电机、编码器、IMU、串口、存储 |
+| project/Core | 系统核心层 | 中断入口、调度器、系统参数与调参项 |
+| libraries | 平台/第三方库 | SDK、驱动、组件与文档 |
 
+## 4. 运行流程概览
 
-## 4. 运行机制概览
+启动关键顺序（见 main.cpp）：
 
-### 4.1 启动初始化顺序（摘自主循环）
+1. 时钟与调试初始化
+2. 调度器、遥测、姿态估计、视觉、底盘初始化
+3. 参数存储与 TFT 菜单初始化
+4. 游戏管理器初始化与调试语义注入
+5. IMU 开机静态标定
+6. 启动 5ms/20ms 周期中断
+7. 主循环执行：视觉更新 + 任务调度 + 业务状态机
 
-- 时钟与调试初始化
-- IMU、编码器、存储、通信、菜单、调度器初始化
-- 视觉管理与底盘控制初始化
-- IMU 开机静态标定
-- 启动周期中断（5ms / 20ms）
-- 进入主循环：视觉更新 + 游戏状态机更新 + 调度器运行
-
-### 4.2 调度任务（当前配置）
+调度器当前任务（见 CoreScheduler.cpp）：
 
 | 任务 | 周期 |
 | :--- | :--- |
@@ -135,20 +161,14 @@ Checksum = MsgType + Len + Sum(Payload)
 - 控制模块：轨迹规划 + 运动学解算 + PID 闭环
 - 内存分析参考：`Algorithm_Planning_Memory_Analysis.md`
 
-## 7. 开发规范建议
+## 6. 开发约束建议
 
 - 以静态内存为主，避免运行期动态分配
-- ISR 与 C/C++ 混编边界保持清晰（必要时使用 `extern "C"`）
-- 高频核心函数放置在合适存储区（如 RAM 函数段）
-- 调参与状态变量集中管理，避免分散硬编码
+- 高频逻辑优先放入合适段（如 ramfunc）
+- C/C++ 混编接口显式处理链接边界
+- 中断逻辑尽量短小，将复杂逻辑下放到任务或模块函数
 
-## 8. 协作与提交建议
+## 7. 参考文档
 
-- 仓库已包含 `.gitignore`，用于过滤 Keil 产物与日志
-- `project/mdk/MDK删除临时文件.bat` 可用于本地清理临时文件
-- 提交前建议至少完成一次全量编译，确认无新增告警与错误
-
-## 9. 许可说明
-
-- 本项目业务代码版权归所属参赛团队。
-- 第三方库与 SDK 许可见 `libraries/` 目录及其文档说明。
+- 算法内存分析：Algorithm_Planning_Memory_Analysis.md
+- 第三方许可与版本：libraries/doc 与 libraries/LICENSE

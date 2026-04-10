@@ -10,7 +10,7 @@ namespace SystemConfig {
     // 机械参数
     static constexpr float WHEEL_RADIUS = 3.15f;                // 轮子半径，单位：厘米
     static constexpr float HALF_X_AXIS = 9.0f;                  // x 轴半轴距，单位：厘米
-    static constexpr float HALF_Y_AXIS = 9.9f;                  // y 轴半轴距，单位：厘米
+    static constexpr float HALF_Y_AXIS = 9.8f;                  // y 轴半轴距，单位：厘米
 
     // 编码器硬件参数
     static constexpr float ENC_LINES = 1024.0f;                 // 编码器物理线数
@@ -48,38 +48,15 @@ namespace SystemConfig {
 }
 
 // 四个轮子的转速结构体 (单位：cm/s)
-struct WheelSpeed4 {
-    float lf;      // Left Front
-    float lb;      // Left Back
-    float rf;      // Right Front
-    float rb;      // Right Back
-};
+struct WheelSpeed4 { float lf; float lb; float rf; float rb;};
 
 // 速度结构体 (cm/s)
-struct Velocity2D {
-    float vx;      // 左右速度 (右为正)
-    float vy;      // 前后速度 (前为正)
-    float vw;      // 旋转速度 (逆时针为正)
-};
+struct Velocity2D { float vx; float vy; float vw;};
+struct Speed2D { float vx; float vy;};
 
-// 速度结构体 (cm/s)
-struct Speed2D {
-    float vx;
-    float vy;
-};
-
-// 全局物理坐标结构体 (单位 cm)
-struct Point2D {
-    float x;
-    float y;
-};
-
-// 全局物理位姿结构体 (单位 cm/deg)
-struct Pose2D {
-    float x;
-    float y;
-    float yaw;
-};
+// 全局物理坐标结构体 (单位 cm/deg)
+struct Pose2D { float x; float y; float yaw;};
+struct Point2D { float x; float y;};
 
 // 全局网格坐标结构体 (单位：格)
 struct point {

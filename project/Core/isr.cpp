@@ -1,13 +1,13 @@
 #include "zf_common_headfile.h"
-#include "system_config.h"
 #include "zf_common_debug.h"
-#include "uart_comm.h"
-#include "encoder.h"
-#include "imu_process.h"
-#include "icm42688.h"
-#include "odometry.h"
-#include "task_control.h"
-#include "telemetry.h"
+
+#include "RobotState.h"
+#include "ChassisControl.h"
+#include "PoseEstimate.h"
+
+#include "UartComm.h"
+#include "Encoder.h"
+#include "Icm42688.h"
 
 
 extern "C" void PIT_IRQHandler(void) {
@@ -18,7 +18,7 @@ extern "C" void PIT_IRQHandler(void) {
         pit_flag_clear(PIT_CH0);
 
         imu_icm42688.update_gyro_only();    // 陀螺仪数据读取与转换
-        imu_sensor.update_yaw_5ms_tick();   // yaw 角更新 (积分)
+        Subsystem::PoseEstimator::update_yaw_5ms_tick();   // yaw 角更新 (积分)
     }
     
     // 20ms 定时器中断，用于底盘控制算法更新，优先级次之，保证底盘控制的稳定性和响应速度
@@ -29,11 +29,11 @@ extern "C" void PIT_IRQHandler(void) {
         // 编码器计数更新
         encoders.update_encoders_20ms_tick();
         // 全局定位里程计推算 
-        chassis_odometry.update_position_20ms_tick(encoders.getAllCounts(), imu_sensor.get_yaw() * SystemConfig::DEG_TO_RAD);
+        Subsystem::PoseEstimator::update_position_20ms_tick(encoders.getAllCounts(), App::g_state.physical.pose.yaw);
         // 底盘控制算法更新
-        chassis_task.update_control_20ms_tick(); 
-        // chassis_task.update_control_debug_20ms_tick();  // ~~~ 调试用 ~~~
-        
+        Subsystem::Chassis::update_20ms_tick();      
+        // Subsystem::Chassis::update_20ms_tick_debug(); // 调试模式下的底盘控制更新，包含额外的调试输出
+
     }
     
     if(pit_flag_get(PIT_CH2))

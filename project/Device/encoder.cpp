@@ -1,5 +1,6 @@
 #include "zf_common_headfile.h"
-#include "encoder.h"
+#include "Encoder.h"
+#include "RobotState.h"
 
 // 配置结构体，用于绑定硬件模块和引脚
 struct EncoderHWConfig {
@@ -32,30 +33,27 @@ void EncoderArray::init() {
 
 
 // 更新所有编码器的计数值
-__attribute__((section(".ramfunc"))) void EncoderArray::update_encoders_20ms_tick() {
-    
+__attribute__((section(".ramfunc"))) 
+void EncoderArray::update_encoders_20ms_tick() {
+    auto& wheel_speed = App::g_state.physical.current_wheel_speed;
+
     for (int i = 0; i < 4; ++i) {
         // 读取当前绝对计数值
         int32_t current_raw = encoder_get_count(ENC_CONFIGS[i].module);
         
         // 补码无损求差，并乘以极性 (即使 current_raw 溢出，强转为 int16_t 后差值依然是绝对正确的)
         counts[i] = (int16_t)(current_raw - last_raw[i]) * ENC_CONFIGS[i].polarity;
-        
+
+        // 更新四轮速度状态
+        float speed_cm_s = (float)counts[i] * PULSES_TO_SPEED_CM_S;
+        switch (i) {
+            case 0: wheel_speed.lf = speed_cm_s; break;
+            case 1: wheel_speed.lb = speed_cm_s; break;
+            case 2: wheel_speed.rf = speed_cm_s; break;
+            default: wheel_speed.rb = speed_cm_s; break;
+        }
+
         // 更新历史绝对值
         last_raw[i] = current_raw;
     }
-}
-
-// 获取指定编码器的计数值
-__attribute__((section(".ramfunc"))) int16 EncoderArray::get_count(uint8_t idx) const {
-
-    if(idx >= 4) { return 0; }
-    return counts[idx];
-}
-
-// 获取指定编码器的速度值，单位 cm/s
-__attribute__((section(".ramfunc"))) float EncoderArray::get_speed_cm_s(uint8_t idx) const {    
-
-    if(idx >= 4) return 0.0f;
-    return (float)counts[idx] * PULSES_TO_SPEED_CM_S;
 }

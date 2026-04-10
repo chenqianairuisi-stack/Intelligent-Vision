@@ -1,5 +1,6 @@
 #include "zf_common_headfile.h"
-#include "motor.h"
+#include "tuning_config.h"
+#include "Motor.h"
 
 Motor::Motor(int dir_pin, int pwm_channel, bool is_inverted)
     : dir_pin_(dir_pin), pwm_channel_(pwm_channel), is_inverted_(is_inverted) {}
@@ -9,11 +10,11 @@ void Motor::init() {
     pwm_init((pwm_channel_enum)pwm_channel_, 17000, 0); 
 }
 
-
 // 设置电机占空比，范围 -100.0f ~ 100.0f
-__attribute__((section(".ramfunc"))) void Motor::set_duty(float duty) {
-    if (duty > 50.0f) duty = 50.0f;
-    if (duty < -50.0f) duty = -50.0f;
+__attribute__((section(".ramfunc"))) void Motor::set_duty(float duty, float max_duty) {
+    // 限制占空比在允许范围内，并根据反转标志调整符号
+    if (duty > max_duty) duty = max_duty;
+    if (duty < -max_duty) duty = -max_duty;
     if (is_inverted_) duty = -duty;
 
     if (duty >= 0.0f) {

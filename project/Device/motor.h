@@ -5,7 +5,7 @@ public:
     Motor(int dir_pin, int pwm_channel, bool is_inverted);
     
     void init();
-    void set_duty(float duty);  // -100.0f ~ 100.0f
+    void set_duty(float duty, float max_duty);  // -100.0f ~ 100.0f
     
 private:
     int dir_pin_;               // GPIO 输出方向控制

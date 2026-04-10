@@ -7,16 +7,23 @@ struct PidParams {
     float kd;
 };
 
+struct FeedforwardParams {
+    float kv;  // 速度前馈系数: 多少占空比能维持 1cm/s 的稳态速度
+    float ka;  // 加速度前馈系数: 克服转子惯性需要的额外占空比
+};
+
 // 集中管理全车所有可调参数
 struct TuningConfig {
     PidParams pid_yaw;
     PidParams pid_speed;
+    FeedforwardParams ff; 
 
     struct {
-        float max_speed;                   // 跟踪时的最大线速度 (cm/s)
-        float max_acc;                     // 跟踪时的最大加速度 (cm/s^2)
-        float max_jerk;                    // 跟踪时的最大加加速度 (cm/s^3)
-        float max_ang_speed;               // 跟踪时的最大角速度 (rad/s)
+        float max_duty;          // 输出最大占空 (0~100)
+        float max_speed;         // 跟踪时的最大线速度 (cm/s)
+        float max_acc;           // 跟踪时的最大加速度 (cm/s^2)
+        float max_jerk;          // 跟踪时的最大加加速度 (cm/s^3)
+        float max_ang_speed;     // 跟踪时的最大角速度 (rad/s)
     }dynamics;
 
     struct {
@@ -36,14 +43,16 @@ struct TuningConfig {
 // 全局调参实例，放在 DTCM 区域，供所有模块访问
 __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
     {2.5f, 0.0f, 0.8f},         // pid_yaw
-    {0.4f, 0.5f, 0.0f},         // pid_speed
-    
+    {0.4f, 0.4f, 0.0f},         // pid_speed
+    {0.1f, 4.0f},               // feedforward
+
     // Dynamics 动力学预测参数
     {
-        120.0f,    // max_speed: 1m/s，极速过弯
-        85.0f,     // max_acc: 0.25G 极限抓地力
-        1200.0f,   // t_acc_jerk: 0.1秒起步柔化
-        2.0f       // max_ang_speed: 约 230度/秒，旋转敏捷
+        60.0f,     // max_duty
+        120.0f,    // max_speed
+        85.0f,     // max_acc
+        1000.0f,   // max_jerk
+        2.0f       // max_ang_speed
     },
     
     // Tracker 几何预测参数

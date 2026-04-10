@@ -20,6 +20,8 @@ struct IMUData {
 
 class Icm42688 {
 public:
+    IMUData data = {0};          // 存储原始数据和物理量的结构体
+
     Icm42688() = default;
     bool init();                 // icm42688 系统初始化
     void update_all();           // 读取所有数据
@@ -27,9 +29,6 @@ public:
     void update_accel_only();    // 读取加速度计数据 6 字节
 
 private:
-    friend class ImuProcessor;   // 让算法层直接访问 data，避免不必要的 getter 函数调用
-    IMUData data = {0};          // 存储原始数据和物理量的结构体
-
     inline void cs_low()  { gpio_low(cs_pin);  }
     inline void cs_high() { gpio_high(cs_pin); }
 

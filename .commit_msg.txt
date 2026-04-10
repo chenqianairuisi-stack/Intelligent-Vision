@@ -1,0 +1,18 @@
+重构：完全重构核心架构及业务逻辑层，实现系统模块化
+
+- **Algorithm (算法层)**:
+  - 新增 `Sokoban` 推箱子求解器 (结合 IDA* 和 Zobrist 置换表)。
+  - 新增 `Strategy` 战略规划与 DFS 引擎，实现最优炸弹破墙策略。
+  - 新增 `Tracker` 路径循迹模块，适配网格到物理坐标系映射。
+- **App (应用层)**:
+  - 实现 `GameManage` 核心状态机，支持视觉流交互与 2D 物理演示推演引擎。
+  - 引入 `RobotState` 全局状态黑板，彻底解耦各模块的数据依赖。
+  - 增加 `TestMap` 配合离线调试使用的测试地图集。
+- **Core & Device (核心与底层设备)**:
+  - 增加 `CoreScheduler` 完成时间片轮询任务调度体系。
+  - 封装 `UartComm` 通用串口通信类，内置 FIFO 缓存防阻塞。
+- **Subsystem (子系统)**:
+  - `ChassisControl`: 实现麦克纳姆轮底盘运动学逆向解算和电机底层 PID 精准控速。
+  - `Display`: 重构 TFT 菜单系统，添加仪表盘及实时动态网格地图渲染系统。
+  - `PoseEstimate`: 接入 IMU 与编码器底层逻辑，完成底盘里程计坐标推算。
+  - `Telemetry` 及 `Vision`: 解析 VOFA+ 上位机与 ART 模块双向通讯协议，实现闭环反馈。
