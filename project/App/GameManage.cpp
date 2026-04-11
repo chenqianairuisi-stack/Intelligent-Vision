@@ -230,13 +230,13 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
         case GamePhase::BIND_SEMANTICS: {
             bool all_done = true;
 
-            // 检查观测过的箱子和目标点是不是都出结果了
+            // 遍历所有巡图宏动作中的观测任务
             for (int i = 0; i < patrol_actions.size(); i++) {
                 if(patrol_actions[i].is_bomb_task) continue; // 跳过炸弹任务
 
                 uint8_t visited_entity_id = patrol_actions[i].obs.entity_id; 
-    
-                // 用真正的实体 ID 去查表
+
+                // 检查所有观测过的实体是否都已经有了语义标签
                 if (vision_data.semantic_labels[visited_entity_id] == -1) {
                     all_done = false;
                     break;
@@ -513,9 +513,8 @@ __attribute__((section(".ramfunc"))) void DebugGameManager::update() {
                 
                 phase = GamePhase::ANIMATE_DEMO; 
             } else {
-                // 求解失败，走原逻辑
-                Subsystem::Vision::request_map_ART1();
-                phase = GamePhase::WAIT_FOR_VISION;
+                game.error_stage = 2; // 定位问题阶段：求解失败
+                phase = GamePhase::ERROR_OCCURRED;
             }
             break;
         }
@@ -590,6 +589,7 @@ __attribute__((section(".ramfunc"))) void DebugGameManager::update() {
                 demo.last_tick = Core::Scheduler::get_sys_tick_ms();
                 phase = GamePhase::ANIMATE_RETURN_DEMO;
             } else {
+                game.error_stage = 3; // 定位问题阶段：返回路径生成失败
                 phase = GamePhase::ERROR_OCCURRED;
             }
             break;

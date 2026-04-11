@@ -344,6 +344,9 @@ void TftMenu::draw_dashboard() {
             case GamePhase::ERROR_OCCURRED:        snprintf(hud_line0, 22, "Phase: ERROR      "); break;
             default:                               snprintf(hud_line0, 22, "Phase: Other     "); break;
         }
+        if (game.phase == GamePhase::ERROR_OCCURRED) {
+            tft180_show_int (14 * UI_COL_W, 0, App::g_state.game.error_stage, 2);
+        }
         if (game.phase == GamePhase::ANIMATE_PATROL_DEMO || game.phase == GamePhase::BIND_SEMANTICS || game.phase == GamePhase::PLAN_SOKOBAN) {
             snprintf(hud_line2, 22, "Bm:%3dms GT:%3dms", (int)ctx.bomb_plan_time_ms, (int)ctx.patrol_plan_time_ms);
         } else if (game.phase == GamePhase::ANIMATE_DEMO || game.phase == GamePhase::FINISHED) {
@@ -366,6 +369,9 @@ void TftMenu::draw_dashboard() {
             case GamePhase::FINISHED:              snprintf(hud_line0, 22, "P: FINISHED  "); break;
             case GamePhase::ERROR_OCCURRED:        snprintf(hud_line0, 22, "P: ERROR     "); break;
             default:                               snprintf(hud_line0, 22, "P: COMPUTING "); break;
+        }
+        if (game.phase == GamePhase::ERROR_OCCURRED) {
+            tft180_show_int (14 * UI_COL_W, 0, App::g_state.game.error_stage, 2);  // 错误阶段
         }
         snprintf(hud_line2, 22, "Plan Time: --  ms");
     }
@@ -415,7 +421,7 @@ void TftMenu::draw_dashboard() {
     static float last_car_sx = -1.0f, last_car_sy = -1.0f;
     float current_car_sx = 0.0f, current_car_sy = 0.0f;
     
-    // 解决问题1：只有地图加载后（处于寻路、动画等阶段），才允许画小车
+    // 只有在视觉模块完成，进入寻路阶段后才开始绘制小车。之前的阶段小车位置不确定，强行绘制反而会增加闪烁和视觉干扰
     bool should_draw_car = (game.phase > GamePhase::WAIT_FOR_VISION);
 
     if (should_draw_car) {

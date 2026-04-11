@@ -1,9 +1,5 @@
 #pragma once
 #include <array>
-#include <cmath>
-#include <cstdint>
-#include <cstring>
-#include <algorithm>
 #include "system_config.h"
 
 using namespace SystemConfig;
@@ -17,28 +13,25 @@ enum class GameMode : uint8_t {
 // 四个移动方向：上、右、下、左
 constexpr point MOVE[4] = {{0,1}, {1,0}, {0,-1}, {-1,0}};
 
-// 纯算法层的数据结构，与视觉完全解耦
+// 地图和状态表示结构体
 struct SokobanLevel {
     std::array<std::array<int8_t, MAP_MAX_WIDTH>, MAP_MAX_HEIGHT> map;
     point player_start;
     
-    point boxes[MAX_BOXES];
-    uint8_t box_count;
-    uint8_t box_ids[MAX_BOXES];  // 箱子的身份ID (与目标点 target[id] 一一对应)
-    
-    point targets[MAX_BOXES];
-    uint8_t target_count;
-    
-    point bombs[MAX_BOMBS];
-    uint8_t bomb_count;
+    point bombs[MAX_BOMBS];    uint8_t bomb_count;
+    point targets[MAX_BOXES];  uint8_t target_count;
+    point boxes[MAX_BOXES];    uint8_t box_count;
+
+    uint8_t box_ids[MAX_BOXES];  // box_ids[i] 表示第 i 个箱子对于应的目标点ID
 };
+
 
 // 游戏状态结构体（用于搜索树中的节点表示）
 struct GameState {
     point player;                // 玩家当前坐标
     int8_t box_x[MAX_BOXES];     // 所有幸存箱子的X坐标
     int8_t box_y[MAX_BOXES];     // 所有幸存箱子的Y坐标
-    uint8_t box_ids[MAX_BOXES];  // box_ids[i] 表示坐标 (box_x[i], box_y[i]) 上的箱子身份ID（与目标点 target[id] 一一对应）
+    uint8_t box_ids[MAX_BOXES];  // box_ids[i] 表示第 i 个箱子对于应的目标点ID
     uint8_t num_boxes;           // 当前场上还剩几个箱子
     uint8_t target_mask;         // 位图：记录哪些目标点还没被消耗 (第i位为1表示第i个目标点还在，0表示已消失)
     uint32_t hash;               // 当前状态的 Zobrist 哈希值（用于查表排重）
@@ -50,7 +43,6 @@ struct TTEntry {
     uint16_t sig;                // 记录完整哈希，防止哈希冲突
     uint8_t  remaining;          // 记录该状态下剩余允许的搜索深度（步数），用于剪枝
 };
-
 
 
 class Sokoban {
@@ -81,9 +73,8 @@ private:
     TTEntry TT[TT_SIZE];                                // 置换表（记忆化搜索）
     uint32_t path_hashes[MAX_PATH_LENGTH];              // 记录起点到当前这步沿途所有的状态的哈希，防止环路（死循环）
 
-    bool is_dead[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];                         // P1 死锁表
-    bool specific_is_dead[MAX_BOXES][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];     // P2 死锁表
-    int16_t t_dist[MAX_BOXES][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];            // 启发式距离表：记录地图上任意一点到各个目标点的最短距离
+    int16_t t_dist[MAX_BOXES][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];            // 启发式距离表：记录地图上任意一点到各个目标点的最短推挤距离（-1表示不可达）
+    bool is_dead[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];                         // 死锁表
 
 
     // 内部辅助函数
@@ -94,12 +85,13 @@ private:
     
     inline int find_box_id(const GameState& state, point p) const;
     inline bool is_bomb(point p) const;
+    inline bool is_overstep(point p) const;
 
     // 模板化的内部求解函数，根据不同赛段模式编译成不同机器码
     template <GameMode Mode> bool solve_internal(); 
+    template <GameMode Mode> int ida_star_search(GameState state, int g, int depth, int threshold, StaticArray<point, MAX_PATH_LENGTH>& path);
     template <GameMode Mode> uint32_t compute_hash(const GameState& state) const;
     template <GameMode Mode> int get_heuristic(const GameState& state) const;
-    template <GameMode Mode> int ida_star_search(GameState state, int g, int depth, int threshold, StaticArray<point, MAX_PATH_LENGTH>& path);
 };
 
 extern Sokoban solver;

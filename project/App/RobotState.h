@@ -82,9 +82,9 @@ struct RobotState {
         // ART2 业务同步标志位
         bool art2_result_ready = false;
         // ART2 异步流水线状态
-        bool capture_ack_received = false;    
-        // 基于 entity_id 的语义缓存池 (-1 表示未识别/正在后台推理，1~10 表示识别到的特征数字)
-        int8_t semantic_labels[SystemConfig::MAX_ENTITIES];            
+        bool capture_ack_received = false;
+        // 语义缓存池 (-1 表示未识别/正在后台推理，1~10 表示识别到的特征数字，先箱子再目标点，顺序与 patrol_actions 中的 entity_id 一一对应)
+        int8_t semantic_labels[SystemConfig::MAX_ENTITIES];
     } vision;
 
     // 3. 规划层 (Tracker 生成，UI/GameManager 读取)

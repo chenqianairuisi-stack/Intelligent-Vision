@@ -598,12 +598,12 @@ bool Exploration::match_semantics(const int8_t* semantic_labels, uint8_t* out_ma
     for (int i = 0; i < cached_level.box_count; ++i) out_matched_ids[i] = 0;
     bool perfect_vision = true;  
 
-    // 阶段 1: 强视觉绑定
-    for (int b = 0; b < cached_level.box_count; ++b) {
+    // 阶段 1: 视觉绑定
+    for (int b = 0; b < cached_level.box_count; ++b) {  // 遍历观测过的箱子
         int8_t box_semantic = semantic_labels[b];
         if (box_semantic == -1) continue; 
         
-        for (int t = 0; t < cached_level.target_count; ++t) {
+        for (int t = 0; t < cached_level.target_count; ++t) {  // 检查观测过的目标中有没有直接匹配的
             int target_entity_id = cached_level.box_count + t;
             if (semantic_labels[target_entity_id] == box_semantic) {
                 out_matched_ids[b] = t;        
@@ -617,6 +617,7 @@ bool Exploration::match_semantics(const int8_t* semantic_labels, uint8_t* out_ma
     // 阶段 2: N-1 残缺绑定推演
     int unassigned_target_search_idx = 0;
     for (int b = 0; b < cached_level.box_count; ++b) {
+        // 如果这个箱子还没有匹配成功，尝试给它分配一个还未被占用的目标
         if (!box_assigned[b]) {  
             while (unassigned_target_search_idx < cached_level.target_count && 
                    target_assigned[unassigned_target_search_idx]) {

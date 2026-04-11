@@ -1,4 +1,8 @@
 #include "Sokoban.h"
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <algorithm>
 
 // ===================================================== 初始化与配置 =====================================================
 
@@ -42,9 +46,6 @@ void Sokoban::bind_semantics(const uint8_t* matched_ids, point current_player_po
     for (int i = 0; i < initial_state.num_boxes; ++i) {
         initial_state.box_ids[i] = matched_ids[i];
     }
-    
-    // 根据对应关系生成专属死锁表
-    precompute_specific_deadlocks(); 
 
     // 更新玩家的真实起点位置
     initial_state.player = current_player_pos;
@@ -96,7 +97,7 @@ template <GameMode Mode> bool Sokoban::solve_internal() {
 
 // 全局变量，避免递归时频繁开辟内存
 static uint16_t bfs_visited_gen[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];  // 位图，标记玩家在BFS中访问过哪些格子
-static uint16_t current_gen = 0;  // 代数指针：每次BFS开始时+1，配合bfs_visited实现O(1)清空访问标记
+static uint16_t current_gen = 0;  // 代数指针：每次 BFS开始时+1，配合 bfs_visited实现 O(1)清空访问标记
 static point bfs_q[MAP_CELL_COUNT];
 static int8_t bfs_dist[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
 
@@ -108,8 +109,8 @@ int Sokoban::ida_star_search(GameState state, int g, int depth, int threshold, S
 
     // 置换表剪枝：如果之前搜索过一个哈希相同的状态，并且当时剩余的容错深度更大，说明当前分支不如之前的分支，剪掉
     int remaining = threshold - g;
-    int tt_idx = state.hash & (TT_SIZE - 1);
-    uint16_t sig = (uint16_t)(state.hash >> 16);  // 提取特征码
+    int tt_idx = state.hash & (TT_SIZE - 1);  // 计算置换表索引 (完整哈希的低 16 位)
+    uint16_t sig = (uint16_t)(state.hash >> 16);  // 提取特征码 (完整哈希的高 16 位)
     if (TT[tt_idx].sig == sig && TT[tt_idx].remaining >= remaining) return threshold + 1;  // 特征码匹配且剩余容错更大，说明当前分支不如之前的分支，剪掉
 
 
@@ -119,7 +120,7 @@ int Sokoban::ida_star_search(GameState state, int g, int depth, int threshold, S
         TT[tt_idx].sig = sig; TT[tt_idx].remaining = remaining;
         return 9999;
     }
-    int f = g + (h * 3) / 2;
+    int f = g + (h * 3) / 2;  // Weighted IDA*
     if (f > threshold) return f;    // 剪枝：超过当前迭代的限制，返回新的阈值建议
 
 
@@ -144,7 +145,7 @@ int Sokoban::ida_star_search(GameState state, int g, int depth, int threshold, S
         }
         for(int dir = 0; dir < 4; ++dir) {
             point np = curr + MOVE[dir];
-            if(np.x >= 0 && np.x < MAP_MAX_WIDTH && np.y >= 0 && np.y < MAP_MAX_HEIGHT) {
+            if(!is_overstep(np)) {
                 if(!(bfs_visited_gen[np.y][np.x] == current_gen) && map[np.y][np.x] != 1 && !is_bomb(np)) {
                     if(find_box_id(state, np) == -1) {   
                         bfs_visited_gen[np.y][np.x] = current_gen;
@@ -165,9 +166,11 @@ int Sokoban::ida_star_search(GameState state, int g, int depth, int threshold, S
     }
     path_hashes[depth] = canon_hash;
 
-
+    
+    // lambda函数：判断一个格子是否是一个活跃目标点（对于P1来说是任意未消失的目标点，对于P2来说是这个箱子对应的目标点）
     auto is_active_target = [&](point p, int box_idx, int& out_idx) {
         if constexpr (Mode == GameMode::PHASE1_ANY) {
+            // P 1: 路过任意一个未消失的目标点都算有效 
             for (size_t t = 0; t < initial_targets.size(); ++t) {
                 if ((state.target_mask & (1 << t)) && initial_targets[t] == p) {
                     out_idx = t; return true;
@@ -184,21 +187,22 @@ int Sokoban::ida_star_search(GameState state, int g, int depth, int threshold, S
         }
     };
 
+    // lambda函数：判断是否为通道（即在某个方向上两侧都是墙），如果是通道则可以连推
     auto is_tunnel = [&](point p, int d) {
         if (MOVE[d].x == 0) {
             bool left_wall = (p.x - 1 < 0) || (map[p.y][p.x - 1] == 1);
-            bool right_wall = (p.x + 1 >= MAP_MAX_WIDTH) || (map[p.y][p.x + 1] == 1);
+            bool right_wall = (p.x + 1 > MAP_MAX_WIDTH - 1) || (map[p.y][p.x + 1] == 1);
             return left_wall && right_wall;
         } else {
-            bool up_wall = (p.y - 1 < 0) || (map[p.y - 1][p.x] == 1);
-            bool down_wall = (p.y + 1 >= MAP_MAX_HEIGHT) || (map[p.y + 1][p.x] == 1);
+            bool down_wall = (p.y - 1 < 0) || (map[p.y - 1][p.x] == 1);
+            bool up_wall = (p.y + 1 > MAP_MAX_HEIGHT - 1) || (map[p.y + 1][p.x] == 1);
             return up_wall && down_wall;
         }
     };
 
     // ---------- 宏操作第二步：寻找有哪些可以执行的推箱子动作 ----------
     struct TinyMove {
-        uint8_t box_idx, dir, is_double, box2_idx, walk_dist, slide_dist;
+        uint8_t box_idx, dir, walk_dist, slide_dist;
     };
     TinyMove moves[24]; 
     int num_moves = 0;
@@ -209,22 +213,21 @@ int Sokoban::ida_star_search(GameState state, int g, int depth, int threshold, S
         for (uint8_t dir = 0; dir < 4; ++dir) {
             // 确保人能站过去
             point push_from = box_pos - MOVE[dir]; // 推箱子时人站的位置
-            if (push_from.x >= 0 && push_from.x < MAP_MAX_WIDTH && push_from.y >= 0 && push_from.y < MAP_MAX_HEIGHT) {
+            if (!is_overstep(push_from)) {
                 if (bfs_visited_gen[push_from.y][push_from.x] == current_gen) {
                     // 检查推箱子后的位置是否合法
                     point push_to = box_pos + MOVE[dir]; // 箱子要被推到的位置
-                    if (push_to.x < 0 || push_to.x >= MAP_MAX_WIDTH || push_to.y < 0 || push_to.y >= MAP_MAX_HEIGHT) continue;
+                    if (is_overstep(push_to)) continue;
                     if (map[push_to.y][push_to.x] == 1 || is_bomb(push_to)) continue;  // 撞墙或撞炸弹
-                    
-                    int b2 = find_box_id(state, push_to);
-                    int dummy_t;
-                    if (b2 == -1) {
+                                        
+                    if (find_box_id(state, push_to) == -1) {
                         // 推一个箱子的情况，支持连推：如果推到的位置是个通道，并且后面没有箱子了，可以继续被推
+                        int dummy_t;
                         point final_push_to = push_to;
                         int slide_dist = 0;
                         while (is_tunnel(final_push_to, dir) && !is_active_target(final_push_to, i, dummy_t)) {
                             point next_p = final_push_to + MOVE[dir];
-                            if (next_p.x < 0 || next_p.x >= MAP_MAX_WIDTH || next_p.y < 0 || next_p.y >= MAP_MAX_HEIGHT) break;
+                            if (is_overstep(next_p)) break;
                             if (map[next_p.y][next_p.x] == 1 || is_bomb(next_p) || find_box_id(state, next_p) != -1) break; 
                             final_push_to = next_p;
                             slide_dist++;
@@ -234,41 +237,15 @@ int Sokoban::ida_star_search(GameState state, int g, int depth, int threshold, S
                         if constexpr (Mode == GameMode::PHASE1_ANY) {
                             if (is_dead[push_to.y][push_to.x] && !is_active_target(push_to, i, dummy_t)) continue; 
                         } else {
-                            if (specific_is_dead[state.box_ids[i]][push_to.y][push_to.x]) continue;
+                            if (t_dist[state.box_ids[i]][push_to.y][push_to.x] == -1) continue;
                         }
                         
                         if (num_moves < 24) moves[num_moves++] = {
                             static_cast<uint8_t>(i),
                             static_cast<uint8_t>(dir),
-                            static_cast<uint8_t>(0),
-                            static_cast<uint8_t>(0),
                             static_cast<uint8_t>(static_cast<uint8_t>(bfs_dist[push_from.y][push_from.x])),
                             static_cast<uint8_t>(slide_dist)
                         };
-                    } else {
-                        // 推两个箱子的情况（支持连推）
-                        point push_to_2 = push_to + MOVE[dir];
-                        if (push_to_2.x < 0 || push_to_2.x >= MAP_MAX_WIDTH || push_to_2.y < 0 || push_to_2.y >= MAP_MAX_HEIGHT) continue;
-                        if (map[push_to_2.y][push_to_2.x] == 1 || is_bomb(push_to_2)) continue;
-                        if (find_box_id(state, push_to_2) == -1) {
-
-                            if constexpr (Mode == GameMode::PHASE1_ANY) {
-                                if (is_dead[push_to.y][push_to.x] && !is_active_target(push_to, i, dummy_t)) continue;
-                                if (is_dead[push_to_2.y][push_to_2.x] && !is_active_target(push_to_2, b2, dummy_t)) continue;
-                            } else {
-                                if (specific_is_dead[state.box_ids[i]][push_to.y][push_to.x]) continue;
-                                if (specific_is_dead[state.box_ids[b2]][push_to_2.y][push_to_2.x]) continue;
-                            }
-
-                            if (num_moves < 24) moves[num_moves++] = {
-                                static_cast<uint8_t>(i),
-                                static_cast<uint8_t>(dir),
-                                static_cast<uint8_t>(1),
-                                static_cast<uint8_t>(b2),
-                                static_cast<uint8_t>(static_cast<uint8_t>(bfs_dist[push_from.y][push_from.x])),
-                                static_cast<uint8_t>(0)
-                            };
-                        }
                     }
                 }
             }
@@ -284,6 +261,7 @@ int Sokoban::ida_star_search(GameState state, int g, int depth, int threshold, S
         point push_from = box_pos - MOVE[mv.dir];
         point push_to = box_pos + MOVE[mv.dir];
 
+        // 如果是连推，更新最终箱子位置
         if (mv.slide_dist > 0) {
             push_to.x += MOVE[mv.dir].x * mv.slide_dist;
             push_to.y += MOVE[mv.dir].y * mv.slide_dist;
@@ -308,7 +286,6 @@ int Sokoban::ida_star_search(GameState state, int g, int depth, int threshold, S
             point p = old_p;
 
             if (i == mv.box_idx) p = push_to;   // 更新被推箱子的位置
-            else if (mv.is_double && i == mv.box2_idx) p = push_to + MOVE[mv.dir];  // 连推情况
 
             // 检查此时的箱子是不是踩上了剩余的目标
             if constexpr (Mode == GameMode::PHASE1_ANY) {
@@ -495,76 +472,12 @@ __attribute__((section(".ramfunc"))) int Sokoban::get_heuristic(const GameState&
     }
 }
 
-// 预处理：死锁检测
-void Sokoban::precompute_deadlocks() {
-    std::memset(is_dead, true, sizeof(is_dead)); 
-    
-    point q[MAP_MAX_WIDTH * MAP_MAX_HEIGHT];
-    int head = 0, tail = 0;
-
-    for (size_t i = 0; i < initial_targets.size(); ++i) {
-        point t = initial_targets[i];
-        is_dead[t.y][t.x] = false;
-        q[tail++] = t;
-    }
-
-    while (head < tail) {
-        point curr = q[head++];
-        
-        for (int dir = 0; dir < 4; ++dir) {
-            point box_prev = curr - MOVE[dir];
-            point player_prev = curr - MOVE[dir] - MOVE[dir]; 
-            
-            if (box_prev.x < 0 || box_prev.x >= MAP_MAX_WIDTH || box_prev.y < 0 || box_prev.y >= MAP_MAX_HEIGHT) continue;
-            if (player_prev.x < 0 || player_prev.x >= MAP_MAX_WIDTH || player_prev.y < 0 || player_prev.y >= MAP_MAX_HEIGHT) continue;
-            
-            if (map[box_prev.y][box_prev.x] != 1 && !is_bomb(box_prev) &&
-                map[player_prev.y][player_prev.x] != 1 && !is_bomb(player_prev)) {
-                
-                if (is_dead[box_prev.y][box_prev.x]) {
-                    is_dead[box_prev.y][box_prev.x] = false; 
-                    q[tail++] = box_prev;
-                }
-            }
-        }
-    }
-}
-
-// 预处理：P2 特定目标的死锁检测（只有对应箱子能走的路才算活路）
-void Sokoban::precompute_specific_deadlocks() {
-    for (size_t id = 0; id < initial_targets.size(); ++id) {
-        std::memset(specific_is_dead[id], true, sizeof(specific_is_dead[id]));
-        point q[MAP_MAX_WIDTH * MAP_MAX_HEIGHT];
-        int head = 0, tail = 0;
-        
-        point t = initial_targets[id];
-        specific_is_dead[id][t.y][t.x] = false; // 只有自己的目标点是活路
-        q[tail++] = t;
-
-        while (head < tail) {
-            point curr = q[head++];
-            for (int dir = 0; dir < 4; ++dir) {
-                point box_prev = curr - MOVE[dir];
-                point player_prev = curr - MOVE[dir] - MOVE[dir]; 
-                if (box_prev.x < 0 || box_prev.x >= MAP_MAX_WIDTH || box_prev.y < 0 || box_prev.y >= MAP_MAX_HEIGHT) continue;
-                if (player_prev.x < 0 || player_prev.x >= MAP_MAX_WIDTH || player_prev.y < 0 || player_prev.y >= MAP_MAX_HEIGHT) continue;
-                
-                if (map[box_prev.y][box_prev.x] != 1 && !is_bomb(box_prev) && map[player_prev.y][player_prev.x] != 1 && !is_bomb(player_prev)) {
-                    if (specific_is_dead[id][box_prev.y][box_prev.x]) {
-                        specific_is_dead[id][box_prev.y][box_prev.x] = false; 
-                        q[tail++] = box_prev;
-                    }
-                }
-            }
-        }
-    }
-}
-
-// 预处理：计算每个目标点到地图上每个格子的最短距离（考虑墙和炸弹，但不考虑箱子）
+// 预处理：计算地图上每个格子到每个目标点的最短推挤距离（不考虑炸弹和其他箱子），用于启发式评估与死锁检测
 void Sokoban::precompute_target_distances() {
     std::memset(t_dist, -1, sizeof(t_dist));
     for (size_t i = 0; i < initial_targets.size(); ++i) {
         point start = initial_targets[i];
+
         point q[MAP_CELL_COUNT];
         int head = 0, tail = 0;
         
@@ -574,13 +487,21 @@ void Sokoban::precompute_target_distances() {
         while (head < tail) {
             point curr = q[head++];
             int dist = t_dist[i][curr.y][curr.x];
+
             for (int dir = 0; dir < 4; ++dir) {
-                point np = curr + MOVE[dir];
-                // 如果在地图内、不是墙、不是炸弹，且尚未访问过
-                if (np.x >= 0 && np.x < MAP_MAX_WIDTH && np.y >= 0 && np.y < MAP_MAX_HEIGHT) {
-                    if (map[np.y][np.x] != 1 && !is_bomb(np) && t_dist[i][np.y][np.x] == -1) {
-                        t_dist[i][np.y][np.x] = dist + 1;
-                        q[tail++] = np;
+                point box_prev = curr - MOVE[dir];
+                point player_prev = curr - MOVE[dir] - MOVE[dir]; 
+                
+                if (is_overstep(box_prev)) continue;
+                if (is_overstep(player_prev)) continue;
+
+                // 要能推箱子到 curr，必须保证箱子和玩家的前一个位置都不是墙或炸弹
+                if (map[box_prev.y][box_prev.x] != 1 && !is_bomb(box_prev) &&
+                    map[player_prev.y][player_prev.x] != 1 && !is_bomb(player_prev)) {
+                    
+                    if (t_dist[i][box_prev.y][box_prev.x] == -1) {
+                        t_dist[i][box_prev.y][box_prev.x] = dist + 1; // 距离现在代表【最少推挤次数】
+                        q[tail++] = box_prev;        
                     }
                 }
             }
@@ -588,14 +509,40 @@ void Sokoban::precompute_target_distances() {
     }
 }
 
+// 预处理：死锁检测 (根据预处理的距离表直接生成，注意要在预处理目标距离后调用)
+void Sokoban::precompute_deadlocks() {
+    std::memset(is_dead, true, sizeof(is_dead)); 
+    
+    for (int8_t y = 0; y < MAP_MAX_HEIGHT; ++y) {
+        for (int8_t x = 0; x < MAP_MAX_WIDTH; ++x) {
+            if (map[y][x] == 1 || is_bomb({x, y})) continue;
+            
+            // 只要这个格子能把箱子合法反向拉到任意一个目标点，它就是活路
+            for (size_t i = 0; i < initial_targets.size(); ++i) {
+                if (t_dist[i][y][x] != -1) {
+                    is_dead[y][x] = false;
+                    break;
+                }
+            }
+        }
+    }
+}
 
+// 判断一个格子是否是炸弹
 inline bool Sokoban::is_bomb(point p) const {
     for (const auto& b : initial_bombs) if (b == p) return true;
     return false;
 }
 
+// 根据当前状态，找到指定位置上是否有箱子，如果有返回箱子索引，否则返回-1
 inline int Sokoban::find_box_id(const GameState& state, point p) const {
     for (int i = 0; i < state.num_boxes; ++i)
         if (state.box_x[i] == p.x && state.box_y[i] == p.y) return i;
     return -1;
+}
+
+// 判断一个格子是否越界
+inline bool Sokoban::is_overstep(point p) const {
+    if (p.x < 0 || p.x >= MAP_MAX_WIDTH || p.y < 0 || p.y >= MAP_MAX_HEIGHT) return true;
+    return false;
 }
