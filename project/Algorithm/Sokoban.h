@@ -37,11 +37,11 @@ struct GameState {
     uint32_t hash;               // 当前状态的 Zobrist 哈希值（用于查表排重）
 };
 
-// 置换表（Transposition Table, TT）大小，必须是2的幂
-constexpr int TT_SIZE = 16384;  
-struct TTEntry {
-    uint16_t sig;                // 记录完整哈希，防止哈希冲突
-    uint8_t  remaining;          // 记录该状态下剩余允许的搜索深度（步数），用于剪枝
+// 置换表 (Transposition Table, TT)，大小必须是2的幂
+constexpr uint32_t TT_SIZE = 65536;  
+struct alignas(4) TTEntry {
+    uint16_t sig;        // 特征码/Mask (Sokoban 和 Exploration 共用)
+    uint16_t value;      // 复用字段: Sokoban 存 remaining(剩余步数), Exploration 存 cost(累计代价)
 };
 
 
@@ -70,7 +70,6 @@ private:
     uint32_t ZOBRIST_PLAYER[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];                    // 如果玩家在坐标 (x, y)，就对应这个随机数
     uint32_t ZOBRIST_TARGET[MAX_BOXES];                                        // 对应目标点状态，目标消失也会改变哈希
     
-    TTEntry TT[TT_SIZE];                                // 置换表（记忆化搜索）
     uint32_t path_hashes[MAX_PATH_LENGTH];              // 记录起点到当前这步沿途所有的状态的哈希，防止环路（死循环）
 
     int16_t t_dist[MAX_BOXES][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];            // 启发式距离表：记录地图上任意一点到各个目标点的最短推挤距离（-1表示不可达）
@@ -94,4 +93,6 @@ private:
     template <GameMode Mode> int get_heuristic(const GameState& state) const;
 };
 
+
+extern TTEntry TT[TT_SIZE];  // 置换表全局实例（与 exploration 共享）
 extern Sokoban solver;

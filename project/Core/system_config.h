@@ -29,8 +29,8 @@ namespace SystemConfig {
     static constexpr int PLAN_START_X = 5;                      // 出库点 X 坐标（网格坐标）
     static constexpr int PLAN_START_Y = 2;                      // 出库点 Y 坐标（网格坐标）
     static constexpr int PLAN_END_X = 5;                        // 入库点 X 坐标（网格坐标）
-    static constexpr int PLAN_END_Y = 1;                        // 入库点 Y 坐标（网格坐标）
-    static constexpr int MAX_BOXES = 3;                         // 最大箱子数
+    static constexpr int PLAN_END_Y = 0;                        // 入库点 Y 坐标（网格坐标）
+    static constexpr int MAX_BOXES = 5;                         // 最大箱子数
     static constexpr int MAX_BOMBS = 3;                         // 最大炸弹数
     static constexpr int MAX_ENTITIES = 2 * MAX_BOXES;          // 最大实体数（箱子+目标点）
     static constexpr int MAX_ENTITY_MASK = 1 << MAX_ENTITIES;   // 实体访问状态总数（bitmask）

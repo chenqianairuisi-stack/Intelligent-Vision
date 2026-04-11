@@ -7,6 +7,8 @@
 // ===================================================== 初始化与配置 =====================================================
 
 __attribute__((section(".dtcm_data"))) Sokoban solver;
+__attribute__((section(".dtcm_data")))TTEntry TT[TT_SIZE];  // 置换表
+
 
 // 初始化游戏状态，加载地图、箱子、目标点和炸弹等信息
 bool Sokoban::load_from_vision(const SokobanLevel& level) {
@@ -111,13 +113,13 @@ int Sokoban::ida_star_search(GameState state, int g, int depth, int threshold, S
     int remaining = threshold - g;
     int tt_idx = state.hash & (TT_SIZE - 1);  // 计算置换表索引 (完整哈希的低 16 位)
     uint16_t sig = (uint16_t)(state.hash >> 16);  // 提取特征码 (完整哈希的高 16 位)
-    if (TT[tt_idx].sig == sig && TT[tt_idx].remaining >= remaining) return threshold + 1;  // 特征码匹配且剩余容错更大，说明当前分支不如之前的分支，剪掉
+    if (TT[tt_idx].sig == sig && TT[tt_idx].value >= remaining) return threshold + 1;  // 特征码匹配且剩余容错更大，说明当前分支不如之前的分支，剪掉
 
 
     // 启发式剪枝：如果当前状态的启发值已经超过阈值，说明这个分支不可能成功，返回启发值作为新的下界建议
     int h = get_heuristic<Mode>(state);
     if (h >= 9999) {                // 剪枝：不可达或死锁状态
-        TT[tt_idx].sig = sig; TT[tt_idx].remaining = remaining;
+        TT[tt_idx].sig = sig; TT[tt_idx].value = remaining;
         return 9999;
     }
     int f = g + (h * 3) / 2;  // Weighted IDA*
@@ -377,7 +379,7 @@ int Sokoban::ida_star_search(GameState state, int g, int depth, int threshold, S
     }
 
     // 搜索失败，递归记录当前状态到置换表 TT，防止未来重复搜索浪费时间
-    TT[tt_idx].sig = sig; TT[tt_idx].remaining = remaining;
+    TT[tt_idx].sig = sig; TT[tt_idx].value = remaining;
 
     return min_next_threshold;
 }
