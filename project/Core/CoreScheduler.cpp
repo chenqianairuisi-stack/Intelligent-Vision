@@ -19,7 +19,7 @@ namespace { // 隐藏任务表实现
     Task task_table[] = {
         {[]{ Subsystem::Telemetry::receive_and_parse_task(); }, 10,  0 },   // 上位机指令解析 (高频，10ms)
         {[]{ Subsystem::Telemetry::send_wave_data(); },         20,  0 },   // 上位机波形发送 (中频，20ms)
-        {[]{ sys_menu.run(); },                                 100, 0 }    // TFT UI 渲染 (低频，100ms)
+        {[]{ Subsystem::Display::run(); },                      100, 0 }    // TFT UI 渲染 (低频，100ms)
     };
 
     constexpr uint8_t TASK_COUNT = sizeof(task_table) / sizeof(task_table[0]);

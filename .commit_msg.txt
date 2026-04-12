@@ -1,9 +1,0 @@
-fix: 修复目标速度未定义编译错误并引入运动学增益补偿
-
-- RobotState: 新增 is_stopped 状态
-- ChassisControl: 在 run_speed_loop 中缓存下发控制目标速度，并新增 check_is_stopped 状态更新函数
-- MotionControl: 逆运动学增加基于 kinematic_gain_x 和 kinematic_gain_y 的缩放补偿
-- Tracker: 终末点到达条件增加底盘系统级别 is_stopped 物理静止判断
-- PoseEstimate: IMU 静态标定引入基于统计方差的动态死区(dynamic_deadband)，并基于运动学增益反算里程计位移
-- TuningConfig & Display: 引入 kinematic_gain 动态调参项，并添加手动步进控制菜单项用于测试
-- Core/isr: 时钟中断增加 20ms 内环 check_is_stopped 状态监控调用

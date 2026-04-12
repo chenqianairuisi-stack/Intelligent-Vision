@@ -8,11 +8,81 @@
 #include "Tracker.h"
 #include <cmath>
 #include <cstring>
+#include <algorithm>
 #include "zf_common_headfile.h"
 
 
+namespace App::GameEngine {
 
-__attribute__((section(".dtcm_data"))) GameManager game_manager;
+// ====================================================================
+// 私有数据结构与引擎定义
+// ====================================================================
+namespace {
+    // 独立的动画状态机缓存
+    struct DemoState {
+        point player;
+        point boxes[SystemConfig::MAX_BOXES];
+        uint8_t box_count;
+        point targets[SystemConfig::MAX_BOXES];
+        uint8_t target_count;
+        point bombs[SystemConfig::MAX_BOMBS];
+        uint8_t bomb_count;
+
+        uint16_t path_idx;  // 当前路径索引（动画专用）
+        uint32_t last_tick;  // 上次动画更新的系统时间戳
+
+        SokobanLevel map_state;
+        StaticArray<point, MAX_PATH_LENGTH> segment_path;
+        uint16_t segment_idx;
+        uint8_t patrol_target_idx;  // 当前巡逻动作关联的实体索引（0~box_count-1 对应箱子，box_count~box_count+target_count-1 对应目标点）
+    };
+
+    class GameManager {
+    public:
+        GameManager();
+        void init();
+        virtual void update();
+        virtual ~GameManager() = default;
+
+    protected:
+        point logical_patrol_pos;  // 当前位置（逻辑坐标）
+        SokobanLevel logical_level;  // 当前地图状态（逻辑坐标）
+        StaticArray<PatrolAction, 32> patrol_actions;  // 当前阶段的巡逻动作序列
+
+        // 注入的测试语义标签（-1 表示未识别/正在后台推理，1~10 表示识别到的特征数字，先箱子再目标点，顺序与 patrol_actions 中的 entity_id 一一对应）
+        int8_t mock_truth_labels[SystemConfig::MAX_ENTITIES];  
+        void inject_mock_semantics();
+    };
+
+    class DebugGameManager : public GameManager {
+    public:
+        DebugGameManager();
+        void update() override;
+        RenderContext get_render_context() const;
+        
+    private:
+        uint32_t bomb_plan_time_ms;
+        uint32_t patrol_plan_time_ms;
+        uint32_t push_plan_time_ms;
+
+        DemoState demo;  // 演示模式专用状态机
+        StaticArray<BombTask, MAX_BOMBS> cached_bomb_tasks;  // 当前阶段炸弹任务列表（用于 UI 绘制炸弹目标框）
+
+        void demo_remove_box(point p);
+        void demo_remove_target(point p);
+        void demo_remove_bomb(point p);
+        int demo_find_box(point p);
+        int demo_find_bomb(point p);
+    };
+
+    __attribute__((section(".dtcm_data"))) DebugGameManager core_engine;
+
+} // namespace
+
+
+// ====================================================================
+// 引擎内部实现
+// ====================================================================
 GameManager::GameManager() : logical_patrol_pos({PLAN_START_X, PLAN_START_Y}) {}
 
 // 初始化拨码开关并读取运行模式：赛段模式 + 演示模式
@@ -30,6 +100,28 @@ void GameManager::init() {
 
     if (!sw2_on) App::g_state.game.is_demo_mode = false;    // 正常模式（真实控制链路）
     else App::g_state.game.is_demo_mode = true;             // 演示模式（仅动画推演，不执行实车控制）
+}
+
+
+// 注入测试语义标签（建议 init 后调用）
+void GameManager::inject_mock_semantics() {
+    // 把数组全清为 -1，模拟真实开局
+    std::memset(mock_truth_labels, -1, sizeof(mock_truth_labels));
+    int num = logical_level.box_count;
+
+    // 自动构造一组一一对应标签：前 N 个箱子 ↔ 后 N 个目标
+    for(int i = 0; i < num; i++) {
+        mock_truth_labels[i] = i + 1;         // 箱子 ID
+        mock_truth_labels[num + i] = i + 1;     // 目标 ID 起始偏移 = BOXE_COUNT，确保不与箱子 ID 冲突
+    }
+
+    // 手动配对虚拟数据
+    // mock_truth_labels[0] = 7;  
+    // mock_truth_labels[1] = 2;  
+    // mock_truth_labels[2] = 9;  
+    // mock_truth_labels[3]  = 9;
+    // mock_truth_labels[4]  = 7; 
+    // mock_truth_labels[5] = 2; 
 }
 
 
@@ -98,6 +190,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
 
                 if (game.is_advanced_stage) {  
                     patrol_planner.load_level(logical_level);  // 将视觉数据加载到巡图规划引擎
+                    inject_mock_semantics();                   // ~~~调试阶段注入语义标签（正常模式下由视觉模块填充，ART2未就绪时使用）~~~
                     game.phase = GamePhase::PLAN_PATROL;       // 进入巡图
                 } else {
                     solver.load_from_vision(logical_level);    // 将视觉数据加载到推箱求解器
@@ -105,9 +198,11 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 }
             } else {
                 static uint32_t last_request_tick = Core::Scheduler::get_sys_tick_ms();
+
+                // 超时重试请求地图数据
                 if (Core::Scheduler::get_sys_tick_ms() - last_request_tick > 1000) {
                     last_request_tick = Core::Scheduler::get_sys_tick_ms();
-                    Subsystem::Vision::request_map_ART1();  // 超时重试请求地图数据
+                    Subsystem::Vision::request_map_ART1();  
                 }
             }
             break;
@@ -126,6 +221,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
         }
 
         case GamePhase::EXEC_ACTION_DISPATCH: {
+
             if (game.action_idx >= patrol_actions.size()) {
                 game.phase = GamePhase::BIND_SEMANTICS;
             } else {
@@ -242,7 +338,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     break;
                 }
             }
-        
+
 
             if (all_done) {
                 // N-1 规则匹配箱子与目标点 ID
@@ -350,9 +446,6 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
 // ======================================== 派生类(DebugGameManager) ========================================
 // ==========================================================================================================
 
-
-RenderContext dashboard_vm;
-__attribute__((section(".dtcm_data"))) DebugGameManager debug_manager;
 DebugGameManager::DebugGameManager() : GameManager(), push_plan_time_ms(0), patrol_plan_time_ms(0),bomb_plan_time_ms(0) {}
 
 // 多态拦截器
@@ -391,7 +484,7 @@ __attribute__((section(".ramfunc"))) void DebugGameManager::update() {
             demo.bomb_count = logical_level.bomb_count;
             for (int i = 0; i < demo.bomb_count; ++i) demo.bombs[i] = logical_level.bombs[i];
             
-            force_bg_redraw = true;
+            App::g_state.debug.need_bg_redraw = true;
             phase = GamePhase::ANIMATE_PATROL_DEMO;
             break;
         }
@@ -468,7 +561,7 @@ __attribute__((section(".ramfunc"))) void DebugGameManager::update() {
                             }
                         }
 
-                        force_bg_redraw = true;  // 通知 UI 全量重绘地砖
+                        App::g_state.debug.need_bg_redraw = true;  // 通知 UI 全量重绘地砖
                         
                     } else {
                         // 模拟观测动作：将 mock 语义写入视觉黑板
@@ -697,27 +790,6 @@ RenderContext DebugGameManager::get_render_context() const {
     return ctx;
 }
 
-// 注入测试语义标签（建议 init 后调用）
-void DebugGameManager::inject_mock_semantics() {
-    // 把数组全清为 -1，模拟真实开局
-    std::memset(mock_truth_labels, -1, sizeof(mock_truth_labels));
-
-    // 自动构造一组一一对应标签：前 N 个箱子 ↔ 后 N 个目标
-    for(int i = 0; i < SystemConfig::MAX_BOXES; i++) {
-        mock_truth_labels[i] = i + 1;         // 箱子 ID (0~7) 赋予标签 1~8
-        mock_truth_labels[SystemConfig::MAX_BOXES + i] = i + 1;     // 目标 ID 起始偏移 = MAX_BOXES
-    }
-
-    // 手动配对虚拟数据
-    // mock_truth_labels[0] = 7;  
-    // mock_truth_labels[1] = 2;  
-    // mock_truth_labels[2] = 9;  
-    // mock_truth_labels[3]  = 9;
-    // mock_truth_labels[4]  = 7; 
-    // mock_truth_labels[5] = 2; 
-}
-
-
 // 辅助函数：数组操作
 int DebugGameManager::demo_find_box(point p) {
     for (int i = 0; i < demo.box_count; ++i) {
@@ -753,3 +825,28 @@ void DebugGameManager::demo_remove_bomb(point p) {
         demo.bomb_count--;
     }
 }
+
+
+// ====================================================================
+// 对外接口实现
+// ====================================================================
+
+void init() {
+    core_engine.init();
+    App::g_state.debug.need_bg_redraw = true;
+}
+
+__attribute__((section(".ramfunc"))) void update() {
+    if (App::g_state.game.is_demo_mode) {
+        core_engine.update();
+    } else {
+        core_engine.GameManager::update();
+    }
+}
+
+RenderContext get_render_context() {
+    return core_engine.get_render_context();
+}
+
+
+} // namespace App::GameEngine

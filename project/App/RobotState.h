@@ -48,17 +48,17 @@ enum class ControlMode : uint8_t {
     AUTO_TRACKING           // 自动模式：听从 Tracker 生成的路径
 };
 
+
 namespace App {
 
 struct RobotState {
-    
 
     // 1. 游戏业务层 (GameManager 写入，全局共享)
     struct {
         GamePhase phase = GamePhase::INIT_CALIBRATE;
         bool is_advanced_stage = false;  // 是否是第二/三阶段
         bool is_demo_mode = false;       // 演示模式标志（强制动画演示，不进行实际控制）
-        bool is_debug_mode = false;      // 调试模式标志
+        bool is_debug_mode = false;      // 调试模式标志（直接注入地图数据，不等待视觉输入）
         uint8_t error_stage = 0;         // 发生错误的阶段（仅在 phase == ERROR_OCCURRED 时用于定位问题）
         uint8_t action_idx = 0;          // 当前宏动作索引
     } game;
@@ -108,9 +108,10 @@ struct RobotState {
         bool is_stopped = true;                                       // 底盘是否完全停止 
     } physical;
 
-    // 6. 调试与遥测层 (供 Telemetry 写入，UI/波形 读取)
+    // 6. 调试信息 (仅供调试显示，不参与业务逻辑)
     struct {
-        int telemetry_mode = 0;       // 波形显示模式
+        int telemetry_mode = 0;          // 波形显示模式
+        bool need_bg_redraw = true;      // UI 背景重绘请求标志
     } debug;
 };
 

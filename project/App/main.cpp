@@ -17,16 +17,16 @@ extern "C" int main(void) {
     debug_init();
     system_delay_ms(300);           
     
-    Core::Scheduler::init();                  // 任务调度器初始化 (timer)
-    Subsystem::Telemetry::init();             // 通信模块初始化 (wireless_uart)
     Subsystem::PoseEstimator::init();         // 定位模块初始化 (imu)
-    Subsystem::Vision::init();                // 视觉模块初始化 (uart)
     Subsystem::Chassis::init();               // 控制模块初始化 (motor, encoder)
-
+    Subsystem::Vision::init();                // 视觉模块初始化 (uart)
+    Subsystem::Telemetry::init();             // 通信模块初始化 (wireless_uart)
+    Subsystem::Display::init();               // 系统菜单初始化 (tft180) 
+    
     Storage::init();                          // 存储模块初始化，加载参数 (flash)
-    sys_menu.init();                          // 系统菜单初始化 (tft180)
-    debug_manager.init();                     // 游戏管理器初始化 (读取拨码开关，设置初始阶段)
-    debug_manager.inject_mock_semantics();    // 注入虚拟视觉标签，供没有摄像头时的调试使用
+    Core::Scheduler::init();                  // 任务调度器初始化 (timer)
+
+    App::GameEngine::init();                     // 游戏管理器初始化 (读取拨码开关，设置初始阶段)
 
     // IMU 开机静态标定
     system_delay_ms(500);
@@ -42,10 +42,6 @@ extern "C" int main(void) {
         Subsystem::Vision::update(); 
         Core::Scheduler::run();      
 
-        if (App::g_state.game.is_demo_mode) {
-            debug_manager.update();              // 演示模式：进入拦截器，执行动画逻辑
-        } else {
-            debug_manager.GameManager::update(); // 正赛模式：直接穿透到基类，执行纯物理/控制逻辑
-        }
+        App::GameEngine::update();
     }
 }
