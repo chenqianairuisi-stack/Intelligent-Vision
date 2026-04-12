@@ -47,7 +47,7 @@ namespace {
     __attribute__((always_inline)) inline float get_sign(float val) {
         if (val > 0.5f) return 1.0f;
         if (val < -0.5f) return -1.0f;
-        return 0.0f; 
+        return val / 0.5f; // 在 -0.5 到 0.5 之间，平滑地从 -1 过渡到 1，绝不突变
     }
 
 
@@ -57,10 +57,10 @@ namespace {
         const auto& Kv = tune.ff.kv;
 
         // 计算前馈占空比 (简单的线性模型)，并加入符号判断实现静摩擦补偿
-        float ff_lf = targets.lf * Kv;
-        float ff_lb = targets.lb * Kv;
-        float ff_rf = targets.rf * Kv;
-        float ff_rb = targets.rb * Kv;
+        float ff_lf = targets.lf * Kv + get_sign(targets.lf) * tune.ff.ka;
+        float ff_lb = targets.lb * Kv + get_sign(targets.lb) * tune.ff.ka;
+        float ff_rf = targets.rf * Kv + get_sign(targets.rf) * tune.ff.ka;
+        float ff_rb = targets.rb * Kv + get_sign(targets.rb) * tune.ff.ka;
 
         // 速度环增量式 PID 计算占空比输出
         float duty_lf = ff_lf + pid_wheels[0].calculate(targets.lf, current_speeds.lf);

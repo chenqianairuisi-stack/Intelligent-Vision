@@ -61,11 +61,11 @@ namespace { // 匿名命名空间，确保这些数据只在本文件可见
     {"ff_Ka   ",   &tune.ff.ka,                       1.0f  },
     {"Max_Duty",   &tune.dynamics.max_duty,           1.0f  },
     {"Max_Spd ",   &tune.dynamics.max_speed,          1.0f  },
-    {"Max_Acc ",   &tune.dynamics.max_acc,            10.0f },
-    {"MaxJerk ",   &tune.dynamics.max_jerk,           100.0f},
+    {"Max_Acc ",   &tune.dynamics.max_acc,            5.0f  },
+    {"MaxJerk ",   &tune.dynamics.max_jerk,           50.0f },
     {"MaxASpd ",   &tune.dynamics.max_ang_speed,      0.1f  },
-    {"Gain_X  ",   &tune.dynamics.kinematic_gain_x,   0.1f  },
-    {"Gain_Y  ",   &tune.dynamics.kinematic_gain_y,   0.1f  },
+    {"Gain_X  ",   &tune.dynamics.kinematic_gain_x,   0.01f },
+    {"Gain_Y  ",   &tune.dynamics.kinematic_gain_y,   0.01f },
     {"Reach_R ",   &tune.tracker.reach_radius,        0.1f  },
     {"Reach_M ",   &tune.tracker.reach_radius_min,    0.1f  }
      };

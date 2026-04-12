@@ -114,14 +114,6 @@ void GameManager::inject_mock_semantics() {
         mock_truth_labels[i] = i + 1;         // 箱子 ID
         mock_truth_labels[num + i] = i + 1;     // 目标 ID 起始偏移 = BOXE_COUNT，确保不与箱子 ID 冲突
     }
-
-    // 手动配对虚拟数据
-    // mock_truth_labels[0] = 7;  
-    // mock_truth_labels[1] = 2;  
-    // mock_truth_labels[2] = 9;  
-    // mock_truth_labels[3]  = 9;
-    // mock_truth_labels[4]  = 7; 
-    // mock_truth_labels[5] = 2; 
 }
 
 
@@ -154,7 +146,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             // 到位后进入地图输入阶段（视觉输入或本地测试输入）
             if (dist < tune.tracker.reach_radius_min) {
                 if (game.is_debug_mode) {
-                    TestMap::load_mock_map(0);      // 调试模式：注入离线地图
+                    TestMap::load_mock_map(4);      // 调试模式：注入离线地图
                 } else {
                     Subsystem::Vision::request_map_ART1();   // 正常模式：请求 ART1 地图
                 }
@@ -265,6 +257,19 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
 
             // 朝向收敛后触发 ART2 捕捉
             if (err_yaw < 5.0f) { 
+
+                if (game.is_debug_mode) {
+                    // 调试模式：直接写入语义标签，模拟 ART2 识别结果
+                    uint8_t entity_id = patrol_actions[game.action_idx].obs.entity_id;
+                    vision_data.semantic_labels[entity_id] = mock_truth_labels[entity_id];
+
+                    logical_patrol_pos = patrol_actions[game.action_idx].obs.pos; 
+                    game.action_idx++;
+
+                    game.phase = GamePhase::EXEC_ACTION_DISPATCH; // 直接进入语义绑定阶段
+                    break;
+                }
+
                 uint8_t current_entity = patrol_actions[game.action_idx].obs.entity_id;
                 bool is_box = patrol_actions[game.action_idx].obs.is_box;
                 Subsystem::Vision::request_capture_ART2(current_entity, is_box);
@@ -345,6 +350,12 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 uint8_t matched_ids[SystemConfig::MAX_BOXES];
                 bool is_perfect = patrol_planner.match_semantics(vision_data.semantic_labels, matched_ids);
                 
+                if (!is_perfect) {
+                    game.error_stage = 4; // 错误阶段4：语义匹配失败（不满足 N-1 规则）
+                    game.phase = GamePhase::ERROR_OCCURRED;
+                    break;
+                }
+
                 solver.load_from_vision(logical_level);   // 导入当前地形（含爆炸改动）
                 solver.bind_semantics(matched_ids, logical_patrol_pos);   // 绑定语义映射与当前位置
                 game.phase = GamePhase::PLAN_SOKOBAN;

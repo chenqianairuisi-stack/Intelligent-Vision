@@ -590,6 +590,7 @@ bool Exploration::get_bomb_push_path(const SokobanLevel& lvl, point player_start
 }
 
 
+
 // ============================================================================
 // [模块 5] 视觉语义与身份绑定系统
 // ============================================================================
@@ -597,18 +598,22 @@ __attribute__((section(".ramfunc")))
 bool Exploration::match_semantics(const int8_t* semantic_labels, uint8_t* out_matched_ids) const {
     bool target_assigned[SystemConfig::MAX_BOXES] = {false};
     bool box_assigned[SystemConfig::MAX_BOXES] = {false};
-    
-    for (int i = 0; i < cached_level.box_count; ++i) out_matched_ids[i] = 0;
-    bool perfect_vision = true;  
 
-    // 阶段 1: 视觉绑定
-    for (int b = 0; b < cached_level.box_count; ++b) {  // 遍历观测过的箱子
-        int8_t box_semantic = semantic_labels[b];
-        if (box_semantic == -1) continue; 
+    // 初始化输出
+    for (int i = 0; i < cached_level.box_count; ++i) out_matched_ids[i] = 0;
+
+    // 阶段 1：直接匹配（箱子与目标语义均有效且相等）
+    for (int b = 0; b < cached_level.box_count; ++b) {
+        int8_t box_sem = semantic_labels[b];
+        if (box_sem == -1) {
+            continue; 
+        }
         
-        for (int t = 0; t < cached_level.target_count; ++t) {  // 检查观测过的目标中有没有直接匹配的
-            int target_entity_id = cached_level.box_count + t;
-            if (semantic_labels[target_entity_id] == box_semantic) {
+        for (int t = 0; t < cached_level.target_count; ++t) {
+            if (target_assigned[t]) continue;
+            
+            int8_t target_sem = semantic_labels[cached_level.box_count + t];
+            if (target_sem == box_sem) {
                 out_matched_ids[b] = t;        
                 box_assigned[b] = true;
                 target_assigned[t] = true;
@@ -617,25 +622,64 @@ bool Exploration::match_semantics(const int8_t* semantic_labels, uint8_t* out_ma
         }
     }
 
-    // 阶段 2: N-1 残缺绑定推演
-    int unassigned_target_search_idx = 0;
+    // 阶段 2：箱子反推目标（箱子有标签，目标盲区）
     for (int b = 0; b < cached_level.box_count; ++b) {
-        // 如果这个箱子还没有匹配成功，尝试给它分配一个还未被占用的目标
-        if (!box_assigned[b]) {  
-            while (unassigned_target_search_idx < cached_level.target_count && 
-                   target_assigned[unassigned_target_search_idx]) {
-                unassigned_target_search_idx++;
-            }
-
-            if (unassigned_target_search_idx < cached_level.target_count) {
-                out_matched_ids[b] = unassigned_target_search_idx;
-                target_assigned[unassigned_target_search_idx] = true;
-            } else {
-                out_matched_ids[b] = 0; 
-                perfect_vision = false;
+        if (box_assigned[b]) continue;
+        
+        int8_t box_sem = semantic_labels[b];
+        if (box_sem != -1) {
+            // 将该箱子分配给尚未占用的盲区目标
+            for (int t = 0; t < cached_level.target_count; ++t) {
+                if (!target_assigned[t] && semantic_labels[cached_level.box_count + t] == -1) {
+                    out_matched_ids[b] = t;
+                    box_assigned[b] = true;
+                    target_assigned[t] = true;
+                    break;
+                }
             }
         }
     }
 
-    return perfect_vision;
+    // 阶段 3：目标反推箱子（目标有标签，箱子盲区）
+    for (int t = 0; t < cached_level.target_count; ++t) {
+        if (target_assigned[t]) continue;
+
+        int8_t target_sem = semantic_labels[cached_level.box_count + t];
+        if (target_sem != -1) {
+            // 将该目标分配给尚未占用的盲区箱子
+            for (int b = 0; b < cached_level.box_count; ++b) {
+                if (!box_assigned[b] && semantic_labels[b] == -1) {
+                    out_matched_ids[b] = t;
+                    box_assigned[b] = true;
+                    target_assigned[t] = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    // 阶段 4：极值兜底 (处理都为 -1的数据，即未观测的箱子和目标正好是配对的)
+    for (int b = 0; b < cached_level.box_count; ++b) {
+        if (!box_assigned[b]) {  
+
+            for (int t = 0; t < cached_level.target_count; ++t) {
+                if (!target_assigned[t]) {
+                    out_matched_ids[b] = t;
+                    box_assigned[b] = true;
+                    target_assigned[t] = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    // 最后验证是否所有箱子都成功匹配了目标，没有则返回 false
+    for (int i = 0; i < cached_level.box_count; ++i) {
+        if (box_assigned[i] == false || target_assigned[i] == false) {
+            return false;
+        }
+    }
+
+    // 表示箱子语义均已匹配
+    return true;
 }

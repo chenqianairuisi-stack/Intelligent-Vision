@@ -58,7 +58,7 @@ struct RobotState {
         GamePhase phase = GamePhase::INIT_CALIBRATE;
         bool is_advanced_stage = false;  // 是否是第二/三阶段
         bool is_demo_mode = false;       // 演示模式标志（强制动画演示，不进行实际控制）
-        bool is_debug_mode = false;      // 调试模式标志（直接注入地图数据，不等待视觉输入）
+        bool is_debug_mode = true;      // 调试模式标志（直接注入地图数据，不等待视觉输入）
         uint8_t error_stage = 0;         // 发生错误的阶段（仅在 phase == ERROR_OCCURRED 时用于定位问题）
         uint8_t action_idx = 0;          // 当前宏动作索引
     } game;

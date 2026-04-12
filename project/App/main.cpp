@@ -8,7 +8,6 @@
 #include "Display.h"
 #include "PoseEstimate.h"
 #include "Storage.h"
-#include "Icm42688.h"
 
 
 extern "C" int main(void) {
@@ -26,7 +25,7 @@ extern "C" int main(void) {
     Storage::init();                          // 存储模块初始化，加载参数 (flash)
     Core::Scheduler::init();                  // 任务调度器初始化 (timer)
 
-    App::GameEngine::init();                     // 游戏管理器初始化 (读取拨码开关，设置初始阶段)
+    App::GameEngine::init();                  // 游戏管理器初始化 (读取拨码开关，设置初始阶段)
 
     // IMU 开机静态标定
     system_delay_ms(500);

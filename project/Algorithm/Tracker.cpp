@@ -50,7 +50,7 @@ void PathTracker::load_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path)
     }
 
     // 索引 0 是小车当前所在的起点，所以直接去追索引 1（下一个拐点或终点）
-    plan.current_wp_idx = (plan.grid_path.size() > 1) ? 1 : 0; 
+    plan.current_wp_idx = 0;
 
     ctrl.tracker_state = TrackerState::TRACKING;
 }

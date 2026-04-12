@@ -77,11 +77,21 @@ public:
     
     __attribute__((always_inline))
     inline float calculate(float target, float current) {
-        float err = target - current;
-        i_out += params.ki * err;  // ki为 0，可忽略
+        float err = target - current;  // 注意：这里的 err 是弧度
+        
+        // 积分分离 (Integral Separation):当偏差小于 10 度时，才允许 Ki 介入
+        if (std::abs(err) < 0.17f) {
+            i_out += params.ki * err;
+            // 微调补偿限幅：只需要提供约 1.0 rad/s 的旋转补偿就足够克服摩擦力了
+            i_out = std::clamp(i_out, -1.0f, 1.0f);
+        } else {
+            i_out = 0.0f; // 大偏差时，瞬间清空积分，防止回弹过猛
+        }
+        
         float d_term = params.kd * (err - last_err);
         last_err = err;
         return (params.kp * err) + i_out + d_term;
+
     }
 private:
     const PidParams& params;
