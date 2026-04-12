@@ -10,7 +10,7 @@ namespace SystemConfig {
     // 机械参数
     static constexpr float WHEEL_RADIUS = 3.15f;                // 轮子半径，单位：厘米
     static constexpr float HALF_X_AXIS = 9.0f;                  // x 轴半轴距，单位：厘米
-    static constexpr float HALF_Y_AXIS = 9.8f;                  // y 轴半轴距，单位：厘米
+    static constexpr float HALF_Y_AXIS = 10.0f;                 // y 轴半轴距，单位：厘米
 
     // 编码器硬件参数
     static constexpr float ENC_LINES = 1024.0f;                 // 编码器物理线数
@@ -29,7 +29,7 @@ namespace SystemConfig {
     static constexpr int PLAN_START_X = 5;                      // 出库点 X 坐标（网格坐标）
     static constexpr int PLAN_START_Y = 2;                      // 出库点 Y 坐标（网格坐标）
     static constexpr int PLAN_END_X = 5;                        // 入库点 X 坐标（网格坐标）
-    static constexpr int PLAN_END_Y = 0;                        // 入库点 Y 坐标（网格坐标）
+    static constexpr int PLAN_END_Y = 1;                        // 入库点 Y 坐标（网格坐标）
     static constexpr int MAX_BOXES = 5;                         // 最大箱子数
     static constexpr int MAX_BOMBS = 3;                         // 最大炸弹数
     static constexpr int MAX_ENTITIES = 2 * MAX_BOXES;          // 最大实体数（箱子+目标点）

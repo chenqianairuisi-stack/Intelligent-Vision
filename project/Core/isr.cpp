@@ -12,27 +12,32 @@
 
 extern "C" void PIT_IRQHandler(void) {
 
-    // 5ms 定时器中断，优先级最高，用于陀螺仪数据读取与积分，保证底盘姿态更新的及时性
+    // 5ms 定时器中断，用于陀螺仪数据读取与积分
     if(pit_flag_get(PIT_CH0)) 
     {
         pit_flag_clear(PIT_CH0);
 
-        imu_icm42688.update_gyro_only();    // 陀螺仪数据读取与转换
-        Subsystem::PoseEstimator::update_yaw_5ms_tick();   // yaw 角更新 (积分)
+        imu_icm42688.update_gyro_only();                   // 陀螺仪数据读取与转换
+        Subsystem::PoseEstimator::update_yaw_5ms_tick();   // yaw 轴角度更新
     }
     
-    // 20ms 定时器中断，用于底盘控制算法更新，优先级次之，保证底盘控制的稳定性和响应速度
+    // 20ms 定时器中断，用于底盘控制算法更新和里程计推算
     if(pit_flag_get(PIT_CH1)) 
     {
         pit_flag_clear(PIT_CH1);
 
         // 编码器计数更新
         encoders.update_encoders_20ms_tick();
+
+        // 更新底盘是否完全停止的状态
+        Subsystem::Chassis::check_is_stopped(); 
+
         // 全局定位里程计推算 
         Subsystem::PoseEstimator::update_position_20ms_tick(encoders.getAllCounts(), App::g_state.physical.pose.yaw);
+
         // 底盘控制算法更新
         Subsystem::Chassis::update_20ms_tick();      
-        // Subsystem::Chassis::update_20ms_tick_debug(); // 调试模式下的底盘控制更新，包含额外的调试输出
+        // Subsystem::Chassis::update_20ms_tick_debug();
 
     }
     

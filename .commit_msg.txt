@@ -1,8 +1,9 @@
-feat: 重构巡图搜索并扩展5箱体配置，统一TT复用与测试地图
+fix: 修复目标速度未定义编译错误并引入运动学增益补偿
 
-- Exploration: 用 Beam Search 替换巡图 DP，加入候选池裁剪与 TT 去重，重构动作恢复与语义匹配流程
-- Sokoban: 置换表升级为全局共享 TT（65536），统一字段为 sig/value 并完成调用迁移
-- SystemConfig: MAX_BOXES 提升到 5，调整 PLAN_END_Y 到 0
-- GameManage: 规范状态机注释，mock 语义注入改为基于 MAX_BOXES 的自适应索引
-- TestMap: 新增 Map2_3，地图库数量从 5 增至 6
-- Cleanup: 移除临时提交文件 .commit_msg.txt
+- RobotState: 新增 is_stopped 状态
+- ChassisControl: 在 run_speed_loop 中缓存下发控制目标速度，并新增 check_is_stopped 状态更新函数
+- MotionControl: 逆运动学增加基于 kinematic_gain_x 和 kinematic_gain_y 的缩放补偿
+- Tracker: 终末点到达条件增加底盘系统级别 is_stopped 物理静止判断
+- PoseEstimate: IMU 静态标定引入基于统计方差的动态死区(dynamic_deadband)，并基于运动学增益反算里程计位移
+- TuningConfig & Display: 引入 kinematic_gain 动态调参项，并添加手动步进控制菜单项用于测试
+- Core/isr: 时钟中断增加 20ms 内环 check_is_stopped 状态监控调用

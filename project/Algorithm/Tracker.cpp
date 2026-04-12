@@ -79,15 +79,19 @@ __attribute__((section(".ramfunc"))) void PathTracker::update_target() {
 
     // 状态切换判断
     if (dist_sq <= current_radius * current_radius) {
-        plan.current_wp_idx++;
-        if (plan.current_wp_idx >= plan.physical_path.size()) {
-            ctrl.tracker_state = TrackerState::FINISHED;
-        } else {
+        if (!is_last_point) {
+            // 中间点：直接切到下一个点
+            plan.current_wp_idx++;
             target_phys = plan.physical_path[plan.current_wp_idx];
+        } else {
+            // 终点：不仅要求距离足够近，还必须等待底盘物理静止            
+            if (App::g_state.physical.is_stopped) {
+                ctrl.tracker_state = TrackerState::FINISHED;
+            }
         }
     }
 
-    // 组装并输出纯净的数学结果（不带任何控制逻辑的位姿），供控制模块调用
+    // 组装并输出纯净的数学结果，供控制模块调用
     ctrl.current_target.x = target_phys.x;
     ctrl.current_target.y = target_phys.y;
 }

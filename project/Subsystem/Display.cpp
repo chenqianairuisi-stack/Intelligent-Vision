@@ -23,8 +23,9 @@ struct ParamItem { const char* name; float* val_ptr; float step; };
 
 static ParamItem tune_dict[] = {
     {"Yaw_Kp  ",   &tune.pid_yaw.kp,                  0.1f  },
+    {"Yaw_Ki  ",   &tune.pid_yaw.ki,                  0.01f },
     {"Yaw_Kd  ",   &tune.pid_yaw.kd,                  0.01f },
-    {"Spd_Kp  ",   &tune.pid_speed.kp,                0.1f  },
+    {"Spd_Kp  ",   &tune.pid_speed.kp,                0.01f },
     {"Spd_Ki  ",   &tune.pid_speed.ki,                0.01f },
     {"ff_Kv   ",   &tune.ff.kv,                       0.01f },
     {"ff_Ka   ",   &tune.ff.ka,                       1.0f  },
@@ -33,12 +34,10 @@ static ParamItem tune_dict[] = {
     {"Max_Acc ",   &tune.dynamics.max_acc,            10.0f },
     {"MaxJerk ",   &tune.dynamics.max_jerk,           100.0f},
     {"MaxASpd ",   &tune.dynamics.max_ang_speed,      0.1f  },
-    {"ReachRad",   &tune.tracker.reach_radius,        1.0f  },
-    {"ReachMin",   &tune.tracker.reach_radius_min,    0.5f  },
-    {"LF_Spd  ",   &tune.motors.lf_speed,             2.0f  },
-    {"LB_Spd  ",   &tune.motors.lb_speed,             2.0f  },
-    {"RF_Spd  ",   &tune.motors.rf_speed,             2.0f  },
-    {"RB_Spd  ",   &tune.motors.rb_speed,             2.0f  }
+    {"Gain_X  ",   &tune.dynamics.kinematic_gain_x,   0.1f  },
+    {"Gain_Y  ",   &tune.dynamics.kinematic_gain_y,   0.1f  },
+    {"Reach_R ",   &tune.tracker.reach_radius,        0.1f  },
+    {"Reach_M ",   &tune.tracker.reach_radius_min,    0.1f  }
 };
 
 static constexpr int DICT_SIZE = sizeof(tune_dict) / sizeof(tune_dict[0]);     // 自动计算字典大小
@@ -126,8 +125,8 @@ void TftMenu::process_logic() {
 
     switch (current_page) {
         case MenuPage::MAIN_MENU:
-            if (key_down_pressed) cursor_idx = (cursor_idx + 1) % 7;    // 7个主菜单项
-            if (key_up_pressed)   cursor_idx = (cursor_idx == 0) ? 6 : cursor_idx - 1;
+            if (key_down_pressed) cursor_idx = (cursor_idx + 1) % 9;    // 9个主菜单项
+            if (key_up_pressed)   cursor_idx = (cursor_idx == 0) ? 8 : cursor_idx - 1;
 
             if (key_enter_pressed) {
                 if (cursor_idx == 0) {current_page = MenuPage::DASHBOARD; debug_manager.force_bg_redraw = true;}
@@ -155,6 +154,16 @@ void TftMenu::process_logic() {
                 if (cursor_idx == 6) {
                     is_closed = true;
                     tft180_full(RGB565_WHITE); 
+                    return; 
+                }
+
+                if (cursor_idx == 7) {
+                    App::g_state.control.current_target.y += 100;
+                    return; 
+                }
+
+                if (cursor_idx == 8) {
+                    App::g_state.control.current_target.x += 40;
                     return; 
                 }
 
@@ -266,6 +275,8 @@ void TftMenu::draw_main_menu() {
     draw_item(6, "Save Config",cursor_idx == 4);
     draw_item(7, "Load Config",cursor_idx == 5);
     draw_item(8, "Close Menu", cursor_idx == 6); 
+    draw_item(9, "forward",cursor_idx == 7);
+    draw_item(10, "right", cursor_idx == 8); 
 }
 
 void TftMenu::draw_map_select() {

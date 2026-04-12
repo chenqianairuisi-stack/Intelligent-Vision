@@ -55,13 +55,12 @@ namespace {
     __attribute__((always_inline)) inline void run_speed_loop(const WheelSpeed4& targets) {
         const auto& current_speeds = App::g_state.physical.current_wheel_speed;
         const auto& Kv = tune.ff.kv;
-        const auto& Ka = tune.ff.ka;
 
         // 计算前馈占空比 (简单的线性模型)，并加入符号判断实现静摩擦补偿
-        float ff_lf = get_sign(targets.lf) * Ka + targets.lf * Kv;
-        float ff_lb = get_sign(targets.lb) * Ka + targets.lb * Kv;
-        float ff_rf = get_sign(targets.rf) * Ka + targets.rf * Kv;
-        float ff_rb = get_sign(targets.rb) * Ka + targets.rb * Kv;
+        float ff_lf = targets.lf * Kv;
+        float ff_lb = targets.lb * Kv;
+        float ff_rf = targets.rf * Kv;
+        float ff_rb = targets.rb * Kv;
 
         // 速度环增量式 PID 计算占空比输出
         float duty_lf = ff_lf + pid_wheels[0].calculate(targets.lf, current_speeds.lf);
@@ -135,6 +134,16 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick_debug() {
 
     run_speed_loop(debug_speeds);
 
+}
+
+__attribute__((section(".ramfunc"))) void check_is_stopped() {
+
+    const auto& cur_spd = App::g_state.physical.current_wheel_speed;
+        
+    // 判定条件：上一帧的控制目标几乎为0，且当前四个轮子的真实反馈速度极小
+    App::g_state.physical.is_stopped = 
+        (std::abs(cur_spd.lf) < 0.5f && std::abs(cur_spd.lb) < 0.5f &&
+         std::abs(cur_spd.rf) < 0.5f && std::abs(cur_spd.rb) < 0.5f);
 }
 
 }

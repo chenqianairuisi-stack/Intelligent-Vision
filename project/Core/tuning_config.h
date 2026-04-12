@@ -24,6 +24,8 @@ struct TuningConfig {
         float max_acc;           // 跟踪时的最大加速度 (cm/s^2)
         float max_jerk;          // 跟踪时的最大加加速度 (cm/s^3)
         float max_ang_speed;     // 跟踪时的最大角速度 (rad/s)
+        float kinematic_gain_x;  // 运动学增益 x
+        float kinematic_gain_y;  // 运动学增益 y
     }dynamics;
 
     struct {
@@ -42,7 +44,7 @@ struct TuningConfig {
 
 // 全局调参实例，放在 DTCM 区域，供所有模块访问
 __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
-    {2.5f, 0.0f, 0.8f},         // pid_yaw
+    {9.2f, 0.0f, 0.9f},         // pid_yaw
     {0.4f, 0.4f, 0.0f},         // pid_speed
     {0.1f, 4.0f},               // feedforward
 
@@ -52,7 +54,9 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
         120.0f,    // max_speed
         85.0f,     // max_acc
         1000.0f,   // max_jerk
-        2.0f       // max_ang_speed
+        2.0f,      // max_ang_speed
+        1.0f,      // kinematic_gain_x
+        1.0f       // kinematic_gain_y
     },
     
     // Tracker 几何预测参数

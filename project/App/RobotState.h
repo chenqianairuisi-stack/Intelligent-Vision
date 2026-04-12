@@ -105,6 +105,7 @@ struct RobotState {
     struct {
         Pose2D pose = {0.0f, 0.0f, SystemConfig::ENTRY_YAW};          // 当前物理位姿 (cm/deg)
         WheelSpeed4 current_wheel_speed = {0.0f, 0.0f, 0.0f, 0.0f};   // 当前四轮速度 (cm/s)
+        bool is_stopped = true;                                       // 底盘是否完全停止 
     } physical;
 
     // 6. 调试与遥测层 (供 Telemetry 写入，UI/波形 读取)

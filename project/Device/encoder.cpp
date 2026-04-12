@@ -50,7 +50,7 @@ void EncoderArray::update_encoders_20ms_tick() {
             case 0: wheel_speed.lf = speed_cm_s; break;
             case 1: wheel_speed.lb = speed_cm_s; break;
             case 2: wheel_speed.rf = speed_cm_s; break;
-            default: wheel_speed.rb = speed_cm_s; break;
+            case 3: wheel_speed.rb = speed_cm_s; break;
         }
 
         // 更新历史绝对值

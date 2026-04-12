@@ -23,7 +23,7 @@ extern "C" int main(void) {
     Subsystem::Vision::init();                // 视觉模块初始化 (uart)
     Subsystem::Chassis::init();               // 控制模块初始化 (motor, encoder)
 
-    // Storage::init();                          // 存储模块初始化，加载参数 (flash)
+    Storage::init();                          // 存储模块初始化，加载参数 (flash)
     sys_menu.init();                          // 系统菜单初始化 (tft180)
     debug_manager.init();                     // 游戏管理器初始化 (读取拨码开关，设置初始阶段)
     debug_manager.inject_mock_semantics();    // 注入虚拟视觉标签，供没有摄像头时的调试使用

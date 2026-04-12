@@ -14,11 +14,13 @@ namespace Kinematics {
 
     __attribute__((always_inline))
     inline WheelSpeed4 inverse(float vx, float vy, float vw) noexcept {
+        float vx_compensated = vx * tune.dynamics.kinematic_gain_x;
+        float vy_compensated = vy * tune.dynamics.kinematic_gain_y; 
         return {
-            vy + vx - vw * L,  // LF
-            vy - vx - vw * L,  // LB
-            vy - vx + vw * L,  // RF
-            vy + vx + vw * L   // RB
+            vy_compensated + vx_compensated - vw * L,  // LF
+            vy_compensated - vx_compensated - vw * L,  // LB
+            vy_compensated - vx_compensated + vw * L,  // RF
+            vy_compensated + vx_compensated + vw * L   // RB
         };
     }
 
