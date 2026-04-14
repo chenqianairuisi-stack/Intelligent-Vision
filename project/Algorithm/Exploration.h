@@ -63,7 +63,7 @@ private:
     SokobanLevel cached_level;                           // 初始时刻的地图
 
     // 生成合法观测点
-    void generate_obs_points();                          
+    void generate_obs_points();
     
     // 寻路函数：支持多重地图分支（不同炸弹爆炸后的地形）
     uint16_t bfs_shortest_path(const SokobanLevel& lvl, point start, point end);

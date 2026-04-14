@@ -9,8 +9,8 @@ struct MockMapDef {
     const char* layout[SystemConfig::MAP_MAX_HEIGHT];
 };
 
-extern const MockMapDef mock_map_library[6];    // 静态只读地图库
-constexpr uint8_t MOCK_MAP_COUNT = 6;           // 地图库中地图的总数
+extern const MockMapDef mock_map_library[7];    // 静态只读地图库
+constexpr uint8_t MOCK_MAP_COUNT = 7;           // 地图库中地图的总数
 
 namespace TestMap {
     uint8_t get_mock_map_count();                // 获取地图库中地图的总数

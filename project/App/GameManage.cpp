@@ -114,6 +114,15 @@ void GameManager::inject_mock_semantics() {
         mock_truth_labels[i] = i + 1;         // 箱子 ID
         mock_truth_labels[num + i] = i + 1;     // 目标 ID 起始偏移 = BOXE_COUNT，确保不与箱子 ID 冲突
     }
+
+    // 手动指定标签进行测试
+    // mock_truth_labels[0] = 2;    
+    // mock_truth_labels[1] = 3;    
+    // mock_truth_labels[2] = 1;    
+    // mock_truth_labels[logical_level.box_count] = 1;     
+    // mock_truth_labels[logical_level.box_count + 1] = 2;  
+    // mock_truth_labels[logical_level.box_count + 2] = 3;   
+
 }
 
 
@@ -258,8 +267,9 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             // 朝向收敛后触发 ART2 捕捉
             if (err_yaw < 5.0f) { 
 
+                // 调试模式：直接写入语义标签，模拟 ART2 识别结果
                 if (game.is_debug_mode) {
-                    // 调试模式：直接写入语义标签，模拟 ART2 识别结果
+                    
                     uint8_t entity_id = patrol_actions[game.action_idx].obs.entity_id;
                     vision_data.semantic_labels[entity_id] = mock_truth_labels[entity_id];
 
@@ -270,6 +280,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     break;
                 }
 
+                // 正常模式：请求 ART2 捕捉该观测点对应实体的语义标签
                 uint8_t current_entity = patrol_actions[game.action_idx].obs.entity_id;
                 bool is_box = patrol_actions[game.action_idx].obs.is_box;
                 Subsystem::Vision::request_capture_ART2(current_entity, is_box);
