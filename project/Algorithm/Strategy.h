@@ -23,8 +23,8 @@ struct BombCandidate {
 // DFS 最优结果
 struct DFSResult {
     StaticArray<BombTask, MAX_BOMBS> tasks;
-    int deadlocks_remaining;
-    int net_profit;
+    int deadlocks_remaining; // 执行完 tasks 后剩余的死锁数量（越少越好）
+    int net_profit; // 执行完 tasks 后的净收益评估值（越高越好）
 };
 
 // 战略规划器：通过 DFS 推演寻找全局最优炸弹策略
@@ -50,8 +50,8 @@ private:
     // 内部物理与搜索工具函数
     void calc_player_reach(const SokobanLevel& lvl, point start_pos, point ignored_obj, point extra_obs, bool out_visited[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]);
     void fast_push_bfs(const SokobanLevel& lvl, point start_obj, point player_start, bool is_bomb, int16_t out_dist[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]);
-    bool has_entity(const SokobanLevel& lvl, int x, int y, int ignored_bomb) const;
-    bool is_obstacle(const SokobanLevel& lvl, point p, point ignored_obj) const;
+    bool has_entity(const SokobanLevel& lvl, int x, int y, int ignored_bomb) const;  // 检测指定坐标是否有箱子/目标/炸弹（可选择忽略某个炸弹）
+    bool is_obstacle(const SokobanLevel& lvl, point p, point ignored_obj) const;  // 检测指定坐标是否为墙或箱子或炸弹（可选择忽略某个对象）
 };
 
 extern StrategicPlanner strategic_planner;
