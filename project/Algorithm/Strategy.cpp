@@ -195,7 +195,7 @@ void StrategicPlanner::dfs_bomb_sequence(
     std::sort(candidates.begin(), candidates.end());
 
     // 每层只取最靠谱的 Top 6 动作进行递归
-    int branch_limit = candidates.size() < 10 ? candidates.size() : 10;
+    int branch_limit = candidates.size() < 6 ? candidates.size() : 6;
 
     for (int i = 0; i < branch_limit; ++i) {
         BombCandidate c = candidates[i];

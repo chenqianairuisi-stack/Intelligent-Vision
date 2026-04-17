@@ -44,25 +44,25 @@ struct TuningConfig {
 
 // 全局调参实例，放在 DTCM 区域，供所有模块访问
 __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
-    {9.0f, 0.0f, 0.9f},         // pid_yaw
-    {0.4f, 0.2f, 0.0f},         // pid_speed
-    {0.16f, 0.0f},               // feedforward
+    {9.0f, 0.5f, 0.6f},         // pid_yaw
+    {0.2f, 0.1f, 0.0f},         // pid_speed
+    {0.1f, 0.0f},               // feedforward
 
     // Dynamics 动力学预测参数
     {
-        70.0f,     // max_duty
-        100.0f,    // max_speed
-        75.0f,     // max_acc
-        200.0f,   // max_jerk
+        65.0f,     // max_duty
+        120.0f,    // max_speed
+        80.0f,     // max_acc
+        1200.0f,   // max_jerk
         3.0f,      // max_ang_speed
-        1.0f,      // kinematic_gain_x
-        1.0f       // kinematic_gain_y
+        1.03f,     // kinematic_gain_x
+        1.01f      // kinematic_gain_y
     },
     
     // Tracker 几何预测参数
     {
-        1.5f,     // reach_radius: 10cm 切弯
-        0.8f       // reach_radius_min: 终点停稳极小宽容度
+        0.8f,     // reach_radius: 10cm 切弯
+        0.4f       // reach_radius_min: 终点停稳极小宽容度
     },
     
     // Motors 电机速度调节参数 (用于测试电机接线和转向)

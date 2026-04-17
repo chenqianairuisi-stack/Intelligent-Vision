@@ -41,12 +41,13 @@ __attribute__((section(".dtcm_data"))) static BombPathWorkspace b_ws;
 
 
 // ============================================================================
-// [模块 1] 地图解析与点位生成
+// [模块 1] 预处理
 // ============================================================================
 void Exploration::load_level(const SokobanLevel& level) {
     this->cached_level = level; 
 }
 
+// 生成合法观测点：每个实体（箱子/目标点）周围四个方向，如果该格子不撞墙且不被其他实体占用，则是一个合法观测点
 void Exploration::generate_obs_points() {
     obs_points.clear();
     total_entities = 0;
@@ -82,6 +83,84 @@ void Exploration::generate_obs_points() {
 }
 
 
+// 炸弹任务时间线优化：在原始炸弹任务列表基础上，尝试所有排列组合，评估每种组合下的总行驶代价，返回最优的炸弹执行顺序
+__attribute__((section(".ramfunc")))
+StaticArray<BombTask, MAX_BOMBS> Exploration::optimize_bomb_timeline(
+    const SokobanLevel& initial_lvl, 
+    point start_pos, 
+    const StaticArray<BombTask, MAX_BOMBS>& raw_tasks) 
+{
+    // 只有 1 个或 0 个炸弹，直接返回，不需要重排
+    if (raw_tasks.size() <= 1) return raw_tasks;
+
+    StaticArray<BombTask, MAX_BOMBS> best_seq = raw_tasks;
+    uint32_t best_cost = 0xFFFFFFFF; // 最优空间行驶代价
+    
+    bool used[MAX_BOMBS] = {false};
+    StaticArray<BombTask, MAX_BOMBS> current_seq;
+
+    // 微型 DFS：仅推演炸弹的 120 种排列组合 (耗时 < 1ms)
+    auto dfs_perm = [&](auto& self, const SokobanLevel& lvl, point current_pos, uint32_t cost) -> void {
+        // 如果找到了一种完整的合法排列
+        if (current_seq.size() == raw_tasks.size()) {
+            if (cost < best_cost) {
+                best_cost = cost;
+                best_seq = current_seq;
+            }
+            return;
+        }
+
+        // 剪枝：如果当前排列的代价已经不如已知最优解，直接放弃
+        if (cost >= best_cost) return;
+
+        // 尝试把剩下还没执行的炸弹排在下一步
+        for (int i = 0; i < raw_tasks.size(); ++i) {
+            if (!used[i]) {
+                StaticArray<point, MAX_PATH_LENGTH> dummy_path;
+                
+                // 核心决策：如果该炸弹必须依赖别的炸弹先炸，这里必然返回 false，从而自动剪掉这个排列组合分支
+                if (this->get_bomb_push_path(lvl, current_pos, raw_tasks[i], dummy_path)) {
+                    
+                    used[i] = true;
+                    current_seq.push_back(raw_tasks[i]);
+
+                    // 计算车从当前位置开到这颗炸弹的物理距离
+                    uint16_t dist = this->bfs_shortest_path(lvl, current_pos, raw_tasks[i].bomb_start);
+                    
+                    // 构造它爆炸后的平行宇宙地图
+                    SokobanLevel next_lvl = lvl;
+                    for (int b = 0; b < next_lvl.bomb_count; ++b) {
+                        if (next_lvl.bombs[b].x != -1 && next_lvl.bombs[b] == raw_tasks[i].bomb_start) {
+                            next_lvl.bombs[b] = {-1, -1}; break; // 抹除本体
+                        }
+                    }
+                    point tw = raw_tasks[i].target_wall;
+                    for (int dy = -1; dy <= 1; ++dy) {
+                        for (int dx = -1; dx <= 1; ++dx) {
+                            if (tw.y+dy > 0 && tw.y+dy < MAP_MAX_HEIGHT-1 && tw.x+dx > 0 && tw.x+dx < MAP_MAX_WIDTH-1) {
+                                next_lvl.map[tw.y+dy][tw.x+dx] = 0; // 抹除墙壁
+                            }
+                        }
+                    }
+
+                    // 递归下一层：车的落脚点粗略认为是炸弹目标墙
+                    self(self, next_lvl, tw, cost + dist);
+
+                    // 回溯
+                    current_seq.pop_back();
+                    used[i] = false;
+                }
+            }
+        }
+    };
+
+    // 启动推演
+    dfs_perm(dfs_perm, initial_lvl, start_pos, 0);
+
+    return best_seq;
+}
+
+
 // ============================================================================
 // [模块 2] 巡图规划器核心算法：多重分支 3D 深搜 + 微型 L1 Cache 置换表
 // ===========================================================================
@@ -97,7 +176,7 @@ struct BoundingContext {
 
 __attribute__((section(".ramfunc"))) 
 StaticArray<PatrolAction, 32> Exploration::plan_optimal_patrol(
-    point start_pos, const StaticArray<BombTask, MAX_BOMBS>& bomb_tasks) 
+    point start_pos, const StaticArray<BombTask, MAX_BOMBS>& raw_bomb_tasks) 
 {
     // 总体流程：
     // 1) 生成可执行观测的候选点 obs_points；
@@ -107,7 +186,7 @@ StaticArray<PatrolAction, 32> Exploration::plan_optimal_patrol(
 
     generate_obs_points();
     int M = obs_points.size();
-    int B = bomb_tasks.size();
+    int B = raw_bomb_tasks.size();
 
     if (M == 0 || total_entities == 0) return StaticArray<PatrolAction, 32>();
     const int MACRO_NODE = M;  // 额外宏节点：表示“执行炸弹任务”。其索引固定为 M
@@ -119,6 +198,8 @@ StaticArray<PatrolAction, 32> Exploration::plan_optimal_patrol(
     //====================================================================
     // 阶段 1：逐步推演炸弹任务对地形的影响，构建多地图快照
     //====================================================================
+    auto bomb_tasks = optimize_bomb_timeline(cached_level, start_pos, raw_bomb_tasks);
+
     for (int k = 0; k < B; ++k) {
         // 先从上一阶段地图复制，再叠加第 k 个炸弹任务带来的变化。
         multi_maps[k + 1] = multi_maps[k];

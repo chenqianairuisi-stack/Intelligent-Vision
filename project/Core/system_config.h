@@ -42,8 +42,8 @@ namespace SystemConfig {
     static constexpr float ENTRY_X = 110.0f;                    // 入口位置 X 坐标
     static constexpr float ENTRY_Y = 10.0f;                     // 入口位置 Y 坐标
     static constexpr float ENTRY_YAW = 90.0f;                   // 入口位置航向（单位：度，0度为x轴正方向，逆时针为正）
-    static constexpr float OUT_TARGET_X = 110.0f;               // 出库目标位置 X 坐标
-    static constexpr float OUT_TARGET_Y = 50.0f;                // 出库目标位置 Y 坐标
+    static constexpr float OUT_TARGET_X = 90.0f;                // 出库目标位置 X 坐标
+    static constexpr float OUT_TARGET_Y = 30.0f;                // 出库目标位置 Y 坐标
 
     // 数学常数
     static constexpr float DEG_TO_RAD = 3.1415926535f / 180.0f;

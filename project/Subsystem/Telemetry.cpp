@@ -45,8 +45,37 @@ void init() {
     wireless_uart_init();  // 初始化无线串口 (波特率默认115200)
 }
 
+
+
+// 语义缓存池内容发送给上位机
+void dump_semantic_cache() {
+    char dump_buf[160];
+    const auto& labels = App::g_state.vision.semantic_labels;
+    
+    // 组装前缀
+    int offset = snprintf(dump_buf, sizeof(dump_buf), "[SEMANTIC_DUMP] ");
+    
+    // 遍历整个语义池（假设 MAX_ENTITIES 不会过大，否则需要分包）
+    for (int i = 0; i < SystemConfig::MAX_ENTITIES; ++i) {
+        // 安全追加字符串，防止越界
+        if (offset < sizeof(dump_buf) - 10) {
+            offset += snprintf(dump_buf + offset, sizeof(dump_buf) - offset, 
+                                "ID%d:%d ", i, labels[i]);
+        }
+    }
+    
+    // 添加回车换行，方便 VOFA+ 终端显示
+    offset += snprintf(dump_buf + offset, sizeof(dump_buf) - offset, "\r\n");
+    
+    // 阻塞/异步推入发送缓冲
+    wireless_uart_send_buffer(reinterpret_cast<uint8_t*>(dump_buf), offset);
+}
+
 // 发送波形数据
 void send_wave_data() {
+
+    if (App::g_state.debug.telemetry_mode == -1) return; 
+
     if (App::g_state.debug.telemetry_mode == 0) {
         // 【模式 0】：底盘动力学监控
         const auto& current_pose = App::g_state.physical.pose;
@@ -74,24 +103,11 @@ void send_wave_data() {
         tx_packet.data_2 = vision_data.art1_pose.y;    // CH2: 视觉 Y 坐标
         tx_packet.data_3 = vision_data.box_count;      // CH4: 解析出的箱子总数
         tx_packet.data_4 = vision_data.bomb_count;     // CH5: 解析出的炸弹总数
-        // CH5: 地图就绪脉冲信号 (视觉模块每次解析出新地图时会置位一次，发送后立即清零)
-        tx_packet.data_5 = vision_data.art1_map_ready ? 10.0f : 0.0f; 
-        vision_data.art1_map_ready = false;
-        // CH6: 定位更新脉冲信号
-        tx_packet.data_6 = vision_data.art1_pose_updated ? 10.0f : 0.0f; 
-        vision_data.art1_pose_updated = false;
-        
+        tx_packet.data_5 = 0.0f; 
+        tx_packet.data_6 = 0.0f;         
     } 
     else if (App::g_state.debug.telemetry_mode == 2) {
-        auto& vision_data = App::g_state.vision;
-        // 【模式 2】：ART2 语义识别监控
-        tx_packet.data_1 = (float)vision_data.semantic_labels[0]; // CH1: 实体 0 的标签
-        tx_packet.data_2 = (float)vision_data.semantic_labels[1]; // CH2: 实体 1 的标签
-        tx_packet.data_3 = (float)vision_data.semantic_labels[2]; // CH3: 实体 2 的标签
-        tx_packet.data_4 = (float)vision_data.semantic_labels[3]; // CH4: 实体 3 的标签
-        tx_packet.data_5 = (float)vision_data.semantic_labels[4]; // CH5: 实体 4 的标签
-        tx_packet.data_6 = (float)vision_data.semantic_labels[5]; // CH6: 实体 5 的标签
-        vision_data.capture_ack_received = false;
+
     }
 
     wireless_uart_send_buffer((uint8*)&tx_packet, sizeof(VofaJustFloat));
@@ -126,7 +142,9 @@ void receive_and_parse_task() {
     }
 }
 
-
+// ====================================================================
+// 内部实现细节：命令解析与执行
+// ====================================================================
 namespace {
     // 解析并执行上位机发来的字符串命令 (格式示例: "!S Q 1.5" 表示设置速度环 KP=1.5)
     void execute_command(const char* cmd) {
@@ -143,29 +161,40 @@ namespace {
         switch (type) {
             case 'S':  // 参数设置指令
                 switch (sub) {
-                    case 'Q': tune.pid_speed.kp = value; break;
-                    case 'W': tune.pid_speed.ki = value; break;
-                    case 'E': tune.pid_yaw.kp = value; break;
-                    case 'R': tune.pid_yaw.kd = value; break;
+                    case 'Q': tune.pid_yaw.kp = value; break;
+                    case 'W': tune.pid_yaw.ki = value; break;
+                    case 'E': tune.pid_yaw.kd = value; break;
+                    case 'R': tune.pid_speed.kp = value; break;
+                    case 'T': tune.pid_speed.ki = value; break;
+                    case 'Y': tune.pid_speed.kd = value; break;
+                    case 'U': tune.ff.kv = value; break;
+                    case 'I': tune.ff.ka = value; break;
+                    
+                    case 'A': tune.dynamics.max_duty = value; break;
+                    case 'S': tune.dynamics.max_speed = value; break;
+                    case 'D': tune.dynamics.max_acc = value; break;
+                    case 'F': tune.dynamics.max_jerk = value; break;
+                    case 'G': tune.dynamics.max_ang_speed = value; break;
 
-                    case 'A': tune.dynamics.max_speed = value; break;
-                    case 'S': tune.dynamics.max_acc = value; break;
-                    case 'D': tune.dynamics.max_jerk = value; break;
-                    case 'F': tune.dynamics.max_ang_speed = value; break;
+                    case 'Z': tune.dynamics.kinematic_gain_x = value; break;
+                    case 'X': tune.dynamics.kinematic_gain_y = value; break;
+                    case 'C': tune.tracker.reach_radius = value; break;
+                    case 'V': tune.tracker.reach_radius_min = value; break;
 
-                    case 'Z': tune.tracker.reach_radius = value; break;
-                    case 'X': tune.tracker.reach_radius_min = value; break;
-
-                    case 'V': App::g_state.debug.telemetry_mode = (int)value; break; 
+                    case 'P': App::g_state.debug.telemetry_mode = (int)value; break; 
                     default: return;
                 }
                 break;
             
             case 'C':  // 视觉控制类指令
                 switch (sub) {
-                    case 'M': Subsystem::Vision::request_map_ART1();  break;
-                    case 'P': Subsystem::Vision::request_pose_ART1(); break;
-                    case 'T': Subsystem::Vision::request_capture_ART2((uint8_t)value, true); break;
+                    case 'R': {
+                        if (value == 1) Subsystem::Vision::request_map_ART1();
+                        else if (value == 2) Subsystem::Vision::request_pose_ART1();
+                        break;
+                    }
+                    case 'G': dump_semantic_cache(); break;
+                    default: return;
                 }
                 break;
 
@@ -187,4 +216,5 @@ namespace {
         }
     }
     } // namespace (anonymous)
+
 } // namespace Subsystem::Telemetry

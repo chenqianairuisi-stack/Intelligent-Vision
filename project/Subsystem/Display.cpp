@@ -23,7 +23,7 @@ namespace { // 匿名命名空间，确保这些数据只在本文件可见
 
     // 所有的 UI 状态收敛进一个 Context 结构体
     struct UIContext {
-        MenuPage current_page = MenuPage::DASHBOARD;   // 当前页面
+        MenuPage current_page = MenuPage::MAIN_MENU;   // 当前页面
         uint8_t  cursor_idx = 0;                       // 当前选中行
         uint8_t  scroll_offset = 0;                    // 用于参数列表的上下滚动翻页
         uint8_t  map_cursor_idx = 0;                   // 地图页面的光标位置

@@ -64,6 +64,8 @@ private:
 
     // 生成合法观测点
     void generate_obs_points();
+    // 炸弹任务时间线优化
+    StaticArray<BombTask, MAX_BOMBS> optimize_bomb_timeline(const SokobanLevel& initial_lvl, point start_pos, const StaticArray<BombTask, MAX_BOMBS>& raw_tasks);
     
     // 寻路函数：支持多重地图分支（不同炸弹爆炸后的地形）
     uint16_t bfs_shortest_path(const SokobanLevel& lvl, point start, point end);

@@ -276,7 +276,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     logical_patrol_pos = patrol_actions[game.action_idx].obs.pos; 
                     game.action_idx++;
 
-                    game.phase = GamePhase::EXEC_ACTION_DISPATCH; // 直接进入语义绑定阶段
+                    game.phase = GamePhase::EXEC_ACTION_DISPATCH;
                     break;
                 }
 
@@ -290,6 +290,8 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
         }
 
         case GamePhase::WAIT_ART2_CAPTURE_ACK: {
+            // Subsystem::Vision::test_loopback_art2_ack(); // ~~~调试阶段短接 ACK 测试~~~
+
             // 等待 ART2 捕捉 ACK；ACK 到达即进入下一个宏动作
             if (vision_data.capture_ack_received) {
                 vision_data.capture_ack_received = false;
@@ -852,12 +854,11 @@ void DebugGameManager::demo_remove_bomb(point p) {
 // ====================================================================
 // 对外接口实现
 // ====================================================================
-
 void init() {
     core_engine.init();
     App::g_state.debug.need_bg_redraw = true;
 }
-
+ 
 __attribute__((section(".ramfunc"))) void update() {
     if (App::g_state.game.is_demo_mode) {
         core_engine.update();

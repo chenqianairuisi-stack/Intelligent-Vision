@@ -16,7 +16,10 @@ namespace Subsystem::Vision {
     // 寻图前清空缓存
     void reset_semantic_labels();  
 
-};
+    // 调试函数
+    void test_loopback_art2_ack();
+
+}
 
 /**
  * @brief RT1064 与 OpenART 通信协议总结

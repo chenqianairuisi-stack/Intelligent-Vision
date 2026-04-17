@@ -139,6 +139,7 @@ namespace {
 // 对外公开接口实现
 // ====================================================================
 
+// 初始化函数：设置串口，清空状态
 void init() {
     uart_cam1.Init();uart_cam2.Init();
     reset_semantic_labels();
@@ -167,6 +168,7 @@ void request_capture_ART2(uint8_t entity_id, bool is_box) {
     uart_cam2.send_packet(CMD_TRIG_CAPTURE, payload, 2);
 }
 
+// 主更新函数：轮询解析器，处理完整帧
 __attribute__((section(".ramfunc"))) void update() {
     if (step_parser(uart_cam1, parser_art1)) {
         process_art1_packet();
@@ -175,5 +177,13 @@ __attribute__((section(".ramfunc"))) void update() {
         process_art2_packet();
     }
 }
+
+// 调试专用：向自己发送 ART2 的 ACK 帧 (用于短接 TX/RX 环回测试)
+void test_loopback_art2_ack() {
+    // 构造一帧完美的 ART2 ACK 数据包
+    uint8_t dummy_payload[1] = {0x01}; 
+    uart_cam2.send_packet(MSG_CAPTURE_ACK, dummy_payload, 1);
+}
+
 
 }

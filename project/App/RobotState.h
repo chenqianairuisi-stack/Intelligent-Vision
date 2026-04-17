@@ -108,9 +108,9 @@ struct RobotState {
         bool is_stopped = true;                                       // 底盘是否完全停止 
     } physical;
 
-    // 6. 调试信息 (仅供调试显示，不参与业务逻辑)
+    // 6. 其他调试信息
     struct {
-        int telemetry_mode = 0;          // 波形显示模式
+        int telemetry_mode = -1;         // 波形显示模式（默认不显示）
         bool need_bg_redraw = true;      // UI 背景重绘请求标志
     } debug;
 };
