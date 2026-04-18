@@ -6,6 +6,7 @@
 #include <cstring>
 #include <cmath>
 
+#include "CoreScheduler.h"
 #include "Vision.h"
 #include "TestMap.h"
 #include "MotionControl.h"
@@ -18,7 +19,7 @@
 namespace Subsystem::Telemetry {
 
 // ====================================================================
-// 内部隐蔽变量：VOFA 协议体和接收缓存 (绝对不污染外部环境)
+// 内部隐蔽变量：VOFA 协议体和接收缓存
 // ====================================================================
 namespace {
     #pragma pack(push, 1)
@@ -34,7 +35,14 @@ namespace {
     char rx_cmd_buf[64];
     uint8_t rx_idx = 0;
 
-    void execute_command(const char* cmd);
+    bool is_timing_movement = false;  // 测时器状态标志
+    uint32_t movement_start_time = 0;  // 运动开始的系统时间戳 (ms)
+    ControlMode current_timing_mode = ControlMode::MANUAL_DEBUG;  // 当前测时器关联的控制模式
+
+    void start_movement_timing(ControlMode mode);  // 触发测时器
+    void check_movement_completion();  // 在后台循环中检查测时器状态，计算并发送结果
+    void dump_semantic_cache();  // 发送语义缓存内容
+    void execute_command(const char* cmd);  // 命令解析函数声明
 }
 
 // ====================================================================
@@ -45,31 +53,6 @@ void init() {
     wireless_uart_init();  // 初始化无线串口 (波特率默认115200)
 }
 
-
-
-// 语义缓存池内容发送给上位机
-void dump_semantic_cache() {
-    char dump_buf[160];
-    const auto& labels = App::g_state.vision.semantic_labels;
-    
-    // 组装前缀
-    int offset = snprintf(dump_buf, sizeof(dump_buf), "[SEMANTIC_DUMP] ");
-    
-    // 遍历整个语义池（假设 MAX_ENTITIES 不会过大，否则需要分包）
-    for (int i = 0; i < SystemConfig::MAX_ENTITIES; ++i) {
-        // 安全追加字符串，防止越界
-        if (offset < sizeof(dump_buf) - 10) {
-            offset += snprintf(dump_buf + offset, sizeof(dump_buf) - offset, 
-                                "ID%d:%d ", i, labels[i]);
-        }
-    }
-    
-    // 添加回车换行，方便 VOFA+ 终端显示
-    offset += snprintf(dump_buf + offset, sizeof(dump_buf) - offset, "\r\n");
-    
-    // 阻塞/异步推入发送缓冲
-    wireless_uart_send_buffer(reinterpret_cast<uint8_t*>(dump_buf), offset);
-}
 
 // 发送波形数据
 void send_wave_data() {
@@ -106,9 +89,6 @@ void send_wave_data() {
         tx_packet.data_5 = 0.0f; 
         tx_packet.data_6 = 0.0f;         
     } 
-    else if (App::g_state.debug.telemetry_mode == 2) {
-
-    }
 
     wireless_uart_send_buffer((uint8*)&tx_packet, sizeof(VofaJustFloat));
 }
@@ -146,6 +126,82 @@ void receive_and_parse_task() {
 // 内部实现细节：命令解析与执行
 // ====================================================================
 namespace {
+
+    // 触发测时器
+    void start_movement_timing(ControlMode mode) {
+        is_timing_movement = true;
+        current_timing_mode = mode;
+        movement_start_time = Core::Scheduler::get_sys_tick_ms(); 
+        
+        const char* msg = "[SYS] Movement Started.\r\n";
+        wireless_uart_send_buffer((uint8_t*)msg, strlen(msg));
+    }
+
+    // 在后台循环中检查运动是否结束
+    void check_movement_completion() {
+        if (!is_timing_movement) return;
+
+        bool is_done = false;
+        const auto& ctrl = App::g_state.control;
+        const auto& phys = App::g_state.physical;
+
+        if (current_timing_mode == ControlMode::AUTO_TRACKING) {
+            // 路径循迹模式：听从 Tracker 的状态报告
+            if (ctrl.tracker_state == TrackerState::FINISHED) {
+                is_done = true;
+            }
+        } else {
+            // 单点调试模式：根据物理状态反馈闭环判断
+            float dx = ctrl.current_target.x - phys.pose.x;
+            float dy = ctrl.current_target.y - phys.pose.y;
+            float dist = std::sqrt(dx * dx + dy * dy);
+            
+            // 航向误差归一化 [-180, 180]
+            float dyaw = ctrl.current_target.yaw - phys.pose.yaw;
+            while (dyaw > 180.0f) dyaw -= 360.0f;
+            while (dyaw < -180.0f) dyaw += 360.0f;
+
+            // 严苛结束条件：位置误差 < 2cm，角度误差 < 2度，且底层速度环判定彻底静止
+            if (dist < 0.8f && std::abs(dyaw) < 2.0f && phys.is_stopped) {
+                is_done = true;
+            }
+        }
+
+        // 触发完成，结算耗时
+        if (is_done) {
+            uint32_t elapsed_ms = Core::Scheduler::get_sys_tick_ms() - movement_start_time;
+            is_timing_movement = false;
+            
+            char msg[64];
+            int len = snprintf(msg, sizeof(msg), "[SYS] Target Reached! Time: %lu ms\r\n", elapsed_ms);
+            wireless_uart_send_buffer((uint8_t*)msg, len);
+        }
+    }
+
+    // 语义缓存池内容发送给上位机
+    void dump_semantic_cache() {
+        char dump_buf[160];
+        const auto& labels = App::g_state.vision.semantic_labels;
+        
+        // 组装前缀
+        int offset = snprintf(dump_buf, sizeof(dump_buf), "[SEMANTIC_DUMP] ");
+        
+        // 遍历整个语义池（假设 MAX_ENTITIES 不会过大，否则需要分包）
+        for (int i = 0; i < SystemConfig::MAX_ENTITIES; ++i) {
+            // 安全追加字符串，防止越界
+            if (offset < sizeof(dump_buf) - 10) {
+                offset += snprintf(dump_buf + offset, sizeof(dump_buf) - offset, 
+                                    "ID%d:%d ", i, labels[i]);
+            }
+        }
+        
+        // 添加回车换行，方便 VOFA+ 终端显示
+        offset += snprintf(dump_buf + offset, sizeof(dump_buf) - offset, "\r\n");
+        
+        // 阻塞/异步推入发送缓冲
+        wireless_uart_send_buffer(reinterpret_cast<uint8_t*>(dump_buf), offset);
+    }
+
     // 解析并执行上位机发来的字符串命令 (格式示例: "!S Q 1.5" 表示设置速度环 KP=1.5)
     void execute_command(const char* cmd) {
 
@@ -198,10 +254,50 @@ namespace {
                 }
                 break;
 
-            case 'M': {  // 全局移动类指令
-                Pose2D target = { cur_pos.x, cur_pos.y, cur_yaw_deg };
+            case 'P': { // 多点路径下发指令
+                auto& plan = App::g_state.planning;
+                if (sub == 'C') { 
+                    // !P C -> 清空航点列表
+                    plan.physical_path.clear();
+                    plan.current_wp_idx = 0;
+                    wireless_uart_send_buffer((uint8_t*)"[PATH] Cleared.\r\n", 17);
+                } 
+                else if (sub == 'A') { 
+                    // !P A 10.5 20.0 -> 添加航点
+                    float px, py;
+                    if (sscanf(&cmd[3], "%f %f", &px, &py) == 2) {
+                        if (plan.physical_path.size() < SystemConfig::MAX_PATH_LENGTH) {
+                            plan.physical_path.push_back({px, py});
+                        }
+                    }
+                }
+                else if (sub == 'E') { 
+                    // !P E -> 切换模式，强制执行路径
+                    App::g_state.control.mode = ControlMode::AUTO_TRACKING;
+                    App::g_state.control.tracker_state = TrackerState::TRACKING;
+                    start_movement_timing(ControlMode::AUTO_TRACKING);
+                }
+                break;
+            }
+
+            case 'M': {  // 全局移动与位移指令
+                float value = atof(&cmd[3]);
+                // 强制切入调试模式，不再理会 Tracker
+                App::g_state.control.mode = ControlMode::MANUAL_DEBUG;
+                Pose2D target = App::g_state.control.current_target; 
 
                 switch (sub) {
+                    case 'P': {
+                        // !M P 10.0 20.0 90.0 -> 直接设置目标位姿
+                        float tx, ty, tyaw;
+                        if (sscanf(&cmd[3], "%f %f %f", &tx, &ty, &tyaw) == 3) {
+                            target.x = tx;
+                            target.y = ty;
+                            target.yaw = tyaw;
+                        }
+                        break;
+                    }
+
                     case 'W': target.y += value; break;                  // 前进 (绝对坐标系 +Y 方向)
                     case 'S': target.y -= value; break;                  // 后退 (绝对坐标系 -Y 方向)
                     case 'A': target.x -= value; break;                  // 向左 (绝对坐标系 -X 方向)
@@ -210,7 +306,10 @@ namespace {
                     case 'M': target = { cur_pos.x, cur_pos.y, cur_yaw_deg }; break;
                     default: return;
                 }
+
+                // 下发并重置定时器
                 App::g_state.control.current_target = target;
+                start_movement_timing(ControlMode::MANUAL_DEBUG);
                 break;
             }
         }

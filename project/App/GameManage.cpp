@@ -98,8 +98,8 @@ void GameManager::init() {
     if (!sw1_on) App::g_state.game.is_advanced_stage = false;   // 阶段一（仅推箱）
     else App::g_state.game.is_advanced_stage = true;            // 阶段二/三（巡图 + 推箱）
 
-    if (!sw2_on) App::g_state.game.is_demo_mode = false;    // 正常模式（真实控制链路）
-    else App::g_state.game.is_demo_mode = true;             // 演示模式（仅动画推演，不执行实车控制）
+    if (!sw2_on) App::g_state.game.is_demo_mode = false;     // 正常模式（真实控制链路）
+    else App::g_state.game.is_demo_mode = true;              // 演示模式（仅动画推演，不执行实车控制）
 }
 
 
