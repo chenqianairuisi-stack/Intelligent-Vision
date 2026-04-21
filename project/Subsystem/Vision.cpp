@@ -86,12 +86,12 @@ namespace {
         return false; // 当前缓冲区已空，帧未完成
     }
 
-    // ART1 协议解包 (地图数据 + 定位数据) [包头AA 55 + 类型 + 长度 + 负载 + 校验和]
-    __attribute__((section(".ramfunc"))) 
+    // ART1 协议解包 (地图数据 + 定位数据) [包头 AA 55 + 类型 + 长度 + 负载 + 校验和]
+    __attribute__((section(".ramfunc")))
     void process_art1_packet() {
         auto& vis = App::g_state.vision;
 
-        if (parser_art1.msg_type == MSG_MAP_DATA) {
+        if (parser_art1.msg_type == MSG_MAP_DATA && vis.art1_map_ready == false) { // 只处理第一帧地图数据，后续更新由业务层控制
             const uint8_t* p = parser_art1.payload_buf;
             for (uint16_t i = 0; i < 192; i++) {
                 vis.map[i / 12][i % 12] = ((p[i / 8] & (1 << (i % 8))) != 0) ? 1 : 0;

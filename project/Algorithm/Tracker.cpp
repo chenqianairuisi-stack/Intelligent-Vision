@@ -4,9 +4,10 @@
 
 using namespace SystemConfig;
 
+namespace Algorithm::Tracker {
 
 // 载入并压缩网格路径 (自动合并共线的直线段)，并转换为物理坐标系
-void PathTracker::load_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path) {
+void load_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path) {
     auto& plan = App::g_state.planning;
     auto& ctrl = App::g_state.control;
 
@@ -30,7 +31,8 @@ void PathTracker::load_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path)
             int dx2 = raw_path[i + 1].x - raw_path[i].x;
             int dy2 = raw_path[i + 1].y - raw_path[i].y;
 
-            if ((dx1 * dy2) != (dx2 * dy1)) {
+            // 共线且同向的点不保留，其他点都保留（包括拐点和回头点）
+            if (((dx1 * dy2) != (dx2 * dy1)) || ((dx1 * dx2 + dy1 * dy2) < 0)) {
                 plan.grid_path.push_back(raw_path[i]);
             }
         }
@@ -57,7 +59,7 @@ void PathTracker::load_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path)
 
 
 // 更新跟踪状态并获取当前目标位姿，供控制模块调用
-__attribute__((section(".ramfunc"))) void PathTracker::update_target() {
+__attribute__((section(".ramfunc"))) void update_target() {
     auto& plan = App::g_state.planning;
     auto& ctrl = App::g_state.control;
     auto& current_pos = App::g_state.physical.pose;
@@ -65,20 +67,15 @@ __attribute__((section(".ramfunc"))) void PathTracker::update_target() {
     // 没在循迹就返回最后一次的目标
     if (ctrl.tracker_state != TrackerState::TRACKING) return;
 
-    // 获取当前格子物理坐标
+    // 获取当前目标物理坐标
     Point2D target_phys = plan.physical_path[plan.current_wp_idx];
-
-    // 计算距离平方
-    float dx = target_phys.x - current_pos.x;
-    float dy = target_phys.y - current_pos.y;
-    float dist_sq = dx * dx + dy * dy;
 
     // 切弯半径选择：如果是最后一个点了，就用更小的半径要求，防止越过终点；否则用正常的半径要求
     bool is_last_point = (plan.current_wp_idx == plan.physical_path.size() - 1);
     float current_radius = is_last_point ? tune.tracker.reach_radius_min : tune.tracker.reach_radius;
 
     // 状态切换判断
-    if (dist_sq <= current_radius * current_radius) {
+    if (check_arrival(target_phys, current_radius)) {
         if (!is_last_point) {
             // 中间点：直接切到下一个点
             plan.current_wp_idx++;
@@ -95,3 +92,17 @@ __attribute__((section(".ramfunc"))) void PathTracker::update_target() {
     ctrl.current_target.x = target_phys.x;
     ctrl.current_target.y = target_phys.y;
 }
+
+
+// 检查是否到达当前目标点
+bool check_arrival(Point2D target, float radius) {
+    auto& current_pos = App::g_state.physical.pose;
+
+    float dx = target.x - current_pos.x;
+    float dy = target.y - current_pos.y;
+    float dist_sq = dx * dx + dy * dy;
+
+    return dist_sq <= radius * radius;
+}
+
+} // namespace Algorithm::Tracker

@@ -19,7 +19,7 @@ __attribute__((section(".dtcm_data"))) static bool dfs_player_vis[MAX_BOMBS + 1]
 // [模块2] 对外入口：评估并生成炸弹任务序列
 // ============================================================================
 __attribute__((section(".ramfunc")))
-StaticArray<BombTask, MAX_BOMBS> StrategicPlanner::evaluate_and_assign_bombs(const SokobanLevel& level, point player_start) {
+StaticArray<BombTask, MAX_BOMBS> StrategicPlanner::evaluate_and_assign_bombs(const SokobanLevel& level) {
     if (level.bomb_count == 0) {
         return StaticArray<BombTask, MAX_BOMBS>(); // 无炸弹直接返回空序列
     }
@@ -31,7 +31,7 @@ StaticArray<BombTask, MAX_BOMBS> StrategicPlanner::evaluate_and_assign_bombs(con
     best_res.net_profit = -999999;
 
     StaticArray<BombTask, MAX_BOMBS> empty_seq;
-    this->dfs_bomb_sequence(level, player_start, empty_seq, 0, 0, best_res);
+    this->dfs_bomb_sequence(level, level.player_start, empty_seq, 0, 0, best_res);
 
     // 若全局死锁可清零，则返回序列标记为 essential
     for (int i = 0; i < best_res.tasks.size(); ++i) {

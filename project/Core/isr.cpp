@@ -37,8 +37,6 @@ extern "C" void PIT_IRQHandler(void) {
 
         // 底盘控制算法更新
         Subsystem::Chassis::update_20ms_tick();      
-        // Subsystem::Chassis::update_20ms_tick_debug();
-
     }
     
     if(pit_flag_get(PIT_CH2))

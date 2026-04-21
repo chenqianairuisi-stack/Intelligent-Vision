@@ -6,6 +6,7 @@
 enum class MenuPage {
     // ---菜单组 (可选)---
     MAIN_MENU,          // 主菜单
+    MODE_SELECT,        // 模式选择
     MAP_SELECT,         // 地图选择
 
     // --- 状态监控组 (只读) ---

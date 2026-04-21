@@ -10,22 +10,6 @@ enum class GameMode : uint8_t {
     PHASE2_SPECIFIC   // 第二阶段：特定箱子 -> 特定目标
 };
 
-// 四个移动方向：上、右、下、左
-constexpr point MOVE[4] = {{0,1}, {1,0}, {0,-1}, {-1,0}};
-
-// 地图和状态表示结构体
-struct SokobanLevel {
-    std::array<std::array<int8_t, MAP_MAX_WIDTH>, MAP_MAX_HEIGHT> map;
-    point player_start;
-    
-    point bombs[MAX_BOMBS];    uint8_t bomb_count;
-    point targets[MAX_BOXES];  uint8_t target_count;
-    point boxes[MAX_BOXES];    uint8_t box_count;
-
-    uint8_t box_ids[MAX_BOXES];  // box_ids[i] 表示第 i 个箱子对于应的目标点ID
-};
-
-
 // 游戏状态结构体（用于搜索树中的节点表示）
 struct GameState {
     point player;                // 玩家当前坐标
@@ -36,6 +20,7 @@ struct GameState {
     uint8_t target_mask;         // 位图：记录哪些目标点还没被消耗 (第i位为1表示第i个目标点还在，0表示已消失)
     uint32_t hash;               // 当前状态的 Zobrist 哈希值（用于查表排重）
 };
+
 
 // 置换表 (Transposition Table, TT)，大小必须是2的幂
 constexpr uint32_t TT_SIZE = 65536;  
@@ -50,7 +35,7 @@ public:
     Sokoban() = default;
 
     bool solve(GameMode mode);  
-    void bind_semantics(const uint8_t* matched_ids, point current_player_pos);
+    void bind_semantics(const uint8_t* matched_ids);
 
     bool load_from_vision(const SokobanLevel& level);
     const StaticArray<point, MAX_PATH_LENGTH>& get_result_path() const { return final_path; }

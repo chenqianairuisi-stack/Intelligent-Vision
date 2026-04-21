@@ -33,7 +33,7 @@ public:
     StrategicPlanner() = default;
 
     // 对外接口：输入地图和玩家位置，输出炸弹任务列表
-    StaticArray<BombTask, MAX_BOMBS> evaluate_and_assign_bombs(const SokobanLevel& level, point player_start);
+    StaticArray<BombTask, MAX_BOMBS> evaluate_and_assign_bombs(const SokobanLevel& level);
 
 private:
     SokobanLevel cached_level;

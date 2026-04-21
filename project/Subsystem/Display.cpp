@@ -2,7 +2,6 @@
 #include "RobotState.h"
 #include "tuning_config.h"
 #include "GameManage.h"
-#include "TestMap.h"
 #include "Storage.h"
 #include "Encoder.h"
 
@@ -81,6 +80,7 @@ static void scan_keys();
 static void process_logic();
 static void render_ui();
 static void draw_main_menu();
+static void draw_mode_select();
 static void draw_dashboard();
 static void draw_map_select();
 static void draw_odometry_data();
@@ -165,45 +165,34 @@ void process_logic() {
 
     switch (ctx.current_page) {
         case MenuPage::MAIN_MENU:
-            if (ctx.key_down_pressed) ctx.cursor_idx = (ctx.cursor_idx + 1) % 9;    // 9个主菜单项
-            if (ctx.key_up_pressed)   ctx.cursor_idx = (ctx.cursor_idx == 0) ? 8 : ctx.cursor_idx - 1;
+            if (ctx.key_down_pressed) ctx.cursor_idx = (ctx.cursor_idx + 1) % 8;    // 8个主菜单项
+            if (ctx.key_up_pressed)   ctx.cursor_idx = (ctx.cursor_idx == 0) ? 7 : ctx.cursor_idx - 1;
 
             if (ctx.key_enter_pressed) {
                 if (ctx.cursor_idx == 0) { ctx.current_page = MenuPage::DASHBOARD;  App::g_state.debug.need_bg_redraw = true;}
                 if (ctx.cursor_idx == 1) { ctx.current_page = MenuPage::ODOMETRY_DATA; }
                 if (ctx.cursor_idx == 2) { ctx.current_page = MenuPage::TUNE_PARAMS; ctx.cursor_idx = 0; ctx.scroll_offset = 0; }
-                // --- 运行模式切换 ---
+
+                // --- Flash 存储触发 ---
                 if (ctx.cursor_idx == 3) {
-                    App::g_state.game.is_debug_mode = !App::g_state.game.is_debug_mode;
-                    tft180_show_string(14 * UI_COL_W, 5 * UI_ROW_H, "[SWAP]");
+                    Storage::save_params();
+                    tft180_show_string(15 * UI_COL_W, 5 * UI_ROW_H, "[OK]");
                     system_delay_ms(300);
                 }
-                // --- Flash 存储触发 ---
                 if (ctx.cursor_idx == 4) {
-                    Storage::save_params();
+                    Storage::load_params();
                     tft180_show_string(15 * UI_COL_W, 6 * UI_ROW_H, "[OK]");
                     system_delay_ms(300);
                 }
-                if (ctx.cursor_idx == 5) {
-                    Storage::load_params();
-                    tft180_show_string(15 * UI_COL_W, 7 * UI_ROW_H, "[OK]");
-                    system_delay_ms(300);
-                }
                 // --- 息屏模式 ---
-                if (ctx.cursor_idx == 6) {
+                if (ctx.cursor_idx == 5) {
                     ctx.is_closed = true;
                     tft180_full(RGB565_WHITE); 
-                    return; 
+                    return;
                 }
                 // --- 其他测试功能占位 ---
-                if (ctx.cursor_idx == 7) {
-                    App::g_state.control.current_target.y += 100;
-                    return; 
-                }
-                if (ctx.cursor_idx == 8) {
-                    App::g_state.control.current_target.x += 40;
-                    return; 
-                }
+                if (ctx.cursor_idx == 6) { App::g_state.control.current_target.y += 100;}
+                if (ctx.cursor_idx == 7) { App::g_state.control.current_target.x += 40;}
 
                 // 页面跳转后触发重绘
                 if (ctx.cursor_idx < 3) {ctx.need_full_redraw = true; ctx.cursor_idx = 0; ctx.ui_dirty = true;} 
@@ -234,11 +223,18 @@ void process_logic() {
         case MenuPage::DASHBOARD:
             // 按确认键注入本地地图
             if (ctx.key_enter_pressed) {
-                ctx.current_page = MenuPage::MAP_SELECT;
-                ctx.map_cursor_idx = 0;       // 光标复位
-                ctx.map_scroll_offset = 0;
-                ctx.need_full_redraw = true; 
-                ctx.ui_dirty = true;  
+                if (App::g_state.game.is_debug_mode) {
+                    ctx.current_page = MenuPage::MODE_SELECT;
+                    ctx.cursor_idx = 0;           // 光标复位，指向 Mock 模式
+                    ctx.need_full_redraw = true; 
+                    ctx.ui_dirty = true;  
+                } else {
+                    // 正赛模式按下回车，给个弹窗提示不可用
+                    tft180_full(RGB565_WHITE);
+                    tft180_show_string(10, 80, "[PROD MODE LOCKED]");
+                    system_delay_ms(300);
+                    ctx.need_full_redraw = true;
+                }
             }
             if (ctx.key_back_pressed) { 
                 ctx.current_page = MenuPage::MAIN_MENU; 
@@ -247,9 +243,31 @@ void process_logic() {
             }
             break;
 
+        case MenuPage::MODE_SELECT:
+            if (ctx.key_down_pressed) ctx.cursor_idx = (ctx.cursor_idx + 1) % 2;
+            if (ctx.key_up_pressed)   ctx.cursor_idx = (ctx.cursor_idx == 0) ? 1 : 0;
+            
+            // 确认模式选择
+            if (ctx.key_enter_pressed) {
+                // 0: Mock模式 (实车), 1: Demo模式 (纯动画)
+                App::g_state.game.is_demo_mode = (ctx.cursor_idx == 0); 
+                
+                ctx.current_page = MenuPage::MAP_SELECT; // 进入选图
+                ctx.map_cursor_idx = 0;       
+                ctx.map_scroll_offset = 0;
+                ctx.need_full_redraw = true; 
+                ctx.ui_dirty = true;  
+            }
+            if (ctx.key_back_pressed) { 
+                ctx.current_page = MenuPage::DASHBOARD; 
+                ctx.need_full_redraw = true;
+                ctx.ui_dirty = true; 
+            }
+            break;
+        
         case MenuPage::MAP_SELECT:
-            if (ctx.key_down_pressed) ctx.map_cursor_idx = (ctx.map_cursor_idx + 1) % TestMap::get_mock_map_count();
-            if (ctx.key_up_pressed)   ctx.map_cursor_idx = (ctx.map_cursor_idx == 0) ? (TestMap::get_mock_map_count() - 1) : ctx.map_cursor_idx - 1;
+            if (ctx.key_down_pressed) ctx.map_cursor_idx = (ctx.map_cursor_idx + 1) % App::GameEngine::get_mock_map_count();
+            if (ctx.key_up_pressed)   ctx.map_cursor_idx = (ctx.map_cursor_idx == 0) ? (App::GameEngine::get_mock_map_count() - 1) : ctx.map_cursor_idx - 1;
             
             // 滚动窗口保护计算
             if (ctx.map_cursor_idx < ctx.map_scroll_offset) ctx.map_scroll_offset = ctx.map_cursor_idx;
@@ -257,8 +275,14 @@ void process_logic() {
 
             // 确认选择：加载对应的地图并跳回 VISION_DATA 监视结果
             if (ctx.key_enter_pressed) {
-                App::g_state.game.phase = GamePhase::WAIT_FOR_VISION; // 直接跳过视觉模块，进入寻路阶段
-                TestMap::load_mock_map(ctx.map_cursor_idx); // 载入选中的地图
+                App::g_state.game.selected_map_id = ctx.map_cursor_idx;
+
+                if (App::g_state.game.is_demo_mode) {
+                    App::GameEngine::load_mock_map(ctx.map_cursor_idx);
+                    App::g_state.game.phase = GamePhase::WAIT_FOR_VISION;
+                } else {
+                    App::g_state.game.phase = GamePhase::INIT_CALIBRATE;
+                }
                 
                 // 屏幕中间打个提示框
                 tft180_full(RGB565_WHITE);
@@ -302,6 +326,7 @@ void render_ui() {
         case MenuPage::DASHBOARD:      draw_dashboard(); break;
         case MenuPage::ODOMETRY_DATA:  draw_odometry_data(); break;
         case MenuPage::TUNE_PARAMS:    draw_tune_params(); break;
+        case MenuPage::MODE_SELECT:    draw_mode_select(); break;
         case MenuPage::MAP_SELECT:     draw_map_select(); break;
     }
     ctx.ui_dirty = false; 
@@ -313,18 +338,35 @@ void draw_main_menu() {
     draw_item(2, "Dashboard",  ctx.cursor_idx == 0);
     draw_item(3, "Odometry",   ctx.cursor_idx == 1);
     draw_item(4, "Tuning",     ctx.cursor_idx == 2);
-    draw_item(5, App::g_state.game.is_debug_mode ? "Mode: [Local ]" : "Mode: [VISION]", ctx.cursor_idx == 3);
-    draw_item(6, "Save Config",ctx.cursor_idx == 4);
-    draw_item(7, "Load Config",ctx.cursor_idx == 5);
-    draw_item(8, "Close Menu", ctx.cursor_idx == 6); 
-    draw_item(9, "forward",ctx.cursor_idx == 7);
-    draw_item(10, "right", ctx.cursor_idx == 8); 
+    draw_item(5, "Save Config",ctx.cursor_idx == 3);
+    draw_item(6, "Load Config",ctx.cursor_idx == 4);
+    draw_item(7, "Close Menu", ctx.cursor_idx == 5); 
+    draw_item(8, "forward",ctx.cursor_idx == 6);
+    draw_item(9, "right", ctx.cursor_idx == 7); 
 }
 
+// 绘制模式选择页面
+void draw_mode_select() {
+    tft180_show_string(0, 0, "-- SELECT MODE --");
+    
+    draw_item(2, "1. Demo (Virtual)", ctx.cursor_idx == 0);
+    draw_item(3, "2. Mock (Run Car) ", ctx.cursor_idx == 1);
+
+    tft180_show_string(0, 7 * UI_ROW_H, "Tips:");
+    if (ctx.cursor_idx == 1) {
+        tft180_show_string(0, 8 * UI_ROW_H, "> Motor: ENABLE");
+        tft180_show_string(0, 9 * UI_ROW_H, "> ART1 : MOCKED");
+    } else {
+        tft180_show_string(0, 8 * UI_ROW_H, "> Motor: DISABLE");
+        tft180_show_string(0, 9 * UI_ROW_H, "> View : ANIMATION");
+    }
+}
+
+// 绘制地图选择页面
 void draw_map_select() {
     tft180_show_string(0, 0, "-- SELECT MAP --");
     
-    uint8_t count = TestMap::get_mock_map_count();
+    uint8_t count = App::GameEngine::get_mock_map_count();
 
     // 进度提示 (例如 1/3)，放在右上角
     tft180_show_int(14 * UI_COL_W, 0, ctx.map_cursor_idx + 1, 2);
@@ -340,7 +382,7 @@ void draw_map_select() {
             continue;
         }
 
-        draw_item(i + 1, TestMap::get_mock_map_name(item_idx), ctx.map_cursor_idx == item_idx);
+        draw_item(i + 1, App::GameEngine::get_mock_map_name(item_idx), ctx.map_cursor_idx == item_idx);
     }
 }
 
@@ -396,6 +438,7 @@ void draw_dashboard() {
 
     if (game.is_demo_mode) {
         switch(game.phase) {
+            case GamePhase::NONE:                  snprintf(hud_line0, 22, "Phase: NONE       "); break;
             case GamePhase::WAIT_FOR_VISION:       snprintf(hud_line0, 22, "Phase: WAITING MAP"); break;
             case GamePhase::PLAN_PATROL:           snprintf(hud_line0, 22, "Phase: PLAN PATROL"); break;
             case GamePhase::ANIMATE_PATROL_DEMO:   snprintf(hud_line0, 22, "Phase: DEMO PATROL"); break;
@@ -420,23 +463,22 @@ void draw_dashboard() {
         }
     } else {
         switch(game.phase) {
+            case GamePhase::NONE:                  snprintf(hud_line0, 22, "P: NONE      "); break;
             case GamePhase::INIT_CALIBRATE:        snprintf(hud_line0, 22, "P: INIT      "); break;
-            case GamePhase::EXIT_START_ZONE:       snprintf(hud_line0, 22, "P: EXIT 0    "); break;
+            case GamePhase::EXIT_START_ZONE:       snprintf(hud_line0, 22, "P: EXIT      "); break;
             case GamePhase::WAIT_FOR_VISION:       snprintf(hud_line0, 22, "P: WAIT ART1 "); break;
-            case GamePhase::EXEC_ACTION_DISPATCH:  snprintf(hud_line0, 22, "P: ACT_DISP  "); break;
-            case GamePhase::EXEC_PATROL_MOVE:      snprintf(hud_line0, 22, "P: EXEC 2    "); break;
+            case GamePhase::EXEC_ACTION_DISPATCH:  snprintf(hud_line0, 22, "P: ACT DISP  "); break;
+            case GamePhase::EXEC_PATROL_MOVE:      snprintf(hud_line0, 22, "P: EXEC WATCH"); break;
             case GamePhase::EXEC_ALIGN_YAW:        snprintf(hud_line0, 22, "P: EXEC YAW  "); break;
             case GamePhase::WAIT_ART2_CAPTURE_ACK: snprintf(hud_line0, 22, "P: WAIT ART2 "); break;
-            case GamePhase::EXEC_BOMB_PUSH:        snprintf(hud_line0, 22, "P: EXEC 3    "); break;
-            case GamePhase::EXEC_SOKOBAN:          snprintf(hud_line0, 22, "P: EXEC 1    "); break;
+            case GamePhase::EXEC_BOMB_PUSH:        snprintf(hud_line0, 22, "P: EXEC BOMB "); break;
+            case GamePhase::EXEC_SOKOBAN:          snprintf(hud_line0, 22, "P: EXEC BOX  "); break;
             case GamePhase::EXEC_RETURN_HOME:      snprintf(hud_line0, 22, "P: EXEC HOME "); break;
             case GamePhase::FINISHED:              snprintf(hud_line0, 22, "P: FINISHED  "); break;
-            case GamePhase::ERROR_OCCURRED:        snprintf(hud_line0, 22, "P: ERROR     "); break;
+            case GamePhase::ERROR_OCCURRED:        snprintf(hud_line0, 22, "P: ERROR : %d", App::g_state.game.error_stage); break;
             default:                               snprintf(hud_line0, 22, "P: COMPUTING "); break;
         }
-        if (game.phase == GamePhase::ERROR_OCCURRED) {
-            tft180_show_int (14 * UI_COL_W, 0, App::g_state.game.error_stage, 2);  // 错误阶段
-        }
+
         snprintf(hud_line2, 22, "Plan Time: --  ms");
     }
 
@@ -448,6 +490,7 @@ void draw_dashboard() {
         last_hud0[0] = '\0'; last_hud1[0] = '\0'; last_hud2[0] = '\0';
     }
 
+    // last_hud 与 hud_line不一样，才用空格覆盖旧的，然后画上新字
     if (strncmp(last_hud0, hud_line0, 22) != 0) {
         tft180_show_string(0, 0, "                     "); 
         tft180_show_string(0, 0, hud_line0);
@@ -464,12 +507,19 @@ void draw_dashboard() {
         strncpy(last_hud2, hud_line2, 22);
     }
 
-    // 3. 在内存中合成静态画布 （地图+目标+箱子+炸弹+路径+交叉点），一次性渲染到屏幕，避免多次调用绘制函数导致的闪烁
+    // 3. 在内存中合成静态画布 （地图+目标+箱子+炸弹+路径+观测点）
     uint8_t canvas[16][12] = {0};
-    for(int y=0; y<MAP_MAX_HEIGHT; y++) for(int x=0; x<MAP_MAX_WIDTH; x++) if((*render_ctx.map)[y][x]) canvas[y][x] |= TL_WALL;
-    for(int i=0; i<render_ctx.target_count; i++) if(render_ctx.targets[i].x != -1) canvas[render_ctx.targets[i].y][render_ctx.targets[i].x] |= TL_TGT;
-    for(int i=0; i<render_ctx.box_count; i++)    if(render_ctx.boxes[i].x != -1)   canvas[render_ctx.boxes[i].y][render_ctx.boxes[i].x] |= TL_BOX;
-    for(int i=0; i<render_ctx.bomb_count; i++)   if(render_ctx.bombs[i].x != -1)   canvas[render_ctx.bombs[i].y][render_ctx.bombs[i].x] |= TL_BOMB;
+    if (render_ctx.map) {
+        for(int y = 0; y < MAP_MAX_HEIGHT; y++) {
+            for(int x = 0; x < MAP_MAX_WIDTH; x++) {
+                int8_t tile = (*render_ctx.map)[y][x];
+                if      (tile == 1) canvas[y][x] |= TL_WALL;
+                else if (tile == 2) canvas[y][x] |= TL_BOX;
+                else if (tile == 3) canvas[y][x] |= TL_TGT;
+                else if (tile == 4) canvas[y][x] |= TL_BOMB;
+            }
+        }
+    }
     
     if (render_ctx.path_ptr) {
         for(size_t i = render_ctx.path_start_idx; i < render_ctx.path_ptr->size(); i++) 
@@ -480,12 +530,12 @@ void draw_dashboard() {
             if(!(*render_ctx.actions_ptr)[i].is_bomb_task) canvas[(*render_ctx.actions_ptr)[i].obs.pos.y][(*render_ctx.actions_ptr)[i].obs.pos.x] |= TL_CRS;
     }
 
-    // 像素级小车独立计算系统 (Sprite Layer)
+    // 像素级小车独立计算系统
     int map_start_y = 3 * UI_ROW_H + 4;
     static float last_car_sx = -1.0f, last_car_sy = -1.0f;
     float current_car_sx = 0.0f, current_car_sy = 0.0f;
     
-    // 只有在视觉模块完成，进入寻路阶段后才开始绘制小车。之前的阶段小车位置不确定，强行绘制反而会增加闪烁和视觉干扰
+    // 只有在视觉模块完成，进入寻路阶段后才开始绘制小车
     bool should_draw_car = (game.phase > GamePhase::WAIT_FOR_VISION);
 
     if (should_draw_car) {
@@ -505,7 +555,7 @@ void draw_dashboard() {
             if (current_car_sy < map_start_y) current_car_sy = map_start_y; else if (current_car_sy > map_start_y + 11*8) current_car_sy = map_start_y + 11*8;
         }
 
-        // 精髓：擦除小车的残影！强制小车上一帧所在的周边底图缓存失效，底图自动将其覆盖
+        // 把小车压过的背景缓存设为 0xFF，触发这几个格子的自动重绘
         if (last_car_sx >= 0.0f) {
             fill_rect((int)last_car_sx + 2, (int)last_car_sy + 2, 4, 4, RGB565_WHITE);
             
@@ -554,18 +604,18 @@ void draw_dashboard() {
     // 核心底图渲染循环
     for(int y=0; y<16; y++) {
         for(int x=0; x<12; x++) {
+            // 只有画布状态与显存不一致时才重绘这个格子，达到增量更新的效果
             if (canvas[y][x] != ctx.back_buffer[y][x]) {  
                 int sx = y * 8, sy = x * 8 + map_start_y;
                 
                 fill_rect(sx + 1, sy + 1, 7, 7, (canvas[y][x] & TL_WALL) ? RGB565_GRAY : RGB565_WHITE);
                 
                 if (canvas[y][x] & TL_TGT)  fill_rect(sx + 1, sy + 1, 6, 6, RGB565_PURPLE);
-                if (canvas[y][x] & TL_PATH) fill_rect(sx + 3, sy + 3, 2, 2, RGB565_BLUE);
-                if (canvas[y][x] & TL_CRS)  { tft180_draw_line(sx+2, sy+2, sx+6, sy+6, RGB565_BLUE); tft180_draw_line(sx+2, sy+6, sx+6, sy+2, RGB565_BLUE); }
-                
                 if (canvas[y][x] & TL_BOX)  fill_rect(sx + 1, sy + 1, 6, 6, RGB565_YELLOW);
                 if (canvas[y][x] & TL_BOMB) { fill_rect(sx + 1, sy + 1, 6, 6, RGB565_BLACK); fill_rect(sx + 3, sy + 3, 2, 2, RGB565_RED); }
-                
+
+                if (canvas[y][x] & TL_PATH) fill_rect(sx + 3, sy + 3, 2, 2, RGB565_BLUE);
+                if (canvas[y][x] & TL_CRS)  { tft180_draw_line(sx+2, sy+2, sx+6, sy+6, RGB565_BLUE); tft180_draw_line(sx+2, sy+6, sx+6, sy+2, RGB565_BLUE); }
                 ctx.back_buffer[y][x] = canvas[y][x]; 
             }
         }
@@ -589,8 +639,10 @@ void draw_dashboard() {
 void draw_item(uint8_t row, const char* name, bool is_selected) {
     if (is_selected) tft180_show_string(0, row * UI_ROW_H, ">"); 
     else tft180_show_string(0, row * UI_ROW_H, " "); 
-    // 名称从第 2 列开始写
-    tft180_show_string(1 * UI_COL_W, row * UI_ROW_H, (char*)name);
+    
+    char buf[22];
+    snprintf(buf, sizeof(buf), "%-20s", name); 
+    tft180_show_string(1 * UI_COL_W, row * UI_ROW_H, buf);
 }
 
 void draw_float_item(uint8_t row, const char* name, float val, bool is_selected, bool is_editing_this) {

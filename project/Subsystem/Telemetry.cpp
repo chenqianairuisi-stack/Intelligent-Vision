@@ -8,7 +8,6 @@
 
 #include "CoreScheduler.h"
 #include "Vision.h"
-#include "TestMap.h"
 #include "MotionControl.h"
 
 #include "zf_common_headfile.h"
@@ -180,7 +179,7 @@ namespace {
 
     // 语义缓存池内容发送给上位机
     void dump_semantic_cache() {
-        char dump_buf[160];
+        static char dump_buf[256];
         const auto& labels = App::g_state.vision.semantic_labels;
         
         // 组装前缀
@@ -189,7 +188,7 @@ namespace {
         // 遍历整个语义池（假设 MAX_ENTITIES 不会过大，否则需要分包）
         for (int i = 0; i < SystemConfig::MAX_ENTITIES; ++i) {
             // 安全追加字符串，防止越界
-            if (offset < sizeof(dump_buf) - 10) {
+            if (offset < sizeof(dump_buf) - 16) {
                 offset += snprintf(dump_buf + offset, sizeof(dump_buf) - offset, 
                                     "ID%d:%d ", i, labels[i]);
             }

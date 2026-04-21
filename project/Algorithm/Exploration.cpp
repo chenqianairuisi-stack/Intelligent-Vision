@@ -454,7 +454,7 @@ uint16_t Exploration::bfs_shortest_path(const SokobanLevel& lvl, point start, po
     return COST_INFINITY; 
 }
 
-// BFS 生成最短路径坐标数组 (考虑炸弹推行时的特殊碰撞规则)
+// BFS 生成最短路径坐标数组 (默认从 lvl.player_start 出发)
 __attribute__((section(".ramfunc")))
 bool Exploration::get_grid_path(const SokobanLevel& lvl, point start, point end, StaticArray<point, MAX_PATH_LENGTH>& out_path) {
     out_path.clear();
@@ -512,7 +512,7 @@ bool Exploration::get_grid_path(const SokobanLevel& lvl, point start, point end,
 }
 
 
-// 生成小车推炸弹的完整连续路线 (从自身位置一直推入墙体)
+// 生成小车推炸弹的完整连续路线 (默认从 lvl.player_start 出发)
 __attribute__((section(".ramfunc")))
 bool Exploration::get_bomb_push_path(const SokobanLevel& lvl, point player_start, BombTask task, StaticArray<point, MAX_PATH_LENGTH>& out_path) {
     out_path.clear();

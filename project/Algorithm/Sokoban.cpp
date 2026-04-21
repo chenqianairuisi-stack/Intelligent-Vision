@@ -43,15 +43,11 @@ bool Sokoban::load_from_vision(const SokobanLevel& level) {
 }
 
 // 绑定箱子-目标对应关系，生成专属死锁表，并更新玩家位置与初始哈希
-void Sokoban::bind_semantics(const uint8_t* matched_ids, point current_player_pos) {
+void Sokoban::bind_semantics(const uint8_t* matched_ids) {
     // 为初始状态的箱子贴上身份标签
     for (int i = 0; i < initial_state.num_boxes; ++i) {
         initial_state.box_ids[i] = matched_ids[i];
     }
-
-    // 更新玩家的真实起点位置
-    initial_state.player = current_player_pos;
-    player_start = current_player_pos; 
     
     // 计算最终的 P2 初始哈希
     initial_state.hash = compute_hash<GameMode::PHASE2_SPECIFIC>(initial_state);

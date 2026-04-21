@@ -1,11 +1,15 @@
 #pragma once
 #include <cstdint>
+#include <array>
 
 //---------------------------------------------------------------------------------
 //全局坐标系：x 轴正方向为右，y 轴正方向为前，逆时针为正旋转（x 轴设为 0 度）
 //全局地图：大小 240cm*320cm, 分为 12*16 格，原点(0,0)在左下角，x 轴向右，y 轴向上
 //---------------------------------------------------------------------------------
 
+// =================================================================
+// 全局系统配置和常量定义
+// =================================================================
 namespace SystemConfig {
     // 机械参数
     static constexpr float WHEEL_RADIUS = 3.15f;                // 轮子半径，单位：厘米
@@ -30,7 +34,7 @@ namespace SystemConfig {
     static constexpr int PLAN_START_Y = 1;                      // 出库点 Y 坐标（网格坐标）
     static constexpr int PLAN_END_X = 5;                        // 入库点 X 坐标（网格坐标）
     static constexpr int PLAN_END_Y = 1;                        // 入库点 Y 坐标（网格坐标）
-    static constexpr int MAX_BOXES = 10;                         // 最大箱子数
+    static constexpr int MAX_BOXES = 10;                        // 最大箱子数
     static constexpr int MAX_BOMBS = 3;                         // 最大炸弹数
     static constexpr int MAX_ENTITIES = 2 * MAX_BOXES;          // 最大实体数（箱子+目标点）
     static constexpr int MAX_ENTITY_MASK = 1 << MAX_ENTITIES;   // 实体访问状态总数（bitmask）
@@ -49,18 +53,77 @@ namespace SystemConfig {
     static constexpr float DEG_TO_RAD = 3.1415926535f / 180.0f;
 }
 
-// 四个轮子的转速结构体 (单位：cm/s)
+
+// =================================================================
+// 全局状态机枚举
+// =================================================================
+
+// 游戏全局状态机枚举
+enum class GamePhase : uint8_t {
+    // --- 发车阶段 ---
+    NONE,                   // 初始状态，等待开始
+    INIT_CALIBRATE,         // 初始化与校准里程计
+    EXIT_START_ZONE,        // 出发车区
+    WAIT_FOR_VISION,        // 等待摄像头返回地图
+
+    // --- 第二/三阶段 ---
+    PLAN_PATROL,            // GTSP 规划巡图观测路径
+    EXEC_ACTION_DISPATCH,   // 分发：判断当前动作是去观测，还是去推炸弹
+    EXEC_PATROL_MOVE,       // 动作 A1：底盘移动到观测点
+    EXEC_ALIGN_YAW,         // 动作 A2：底盘自旋对准目标，并发送 ART2 捕捉请求
+    WAIT_ART2_CAPTURE_ACK,  // 等待截图成功
+    EXEC_BOMB_PUSH,         // 动作 B：执行推炸宏动作
+    UPDATE_MAP,             // 完成推炸弹，更新地图状态
+
+    // --- 第一阶段 ---
+    BIND_SEMANTICS,         // 巡视完毕，将识别结果绑定到底层算法
+    PLAN_SOKOBAN,           // 规划推箱子路径
+    EXEC_SOKOBAN,           // 执行推箱子循迹
+
+    // --- 返程状态 ---
+    PLAN_RETURN_HOME,       // 规划回发车区的路径
+    EXEC_RETURN_HOME,       // 执行回程
+
+    // --- 结束阶段 ---
+    FINISHED,               // 比赛完成，停车
+    ERROR_OCCURRED,         // 发生错误，停车
+
+    // --- 调试专用状态 ---
+    ANIMATE_PATROL_DEMO,    // 播放巡图过程动画
+    ANIMATE_DEMO,           // 播放推箱子过程动画
+    ANIMATE_RETURN_DEMO,    // 播放回程动画
+};
+
+// 底盘循迹状态机枚举
+enum class TrackerState : uint8_t {
+    NONE,                   // 待机
+    TRACKING,               // 正在循迹
+    FINISHED                // 路径执行完毕
+};
+
+// 控制模式枚举：手动调试 vs 自动循迹
+enum class ControlMode : uint8_t {
+    MANUAL_DEBUG,           // 调试模式：上位机直接写 target_pose，不理会 Tracker
+    AUTO_TRACKING           // 自动模式：听从 Tracker 生成的路径
+};
+
+
+// =================================================================
+// 数据结构定义
+// =================================================================
+
+// 四轮转速结构体 (cm/s)
 struct WheelSpeed4 { float lf; float lb; float rf; float rb;};
 
 // 速度结构体 (cm/s)
 struct Velocity2D { float vx; float vy; float vw;};
 struct Speed2D { float vx; float vy;};
 
-// 全局物理坐标结构体 (单位 cm/deg)
+// 全局物理坐标结构体 (cm/deg)
 struct Pose2D { float x; float y; float yaw;};
 struct Point2D { float x; float y;};
 
-// 全局网格坐标结构体 (单位：格)
+// 网格坐标结构体 (格)
 struct point {
     int8_t x, y;  
 
@@ -74,13 +137,32 @@ struct point {
     }
 };
 
+// 四个移动方向：上、右、下、左
+constexpr point MOVE[4] = {{0,1}, {1,0}, {0,-1}, {-1,0}};
+
+// 地图和状态表示结构体
+struct SokobanLevel {
+    std::array<std::array<int8_t, SystemConfig::MAP_MAX_WIDTH>, SystemConfig::MAP_MAX_HEIGHT> map;
+    point player_start;
+    
+    point bombs[SystemConfig::MAX_BOMBS];    uint8_t bomb_count;
+    point targets[SystemConfig::MAX_BOXES];  uint8_t target_count;
+    point boxes[SystemConfig::MAX_BOXES];    uint8_t box_count;
+
+    uint8_t box_ids[SystemConfig::MAX_BOXES];  // 映射关系：box_ids[i] 表示第 i 个箱子对于应的目标点ID
+};
+
+
+// =================================================================
+// 通用模板
+// =================================================================
+
 // 定长数组：保留常用 vector 风格接口，避免动态内存分配 
 template <typename T, int MAX_LEN>
 struct StaticArray {
     T data[MAX_LEN];
     int length = 0;
 
-    // 与 vector 常用接口保持一致
     void push_back(const T& val) { if (length < MAX_LEN) data[length++] = val; }
     void pop_back() { if (length > 0) length--; }
     void clear() { length = 0; }
@@ -99,7 +181,6 @@ struct StaticArray {
     const T* begin() const { return &data[0]; }
     const T* end() const { return &data[length]; }
 
-    // 占位接口：保持与原调用方兼容
     void reserve(int n) { (void)n; } 
 };
 

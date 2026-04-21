@@ -7,7 +7,20 @@
 namespace Algorithm::Motion {
 
 // ==========================================
-// 1. 运动学库 (纯数学 inline，零运行时开销)
+// 1. 轨迹规划器
+// ==========================================
+class Trajectory {
+public:
+    inline void reset() { current_v = 0.0f; current_a = 0.0f; }  
+    Speed2D velocity_planning_1d(float dx, float dy, float dt);  // 根据当前距离，规划最优速度
+private:
+    float current_v = 0.0f;  // 当前速度
+    float current_a = 0.0f;  // 当前加速度
+};
+
+
+// ==========================================
+// 2. 运动学库
 // ==========================================
 namespace Kinematics {
     constexpr float L = SystemConfig::HALF_X_AXIS + SystemConfig::HALF_Y_AXIS;
@@ -35,7 +48,7 @@ namespace Kinematics {
 }
 
 // ==========================================
-// 2. PID 算法库 (Header-only 极速内联)
+// 3. PID 算法库
 // ==========================================
 
 // 增量式 PID (适合速度内环)
@@ -96,18 +109,6 @@ public:
 private:
     const PidParams& params;
     float last_err = 0.0f, i_out = 0.0f;
-};
-
-// ==========================================
-// 3. 轨迹规划器 (因为逻辑较长，实现在 cpp 中)
-// ==========================================
-class Trajectory {
-public:
-    inline void reset() { current_v = 0.0f; current_a = 0.0f; }  
-    Speed2D velocity_planning_1d(float dx, float dy, float dt);  // 根据当前距离，规划最优速度
-private:
-    float current_v = 0.0f;  // 当前速度
-    float current_a = 0.0f;  // 当前加速度
 };
 
 } // namespace Algorithm::Motion

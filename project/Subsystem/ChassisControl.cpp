@@ -93,7 +93,7 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick() {
     // 根据模式决定是否听 Tracker 的话
     // 如果是 MANUAL_DEBUG，我们就不调用 update_target，直接用上位机写入 ctrl.current_target 的值
     if (ctrl.mode == ControlMode::AUTO_TRACKING && ctrl.tracker_state == TrackerState::TRACKING) {
-        PathTracker::update_target();
+        Algorithm::Tracker::update_target();
     }
 
     // 计算全局误差
@@ -125,15 +125,19 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick() {
 
 __attribute__((section(".ramfunc"))) void update_20ms_tick_debug() {
 
-    WheelSpeed4 debug_speeds = {
-        tune.motors.lf_speed,
-        tune.motors.lb_speed,
-        tune.motors.rf_speed,
-        tune.motors.rb_speed
-    };
+    // WheelSpeed4 debug_speeds = {
+    //     tune.motors.lf_speed,
+    //     tune.motors.lb_speed,
+    //     tune.motors.rf_speed,
+    //     tune.motors.rb_speed
+    // };
 
-    run_speed_loop(debug_speeds);
+    // run_speed_loop(debug_speeds);
 
+    motors[0].set_duty(30, tune.dynamics.max_duty);
+    motors[1].set_duty(30, tune.dynamics.max_duty);
+    motors[2].set_duty(30, tune.dynamics.max_duty);
+    motors[3].set_duty(30, tune.dynamics.max_duty);
 }
 
 __attribute__((section(".ramfunc"))) void check_is_stopped() {

@@ -399,19 +399,19 @@
               <FilePath>..\App\GameManage.cpp</FilePath>
             </File>
             <File>
+              <FileName>GameManageDemo.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\App\GameManageDemo.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>GameManageMock.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\App\GameManageMock.cpp</FilePath>
+            </File>
+            <File>
               <FileName>GameManage.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\App\GameManage.h</FilePath>
-            </File>
-            <File>
-              <FileName>TestMap.cpp</FileName>
-              <FileType>8</FileType>
-              <FilePath>..\App\TestMap.cpp</FilePath>
-            </File>
-            <File>
-              <FileName>TestMap.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\App\TestMap.h</FilePath>
             </File>
           </Files>
         </Group>
