@@ -21,7 +21,6 @@ struct GameState {
     uint32_t hash;               // 当前状态的 Zobrist 哈希值（用于查表排重）
 };
 
-
 // 置换表 (Transposition Table, TT)，大小必须是2的幂
 constexpr uint32_t TT_SIZE = 65536;  
 struct alignas(4) TTEntry {
@@ -76,6 +75,8 @@ private:
     template <GameMode Mode> int ida_star_search(GameState state, int g, int depth, int threshold, StaticArray<point, MAX_PATH_LENGTH>& path);
     template <GameMode Mode> uint32_t compute_hash(const GameState& state) const;
     template <GameMode Mode> int get_heuristic(const GameState& state) const;
+
+    template<size_t N> int min_weight_assignment(int cost[N][N], int n) const;
 };
 
 

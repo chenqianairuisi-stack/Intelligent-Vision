@@ -34,14 +34,14 @@ namespace {
     char rx_cmd_buf[64];
     uint8_t rx_idx = 0;
 
-    bool is_timing_movement = false;  // 测时器状态标志
+    bool is_timing_movement = false;   // 测时器状态标志
     uint32_t movement_start_time = 0;  // 运动开始的系统时间戳 (ms)
     ControlMode current_timing_mode = ControlMode::MANUAL_DEBUG;  // 当前测时器关联的控制模式
 
     void start_movement_timing(ControlMode mode);  // 触发测时器
-    void check_movement_completion();  // 在后台循环中检查测时器状态，计算并发送结果
-    void dump_semantic_cache();  // 发送语义缓存内容
-    void execute_command(const char* cmd);  // 命令解析函数声明
+    void check_movement_completion();              // 在后台循环中检查测时器状态，计算并发送结果
+    void dump_semantic_cache();                    // 发送语义缓存内容
+    void execute_command(const char* cmd);         // 命令解析函数声明
 }
 
 // ====================================================================
@@ -119,6 +119,9 @@ void receive_and_parse_task() {
             }
         }
     }
+
+    // 每次轮询解析完串口数据后，顺便检查一下运动是否已经完成
+    check_movement_completion(); 
 }
 
 // ====================================================================
@@ -160,7 +163,7 @@ namespace {
             while (dyaw > 180.0f) dyaw -= 360.0f;
             while (dyaw < -180.0f) dyaw += 360.0f;
 
-            // 严苛结束条件：位置误差 < 2cm，角度误差 < 2度，且底层速度环判定彻底静止
+            // 严苛结束条件：位置误差 < 0.8cm，角度误差 < 2度，且底层速度环判定彻底静止
             if (dist < 0.8f && std::abs(dyaw) < 2.0f && phys.is_stopped) {
                 is_done = true;
             }

@@ -4,7 +4,9 @@
 #include <cstring>
 #include <algorithm>
 
-// ===================================================== 初始化与配置 =====================================================
+// ============================================================================================
+// [模块 1] 初始化与预处理 + 对外接口实现
+// ============================================================================================
 
 __attribute__((section(".dtcm_data"))) Sokoban solver;
 __attribute__((section(".dtcm_data")))TTEntry TT[TT_SIZE];  // 置换表
@@ -53,9 +55,6 @@ void Sokoban::bind_semantics(const uint8_t* matched_ids) {
     initial_state.hash = compute_hash<GameMode::PHASE2_SPECIFIC>(initial_state);
 }
 
-
-// ===================================================== 对外接口函数 =====================================================
-
 // 统一对外接口
 bool Sokoban::solve(GameMode mode) {
     if (mode == GameMode::PHASE1_ANY) 
@@ -65,7 +64,10 @@ bool Sokoban::solve(GameMode mode) {
 }
 
 
-// ===================================================== 核心功能函数 =====================================================
+// ============================================================================================
+// [模块 2] 核心求解引擎：IDA* + 启发式剪枝 + 置换表 + BFS预处理
+// ============================================================================================
+
 
 // 内部驱动引擎
 template <GameMode Mode> bool Sokoban::solve_internal() {
@@ -118,7 +120,18 @@ int Sokoban::ida_star_search(GameState state, int g, int depth, int threshold, S
         TT[tt_idx].sig = sig; TT[tt_idx].value = remaining;
         return 9999;
     }
-    int f = g + (h * 3) / 2;  // Weighted IDA*
+
+    // 动态自适应权重 (WA*) ：箱子越多，贪心权重越大，搜索树越窄；箱子越少，越逼近绝对最优
+    int W_num = 10, W_den = 10; 
+    if (state.num_boxes >= 7) {
+        W_num = 25; W_den = 10; // W = 2.5 (极速贪心)
+    } else if (state.num_boxes >= 4) {
+        W_num = 20; W_den = 10; // W = 2.0 
+    } else {
+        W_num = 15; W_den = 10; // W = 1.5
+    }
+
+    int f = g + (h * W_num) / W_den;
     if (f > threshold) return f;    // 剪枝：超过当前迭代的限制，返回新的阈值建议
 
 
@@ -381,8 +394,9 @@ int Sokoban::ida_star_search(GameState state, int g, int depth, int threshold, S
 }
 
 
-
-// ===================================================== 内部辅助函数 =====================================================
+// ============================================================================================
+// [模块 3] 辅助功能函数：Zobrist 哈希
+// ============================================================================================
 
 // 伪随机数生成器 (Xorshift)，用于生成 Zobrist 哈希用的随机数
 static uint32_t xor_state = 123456789;
@@ -424,51 +438,10 @@ __attribute__((section(".ramfunc"))) uint32_t Sokoban::compute_hash(const GameSt
     return h;
 }
 
-// 启发式函数 (计算当前状态到通关的最小预估步数，必须小于等于实际步数才能保证最优解)  
-template <GameMode Mode>
-__attribute__((section(".ramfunc"))) int Sokoban::get_heuristic(const GameState& state) const {
-    if (state.num_boxes == 0) return 0; 
-    
-    int min_p_dist = 9999;
-    for (int i = 0; i < state.num_boxes; ++i) {
-        int d = std::abs(state.player.x - state.box_x[i]) + std::abs(state.player.y - state.box_y[i]) - 1;
-        if (d < 0) d = 0;
-        if (d < min_p_dist) min_p_dist = d;
-    }
-    int p_cost = (min_p_dist != 9999) ? min_p_dist : 0;
 
-    if constexpr (Mode == GameMode::PHASE1_ANY) {
-        int min_h = 9999;
-        int p[MAX_BOXES]; for (int i = 0; i < state.num_boxes; ++i) p[i] = i;  
-        int active_t_idx[MAX_BOXES]; int t_count = 0;
-        for (size_t i = 0; i < initial_targets.size(); ++i) if (state.target_mask & (1 << i)) active_t_idx[t_count++] = i;
-        if (t_count < state.num_boxes) return 9999; 
-        do {
-            int current_h = 0;
-            for (int i = 0; i < state.num_boxes; ++i) {
-                int t_id = active_t_idx[p[i]];  
-                int dist = t_dist[t_id][state.box_y[i]][state.box_x[i]];  
-                if (dist == -1) { current_h = 9999; break; }  
-                current_h += dist;
-            }
-            if (current_h < min_h) min_h = current_h;
-        } while (std::next_permutation(p, p + state.num_boxes));
-        
-        if (min_h >= 9999) return 9999; 
-        return min_h + p_cost;
-    } 
-    else {
-        // P2：抛弃全排列，直接极速查表！
-        int total_h = 0;
-        for (int i = 0; i < state.num_boxes; ++i) {
-            int id = state.box_ids[i]; 
-            int dist = t_dist[id][state.box_y[i]][state.box_x[i]];
-            if (dist == -1) return 9999; 
-            total_h += dist;
-        }
-        return total_h + p_cost;
-    }
-}
+// ============================================================================================
+// [模块 4] 辅助功能函数：启发式评估与死锁检测
+// ============================================================================================
 
 // 预处理：计算地图上每个格子到每个目标点的最短推挤距离（不考虑炸弹和其他箱子），用于启发式评估与死锁检测
 void Sokoban::precompute_target_distances() {
@@ -525,6 +498,132 @@ void Sokoban::precompute_deadlocks() {
         }
     }
 }
+
+// 匈牙利算法求解最小权匹配（用于 P1 阶段的启发式评估，N<=10时效率极高）
+template<size_t N>
+__attribute__((section(".ramfunc"))) int Sokoban::min_weight_assignment(int cost[N][N], int n) const {
+    if (n == 0) return 0;
+    
+    //匹配原则： 箱子只愿意去 Gap = cost[i0 - 1][j - 1] - u[i0] - v[j] = 0 的目标点
+    // - cost[i][j] 是箱子 i 到目标点 j 的原始距离（预处理的推挤距离）
+    // - u[i] 是箱子 i 的补偿值，v[j] 是目标点 j 的补偿值，初始都为 0，随着算法进行会动态调整，满足 u[i] + v[j] <= cost[i][j]
+
+    int u[N + 1] = {0}, v[N + 1] = {0};   // 箱子和目标的平衡补偿值
+    int p[N + 1] = {0};                   // 匹配关系：表示第 j 个目标点现在被第 i 个箱子占着
+    int way[N + 1] = {0};                 // 记录增广路径的前驱节点，用于回溯更新
+    int minv[N + 1];                      // 辅助数组：存储当前目标点到已考虑箱子的最小距离，用于优化寻找增广路的速度
+    bool used[N + 1];                     // 辅助数组：标记目标点是否已经被加入到增广路径的考虑范围内（冲突区）
+
+    // 尝试为第 i 个箱子寻找一个可匹配的目标点，逐步构建完美匹配
+    for (int i = 1; i <= n; ++i) {
+        p[0] = i;  // p[0] 是个虚拟节点，先把当前要安排的箱子 i 放在这里
+        int j0 = 0;  // j0 代表当前正在处理的目标点（0号是虚拟的起点）
+        
+        for (int k = 0; k <= n; ++k) { minv[k] = 9999; used[k] = false; }
+
+        do {
+            used[j0] = true;  // 标记当前目标点被拉入 “冲突区”
+            int i0 = p[j0], delta = 9999, j1 = 0;
+            
+            // 遍历所有未考虑的目标点 j，计算把箱子 i0 匹配到 j 上的实际成本（扣除补偿值），更新最小备选代价和增广路径
+            for (int j = 1; j <= n; ++j) {
+                if (!used[j]) {
+                    int cur = cost[i0 - 1][j - 1] - u[i0] - v[j];   // 计算当前箱子 i0 到目标点 j 的 “实际成本”
+                    if (cur < minv[j]) { 
+                        minv[j] = cur;    // 更新目标点 j 的最小备选代价（距离 Gap 为 0 还有多少）
+                        way[j] = j0;      // 记住是从 j0 这里的箱子过来的 
+                    }
+                    if (minv[j] < delta) { 
+                        delta = minv[j];  // 找到目前所有备选方案中最容免费目标点
+                        j1 = j; 
+                    }
+                }
+            }
+            
+            // 对于已经在冲突区里匹配好的（箱子-目标）对：一加一减，它们之间的 Gap 依然是 0，保持匹配关系不变
+            // 对于想跳出冲突区的箱子：u 增加了 delta，那么去冲突区外新目标的 Gap 就减少了 delta，最近目标点刚好变成了 0，解锁了新的通路
+            for (int j = 0; j <= n; ++j) {
+                if (used[j]) { 
+                    u[p[j]] += delta;       // 冲突区里的箱子，补偿值增加
+                    v[j] -= delta;          // 冲突区里的目标点，补偿值减少
+                } 
+                else { minv[j] -= delta; }  // 冲突区外的目标，距离免费更近了 delta 这么多
+            }
+            j0 = j1;  // 顺着那个最容易变成免费的目标继续找
+        } while (p[j0] != 0);  // 直到找到一个还没被任何人占用的目标点
+
+        // 一旦找到了空位，所有在这一轮产生冲突的箱子，都依次往前挪一个位置，这样每个箱子都能得到 Gap==0 的目标点
+        do {
+            int j1 = way[j0];
+            p[j0] = p[j1];
+            j0 = j1;
+        } while (j0 != 0);
+    }
+
+    // 统计最终完美匹配的最小总代价
+    int total_cost = 0;
+    for (int j = 1; j <= n; ++j) {
+        int c = cost[p[j] - 1][j - 1];
+        if (c >= 9999) return 9999; // 存在无解的匹配
+        total_cost += c;
+    }
+    return total_cost;
+}
+
+// 启发式函数 (计算当前状态到通关的最小预估步数，必须小于等于实际步数才能保证最优解)  
+template <GameMode Mode>
+__attribute__((section(".ramfunc"))) int Sokoban::get_heuristic(const GameState& state) const {
+    if (state.num_boxes == 0) return 0; 
+    
+    int min_p_dist = 9999;
+    for (int i = 0; i < state.num_boxes; ++i) {
+        int d = std::abs(state.player.x - state.box_x[i]) + std::abs(state.player.y - state.box_y[i]) - 1;
+        if (d < 0) d = 0;
+        if (d < min_p_dist) min_p_dist = d;
+    }
+    int p_cost = (min_p_dist != 9999) ? min_p_dist : 0;
+
+    if constexpr (Mode == GameMode::PHASE1_ANY) {
+        int active_t_idx[MAX_BOXES]; 
+        int t_count = 0;
+        for (size_t i = 0; i < initial_targets.size(); ++i) {
+            if (state.target_mask & (1 << i)) active_t_idx[t_count++] = i;
+        }
+        if (t_count < state.num_boxes) return 9999; 
+
+        // 构建代价矩阵
+        int cost_matrix[MAX_BOXES][MAX_BOXES];
+        for (int i = 0; i < state.num_boxes; ++i) {
+            for (int j = 0; j < state.num_boxes; ++j) {
+                // j 映射到可用的目标点集合
+                int dist = t_dist[active_t_idx[j]][state.box_y[i]][state.box_x[i]];
+                cost_matrix[i][j] = (dist == -1) ? 9999 : dist;
+            }
+        }
+
+        // 调用 O(N^3) 的极速匈牙利匹配
+        int min_h = min_weight_assignment<MAX_BOXES>(cost_matrix, state.num_boxes);
+        
+        if (min_h >= 9999) return 9999; 
+        return min_h + p_cost;
+    } 
+    else {
+        // P2：抛弃全排列，直接极速查表！
+        int total_h = 0;
+        for (int i = 0; i < state.num_boxes; ++i) {
+            int id = state.box_ids[i]; 
+            int dist = t_dist[id][state.box_y[i]][state.box_x[i]];
+            if (dist == -1) return 9999; 
+            total_h += dist;
+        }
+        return total_h + p_cost;
+    }
+}
+
+
+// ============================================================================================
+// [模块 5] 工具函数
+// ============================================================================================
 
 // 判断一个格子是否是炸弹
 inline bool Sokoban::is_bomb(point p) const {

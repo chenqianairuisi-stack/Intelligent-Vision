@@ -409,12 +409,12 @@
     <File>
       <GroupNumber>1</GroupNumber>
       <FileNumber>4</FileNumber>
-      <FileType>5</FileType>
+      <FileType>8</FileType>
       <tvExp>0</tvExp>
       <tvExpOptDlg>0</tvExpOptDlg>
       <bDave2>0</bDave2>
-      <PathWithFileName>..\App\GameManage.h</PathWithFileName>
-      <FilenameWithoutPath>GameManage.h</FilenameWithoutPath>
+      <PathWithFileName>..\App\GameManageDemo.cpp</PathWithFileName>
+      <FilenameWithoutPath>GameManageDemo.cpp</FilenameWithoutPath>
       <RteFlg>0</RteFlg>
       <bShared>0</bShared>
     </File>
@@ -425,8 +425,8 @@
       <tvExp>0</tvExp>
       <tvExpOptDlg>0</tvExpOptDlg>
       <bDave2>0</bDave2>
-      <PathWithFileName>..\App\TestMap.cpp</PathWithFileName>
-      <FilenameWithoutPath>TestMap.cpp</FilenameWithoutPath>
+      <PathWithFileName>..\App\GameManageMock.cpp</PathWithFileName>
+      <FilenameWithoutPath>GameManageMock.cpp</FilenameWithoutPath>
       <RteFlg>0</RteFlg>
       <bShared>0</bShared>
     </File>
@@ -437,8 +437,8 @@
       <tvExp>0</tvExp>
       <tvExpOptDlg>0</tvExpOptDlg>
       <bDave2>0</bDave2>
-      <PathWithFileName>..\App\TestMap.h</PathWithFileName>
-      <FilenameWithoutPath>TestMap.h</FilenameWithoutPath>
+      <PathWithFileName>..\App\GameManage.h</PathWithFileName>
+      <FilenameWithoutPath>GameManage.h</FilenameWithoutPath>
       <RteFlg>0</RteFlg>
       <bShared>0</bShared>
     </File>

@@ -41,13 +41,9 @@ namespace {
     float exInt = 0.0f, eyInt = 0.0f, ezInt = 0.0f;
 
     // 算法参数
-    constexpr float SAMPLE_FREQ = 1.0f / SystemConfig::PIT_CH0_DT_S;
+    constexpr float SAMPLE_FREQ = 1.0f / SystemConfig::PIT_CH0_DT_S;  // 采样频率 (Hz)，根据系统定时器周期计算
     constexpr float MAHONY_KP   = 1.0f;   // 信任加速度计的权重参数
     constexpr float MAHONY_KI   = 0.0f;   // 设为 0，因为我们用 ZUPT 处理零漂
-
-    __attribute__((always_inline)) inline float invSqrt(float x) {
-        return 1.0f / std::sqrt(x); 
-    }
 }
 
 
@@ -125,7 +121,12 @@ void adaptive_mahony_update(float gx, float gy, float gz, float ax, float ay, fl
     float norm;
     float vx, vy, vz;
     float ex, ey, ez;
-    
+
+    // 快速逆平方根函数
+    auto invSqrt = [](float x) -> float {
+        return 1.0f / std::sqrt(x); 
+    };
+
     // 动态 Kp 屏蔽线加速度干扰
     float Kp_adaptive = MAHONY_KP;
     float acc_norm = std::sqrt(ax*ax + ay*ay + az*az);
