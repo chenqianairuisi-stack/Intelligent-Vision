@@ -1,341 +1,341 @@
-warning: in the working copy of 'project/mdk/rt1064.uvoptx', LF will be replaced by CRLF the next time Git touches it
-diff --git a/project/App/GameManage.cpp b/project/App/GameManage.cpp
-index fe5034f..516392e 100644
---- a/project/App/GameManage.cpp
-+++ b/project/App/GameManage.cpp
-@@ -76,7 +76,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
-     switch (game.phase) {
-         case GamePhase::INIT_CALIBRATE: {
-             // 灏嗛噷绋嬭閲嶇疆鍒板凡鐭ュ叆鍙ｄ綅濮�
--            Subsystem::PoseEstimator::set_position(ENTRY_X, ENTRY_Y);
-+            Subsystem::PoseEstimator::set_position(ENTRY_X, ENTRY_Y, ENTRY_YAW);
-             
-             // 鐩存帴涓嬪彂鍑哄簱鐩爣鐐癸紝鍒囧埌鎵嬪姩鐩爣妯″紡鎵ц绂诲満
-             ctrl.current_target = {OUT_TARGET_X, OUT_TARGET_Y, ENTRY_YAW};
-diff --git a/project/App/main.cpp b/project/App/main.cpp
-index 2e3eb2a..641c64b 100644
---- a/project/App/main.cpp
-+++ b/project/App/main.cpp
-@@ -8,6 +8,7 @@
- #include "Display.h"
- #include "PoseEstimate.h"
- #include "Storage.h"
-+#include "system_config.h"
- 
- 
- extern "C" int main(void) {
-@@ -31,8 +32,8 @@ extern "C" int main(void) {
-     system_delay_ms(500);
-     Subsystem::PoseEstimator::calibrate_gyro_step();
- 
--    pit_ms_init(PIT_CH0, 5);                 
--    pit_ms_init(PIT_CH1, 20);               
-+    pit_ms_init(PIT_CH0, SystemConfig::PIT_CH0_PERIOD_MS);
-+    pit_ms_init(PIT_CH1, SystemConfig::PIT_CH1_PERIOD_MS);
-     interrupt_set_priority(PIT_IRQn, 0);    
-     interrupt_global_enable(0);
-     
-diff --git a/project/Core/isr.cpp b/project/Core/isr.cpp
-index f7bcf92..9cfe702 100644
---- a/project/Core/isr.cpp
-+++ b/project/Core/isr.cpp
-@@ -12,16 +12,19 @@
- 
- extern "C" void PIT_IRQHandler(void) {
- 
--    // 5ms 锟斤拷时锟斤拷锟叫断ｏ拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟捷讹拷取锟斤拷锟斤拷锟�
-+    // PIT_CH0 锟斤拷时锟斤拷锟叫断ｏ拷锟斤拷锟斤拷锟斤拷 SystemConfig::PIT_CH0_PERIOD_MS 锟斤拷锟矫ｏ拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟捷讹拷取锟斤拷锟斤拷锟�
-     if(pit_flag_get(PIT_CH0)) 
-     {
-         pit_flag_clear(PIT_CH0);
- 
--        imu_icm42688.update_gyro_only();                   // 锟斤拷锟斤拷锟斤拷锟斤拷锟捷讹拷取锟斤拷转锟斤拷
--        Subsystem::PoseEstimator::update_yaw_5ms_tick();   // yaw 锟斤拷嵌雀锟斤拷锟�
-+        // 锟斤拷锟斤拷锟斤拷锟斤拷锟捷讹拷取锟斤拷转锟斤拷
-+        imu_icm42688.update_all();  
-+
-+        // yaw 锟斤拷嵌雀锟斤拷锟�
-+        Subsystem::PoseEstimator::update_yaw_1ms_tick();  
-     }
-     
--    // 20ms 锟斤拷时锟斤拷锟叫断ｏ拷锟斤拷锟节碉拷锟教匡拷锟斤拷锟姐法锟斤拷锟铰猴拷锟斤拷碳锟斤拷锟斤拷锟�
-+    // PIT_CH1 锟斤拷时锟斤拷锟叫断ｏ拷锟斤拷锟斤拷锟斤拷 SystemConfig::PIT_CH1_PERIOD_MS 锟斤拷锟矫ｏ拷锟斤拷锟斤拷锟节碉拷锟教匡拷锟斤拷锟姐法锟斤拷锟铰猴拷锟斤拷碳锟斤拷锟斤拷锟�
-     if(pit_flag_get(PIT_CH1)) 
-     {
-         pit_flag_clear(PIT_CH1);
-diff --git a/project/Core/system_config.h b/project/Core/system_config.h
-index 384babc..34f4010 100644
---- a/project/Core/system_config.h
-+++ b/project/Core/system_config.h
-@@ -11,6 +11,12 @@
- // 鍏ㄥ眬绯荤粺閰嶇疆鍜屽父閲忓畾涔�
- // =================================================================
- namespace SystemConfig {
-+    // 瀹氭椂鍣ㄥ弬鏁�
-+    static constexpr uint32_t PIT_CH0_PERIOD_MS = 1U;          // IMU 閲囨牱涓庡Э 鎬佽В绠楀懆鏈�
-+    static constexpr uint32_t PIT_CH1_PERIOD_MS = 20U;         // 搴曠洏鎺у埗涓庨噷 绋嬭鍛ㄦ湡
-+    static constexpr float PIT_CH0_DT_S = static_cast<float>(PIT_CH0_PERIOD_MS) * 0.001f;  // 杞崲涓虹
-+    static constexpr float PIT_CH1_DT_S = static_cast<float>(PIT_CH1_PERIOD_MS) * 0.001f;  // 杞崲涓虹
-+
-     // 鏈烘鍙傛暟
-     static constexpr float WHEEL_RADIUS = 3.15f;                // 杞瓙鍗婂緞锛屽崟浣嶏細鍘樼背
-     static constexpr float HALF_X_AXIS = 9.0f;                  // x 杞村崐杞磋窛锛屽崟浣嶏細鍘樼背
-@@ -50,7 +56,8 @@ namespace SystemConfig {
-     static constexpr float OUT_TARGET_Y = 30.0f;                // 鍑哄簱鐩爣浣嶇疆 Y 鍧愭爣
- 
-     // 鏁板甯告暟
--    static constexpr float DEG_TO_RAD = 3.1415926535f / 180.0f;
-+    static constexpr float DEG_TO_RAD = 0.017453292519943f;
-+    static constexpr float RAD_TO_DEG = 57.29577951308232f;
- }
- 
- 
-diff --git a/project/Core/tuning_config.h b/project/Core/tuning_config.h
-index cfac8e2..d9070a8 100644
---- a/project/Core/tuning_config.h
-+++ b/project/Core/tuning_config.h
-@@ -44,16 +44,16 @@ struct TuningConfig {
- 
- // 鍏ㄥ眬璋冨弬瀹炰緥锛屾斁鍦� DTCM 鍖哄煙锛屼緵鎵€鏈夋ā鍧楄闂�
- __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
--    {9.0f, 0.5f, 0.6f},         // pid_yaw
--    {0.2f, 0.1f, 0.0f},         // pid_speed
--    {0.1f, 0.0f},               // feedforward
-+    {4.5f, 0.0f, 0.4f},         // pid_yaw
-+    {0.3f, 0.1f, 0.0f},         // pid_speed
-+    {0.15f, 0.0f},               // feedforward
- 
-     // Dynamics 鍔ㄥ姏瀛﹂娴嬪弬鏁�
-     {
--        65.0f,     // max_duty
--        120.0f,    // max_speed
--        80.0f,     // max_acc
--        1200.0f,   // max_jerk
-+        60.0f,     // max_duty
-+        80.0f,    // max_speed
-+        60.0f,     // max_acc
-+        1000.0f,   // max_jerk
-         3.0f,      // max_ang_speed
-         1.03f,     // kinematic_gain_x
-         1.01f      // kinematic_gain_y
-diff --git a/project/Device/encoder.h b/project/Device/encoder.h
-index b884972..afa397e 100644
---- a/project/Device/encoder.h
-+++ b/project/Device/encoder.h
-@@ -8,15 +8,15 @@ public:
-        EncoderArray() = default;
-        void init();
- 
--       // 20ms 涓柇璋冪敤锛屾洿鏂板閲忚鏁板€硷紝骞惰浆鎹负閫熷害鏇存柊鍏ㄥ眬鐘舵€�
-+       // PIT_CH1 涓柇璋冪敤锛屾洿鏂板閲忚鏁板€硷紝骞惰浆鎹负閫熷害鏇存柊鍏ㄥ眬鐘舵€�
-        void update_encoders_20ms_tick();
- 
-        // 鑾峰彇鎵€鏈夌紪鐮佸櫒璁℃暟鐨勬寚閽堬紝渚涘閮ㄤ娇鐢� (娉細杩斿洖鐨勬槸澧為噺璁℃暟鍊�)
-        const int16_t* getAllCounts() const { return counts; }      
- 
- private:
--       // 浠庣紪鐮佸櫒鑴夊啿杞崲鍒� cm/s 鐨勭郴鏁� (鍋囪 20ms 鏇存柊涓€娆�)
--       static constexpr float PULSES_TO_SPEED_CM_S = (2.0f * PI * SystemConfig::WHEEL_RADIUS) / (SystemConfig::PULSES_PER_REV * 0.02f);  
-+       // 浠庣紪鐮佸櫒鑴夊啿杞崲鍒� cm/s 鐨勭郴鏁� (鎸� PIT_CH1_DT_S 璁＄畻)
-+       static constexpr float PULSES_TO_SPEED_CM_S = (2.0f * PI * SystemConfig::WHEEL_RADIUS) / (SystemConfig::PULSES_PER_REV * SystemConfig::PIT_CH1_DT_S);  
- 
-        int16_t counts[4] = {0, 0, 0, 0};                           // 褰撳墠鍛ㄦ湡 鐨勫閲忚鏁板€� (椤哄簭 LF, LB, RF, RB, 宸蹭箻涓婃瀬鎬�)
-        int32_t last_raw[4] = {0, 0, 0, 0};                         // 纭欢瀹氭椂 鍣ㄤ笂涓€娆＄殑缁濆璁℃暟鍊� (椤哄簭 LF, LB, RF, RB)
-diff --git a/project/Device/icm42688.cpp b/project/Device/icm42688.cpp
-index e54c346..2a7217d 100644
---- a/project/Device/icm42688.cpp
-+++ b/project/Device/icm42688.cpp
-@@ -70,13 +70,13 @@ __attribute__((section(".ramfunc"))) void Icm42688::update_all() {
-     data.raw_gyro_y = (int16_t)(((uint16_t)buf[10] << 8) | buf[11]);
-     data.raw_gyro_z = (int16_t)(((uint16_t)buf[12] << 8) | buf[13]);
- 
--    // 涔樹互棰勭紪璇戠殑甯告暟杞崲涓虹墿鐞嗛噺
-+    // 涔樹互棰勭紪璇戠殑甯告暟杞崲涓虹墿鐞嗛噺,骞朵笖璋冩暣纭欢鍧愭爣绯�
-     data.temp   = static_cast<float>(data.raw_temp) * TEMP_SCALE + TEMP_OFFSET;
--    data.acc_x  = static_cast<float>(data.raw_acc_x) * ACCEL_SCALE;
--    data.acc_y  = static_cast<float>(data.raw_acc_y) * ACCEL_SCALE;
--    data.acc_z  = static_cast<float>(data.raw_acc_z) * ACCEL_SCALE;
--    data.gyro_x = static_cast<float>(data.raw_gyro_x) * GYRO_SCALE;
--    data.gyro_y = static_cast<float>(data.raw_gyro_y) * GYRO_SCALE;
-+    data.acc_x  = static_cast<float>(data.raw_acc_y) * ACCEL_SCALE;
-+    data.acc_y  = static_cast<float>(data.raw_acc_x) * ACCEL_SCALE;
-+    data.acc_z  = - static_cast<float>(data.raw_acc_z) * ACCEL_SCALE;
-+    data.gyro_x = - static_cast<float>(data.raw_gyro_y) * GYRO_SCALE;
-+    data.gyro_y = - static_cast<float>(data.raw_gyro_x) * GYRO_SCALE;
-     data.gyro_z = - static_cast<float>(data.raw_gyro_z) * GYRO_SCALE;
- }
- 
-diff --git a/project/Subsystem/ChassisControl.cpp b/project/Subsystem/ChassisControl.cpp
-index 7aa4316..9cfba81 100644
---- a/project/Subsystem/ChassisControl.cpp
-+++ b/project/Subsystem/ChassisControl.cpp
-@@ -40,14 +40,14 @@ namespace {
-     __attribute__((always_inline)) inline float normalize_angle(float angle) {
-         if (angle > 180.0f)       angle -= 360.0f;
-         else if (angle < -180.0f) angle += 360.0f;
--        return angle * 3.1415926535f / 180.0f; 
-+        return angle * SystemConfig::DEG_TO_RAD;
-     }
- 
-     // 鎻愬彇绗﹀彿锛岀敤浜庨潤鎽╂摝鍓嶉鏂瑰悜鍒ゆ柇锛屽苟寮曞叆姝诲尯闃叉闆剁偣闇囪崱
-     __attribute__((always_inline)) inline float get_sign(float val) {
--        if (val > 0.5f) return 1.0f;
--        if (val < -0.5f) return -1.0f;
--        return val / 0.5f; // 鍦� -0.5 鍒� 0.5 涔嬮棿锛屽钩婊戝湴浠� -1 杩囨浮鍒� 1锛岀粷涓嶇獊鍙�
-+        if (val > 1.0f) return 1.0f;
-+        if (val < -1.0f) return -1.0f;
-+        return val / 1.0f; // 鍦� -1.0 鍒� 1.0 涔嬮棿锛屽钩婊戝湴浠� -1 杩囨浮鍒� 1锛岀粷涓嶇獊鍙�
-     }
- 
- 
-@@ -102,7 +102,7 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick() {
-     float err_yaw = normalize_angle(ctrl.current_target.yaw - yaw);
- 
-     // 閫熷害瑙勫垝
--    Speed2D expected_global_vel = velocity_planner.velocity_planning_1d(err_global_x, err_global_y, 0.02f);
-+    Speed2D expected_global_vel = velocity_planner.velocity_planning_1d(err_global_x, err_global_y, SystemConfig::PIT_CH1_DT_S);
- 
-     // 灏嗗叏灞€鏈熸湜閫熷害鎶曞奖鍒板皬杞﹁嚜韬殑灞€閮ㄥ潗鏍囩郴
-     float current_yaw_rad = yaw * SystemConfig::DEG_TO_RAD;  // 杞崲涓哄姬搴�
-@@ -146,8 +146,8 @@ __attribute__((section(".ramfunc"))) void check_is_stopped() {
-         
-     // 鍒ゅ畾鏉′欢锛氫笂涓€甯х殑鎺у埗鐩爣鍑犱箮涓�0锛屼笖褰撳墠鍥涗釜杞瓙鐨勭湡瀹炲弽棣堥€熷害鏋佸皬
-     App::g_state.physical.is_stopped = 
--        (std::abs(cur_spd.lf) < 0.5f && std::abs(cur_spd.lb) < 0.5f &&
--         std::abs(cur_spd.rf) < 0.5f && std::abs(cur_spd.rb) < 0.5f);
-+        (std::abs(cur_spd.lf) < 0.2f && std::abs(cur_spd.lb) < 0.2f &&
-+         std::abs(cur_spd.rf) < 0.2f && std::abs(cur_spd.rb) < 0.2f);
- }
- 
- }
-diff --git a/project/Subsystem/ChassisControl.h b/project/Subsystem/ChassisControl.h
-index b5edcfa..16ddfae 100644
---- a/project/Subsystem/ChassisControl.h
-+++ b/project/Subsystem/ChassisControl.h
-@@ -2,7 +2,8 @@
- 
- namespace Subsystem::Chassis {
-     void init();
--    void update_20ms_tick();  // 鏀惧埌 20ms 瀹氭椂鍣ㄤ腑鏂噷
-     void check_is_stopped();
-+
-+    void update_20ms_tick();  // PIT_CH1 瀹氭椂鍣ㄨ皟鐢紝鎵ц搴曠洏鎺у埗绠楁硶鏇存柊
-     void update_20ms_tick_debug();
- }
-\ No newline at end of file
-diff --git a/project/Subsystem/Display.cpp b/project/Subsystem/Display.cpp
-index d3feed2..846a853 100644
---- a/project/Subsystem/Display.cpp
-+++ b/project/Subsystem/Display.cpp
-@@ -4,6 +4,7 @@
- #include "GameManage.h"
- #include "Storage.h"
- #include "Encoder.h"
-+#include "Icm42688.h"
- 
- // 纭欢寮曡剼瀹氫箟
- #define KEY1 C13  // 涓嬬Щ / 鍑忓皬
-@@ -63,8 +64,8 @@ namespace { // 鍖垮悕鍛藉悕绌洪棿锛岀‘淇濊繖浜涙暟鎹彧鍦ㄦ湰鏂囦欢鍙
-     {"Max_Acc ",   &tune.dynamics.max_acc,            5.0f  },
-     {"MaxJerk ",   &tune.dynamics.max_jerk,           50.0f },
-     {"MaxASpd ",   &tune.dynamics.max_ang_speed,      0.1f  },
--    {"Gain_X  ",   &tune.dynamics.kinematic_gain_x,   0.01f },
--    {"Gain_Y  ",   &tune.dynamics.kinematic_gain_y,   0.01f },
-+    {"Gain_X  ",   &tune.dynamics.kinematic_gain_x,   0.001f },
-+    {"Gain_Y  ",   &tune.dynamics.kinematic_gain_y,   0.001f },
-     {"Reach_R ",   &tune.tracker.reach_radius,        0.1f  },
-     {"Reach_M ",   &tune.tracker.reach_radius_min,    0.1f  }
-      };
-@@ -394,12 +395,19 @@ void draw_odometry_data() {
- 
-     tft180_show_string(0, 2 * UI_ROW_H, "Global X: ");   tft180_show_float(10 * UI_COL_W, 2 * UI_ROW_H, pos.x, 3, 1);
-     tft180_show_string(0, 3 * UI_ROW_H, "Global Y: ");   tft180_show_float(10 * UI_COL_W, 3 * UI_ROW_H, pos.y, 3, 1);
--    char ui_buf[32]; sprintf(ui_buf, "Yaw: %8.2f   ", pos.yaw);     tft180_show_string(0, 4 * UI_ROW_H, ui_buf);
--
--    tft180_show_string(0, 5 * UI_ROW_H, "Spd LF: ");     tft180_show_float(10 * UI_COL_W, 5 * UI_ROW_H, wheels.lf, 3, 1);
--    tft180_show_string(0, 6 * UI_ROW_H, "Spd LB: ");     tft180_show_float(10 * UI_COL_W, 6 * UI_ROW_H, wheels.lb, 3, 1);
--    tft180_show_string(0, 7 * UI_ROW_H, "Spd RF: ");     tft180_show_float(10 * UI_COL_W, 7 * UI_ROW_H, wheels.rf, 3, 1);
--    tft180_show_string(0, 8 * UI_ROW_H, "Spd RB: ");     tft180_show_float(10 * UI_COL_W, 8 * UI_ROW_H, wheels.rb, 3, 1);
-+    char ui_buf[32]; 
-+    sprintf(ui_buf, "Yaw: %8.2f   ", pos.yaw);     tft180_show_string(0, 4 * UI_ROW_H, ui_buf);
-+    sprintf(ui_buf, "Acc_Z: %8.2f   ", imu_icm42688.data.acc_z);     tft180_show_string(0, 5 * UI_ROW_H, ui_buf);
-+    sprintf(ui_buf, "Acc_X: %8.2f   ", imu_icm42688.data.acc_x);     tft180_show_string(0, 6 * UI_ROW_H, ui_buf);
-+    sprintf(ui_buf, "Acc_Y: %8.2f   ", imu_icm42688.data.acc_y);     tft180_show_string(0, 7 * UI_ROW_H, ui_buf);
-+    sprintf(ui_buf, "Gyr_Z: %8.2f   ", imu_icm42688.data.gyro_z);     tft180_show_string(0, 8 * UI_ROW_H, ui_buf);
-+    sprintf(ui_buf, "Gyr_X: %8.2f   ", imu_icm42688.data.gyro_x);     tft180_show_string(0, 9 * UI_ROW_H, ui_buf);
-+    sprintf(ui_buf, "Gyr_Y: %8.2f   ", imu_icm42688.data.gyro_y);     tft180_show_string(0, 10 * UI_ROW_H, ui_buf);
-+
-+    tft180_show_string(0, 11 * UI_ROW_H, "Spd LF: ");     tft180_show_float(10 * UI_COL_W, 11 * UI_ROW_H, wheels.lf, 3, 1);
-+    tft180_show_string(0, 12 * UI_ROW_H, "Spd LB: ");     tft180_show_float(10 * UI_COL_W, 12 * UI_ROW_H, wheels.lb, 3, 1);
-+    tft180_show_string(0, 13 * UI_ROW_H, "Spd RF: ");    tft180_show_float(10 * UI_COL_W, 13 * UI_ROW_H, wheels.rf, 3, 1);
-+    tft180_show_string(0, 14 * UI_ROW_H, "Spd RB: ");    tft180_show_float(10 * UI_COL_W, 14 * UI_ROW_H, wheels.rb, 3, 1);
- }
- 
- // 缁樺埗鍙傛暟璋冭妭椤甸潰
-@@ -651,17 +659,13 @@ void draw_float_item(uint8_t row, const char* name, float val, bool is_selected,
-     
-     // 娓叉煋缂栬緫鏍囪瘑锛堜笌鏁板€煎尯淇濇寔涓嶉噸鍙狅級
-     if (is_selected && is_editing_this) {
--        tft180_show_string(9 * UI_COL_W, row * UI_ROW_H, "[E]");
-+        tft180_show_string(8 * UI_COL_W, row * UI_ROW_H, "[E]");
-     } else {
--        tft180_show_string(9 * UI_COL_W, row * UI_ROW_H, "   ");
-+        tft180_show_string(8 * UI_COL_W, row * UI_ROW_H, "   ");
-     }
- 
--    // 鍥哄畾浠庣 12 鍒楀紑濮嬫樉绀猴紝杈冨師鍏堝乏绉讳竴鍒楋紝閬垮厤澧炲姞浣嶆暟鍚庤秺鐣屻€�
--    tft180_show_float(12 * UI_COL_W,
--                    row * UI_ROW_H,
--                    val,
--                    5,
--                    2);
-+    // 鏄剧ず 3 浣嶅皬鏁版椂锛屾暣浣撳乏绉讳竴鍒楋紝閬垮厤鏈€鍙充晶瓒婄晫銆�
-+    tft180_show_float(11 * UI_COL_W, row * UI_ROW_H, val, 5, 3);
- }
- 
- // ================= 鍩虹缁樺浘杈呭姪鍑芥暟 ===================
-diff --git a/project/mdk/rt1064.uvoptx b/project/mdk/rt1064.uvoptx
-index 3b5b795..b648df1 100644
---- a/project/mdk/rt1064.uvoptx
-+++ b/project/mdk/rt1064.uvoptx
-@@ -409,12 +409,12 @@
-     <File>
-       <GroupNumber>1</GroupNumber>
-       <FileNumber>4</FileNumber>
--      <FileType>5</FileType>
-+      <FileType>8</FileType>
-       <tvExp>0</tvExp>
-       <tvExpOptDlg>0</tvExpOptDlg>
-       <bDave2>0</bDave2>
--      <PathWithFileName>..\App\GameManage.h</PathWithFileName>
--      <FilenameWithoutPath>GameManage.h</FilenameWithoutPath>
-+      <PathWithFileName>..\App\GameManageDemo.cpp</PathWithFileName>
-+      <FilenameWithoutPath>GameManageDemo.cpp</FilenameWithoutPath>
-       <RteFlg>0</RteFlg>
-       <bShared>0</bShared>
-     </File>
-@@ -425,8 +425,8 @@
-       <tvExp>0</tvExp>
-       <tvExpOptDlg>0</tvExpOptDlg>
-       <bDave2>0</bDave2>
--      <PathWithFileName>..\App\TestMap.cpp</PathWithFileName>
--      <FilenameWithoutPath>TestMap.cpp</FilenameWithoutPath>
-+      <PathWithFileName>..\App\GameManageMock.cpp</PathWithFileName>
-+      <FilenameWithoutPath>GameManageMock.cpp</FilenameWithoutPath>
-       <RteFlg>0</RteFlg>
-       <bShared>0</bShared>
-     </File>
-@@ -437,8 +437,8 @@
-       <tvExp>0</tvExp>
-       <tvExpOptDlg>0</tvExpOptDlg>
-       <bDave2>0</bDave2>
--      <PathWithFileName>..\App\TestMap.h</PathWithFileName>
--      <FilenameWithoutPath>TestMap.h</FilenameWithoutPath>
-+      <PathWithFileName>..\App\GameManage.h</PathWithFileName>
-+      <FilenameWithoutPath>GameManage.h</FilenameWithoutPath>
-       <RteFlg>0</RteFlg>
-       <bShared>0</bShared>
-     </File>    draw_item(2, "Dashboard",  ctx.cursor_idx == 0);
+#include "Display.h"
+#include "RobotState.h"
+#include "tuning_config.h"
+#include "GameManage.h"
+#include "Storage.h"
+#include "Encoder.h"
+
+// 硬件引脚定义
+#define KEY1 C13  // 下移 / 减小
+#define KEY2 C12  // 确认 / 编辑模式
+#define KEY3 C15  // 上移 / 增大
+#define KEY4 C14  // 返回 / 退出编辑
+
+
+namespace Subsystem::Display {
+
+// ====================================================================
+// 1. 私有数据结构与上下文 (Internal Context)
+// ====================================================================
+
+namespace { // 匿名命名空间，确保这些数据只在本文件可见
+
+    // 所有的 UI 状态收敛进一个 Context 结构体
+    struct UIContext {
+        MenuPage current_page = MenuPage::DASHBOARD;   // 当前页面
+        uint8_t  cursor_idx = 0;                       // 当前选中行
+        uint8_t  scroll_offset = 0;                    // 用于参数列表的上下滚动翻页
+        uint8_t  map_cursor_idx = 0;                   // 地图页面的光标位置
+        uint8_t  map_scroll_offset = 0;                // 地图页面的滚动偏移
+        bool     is_editing = false;                   // 是否处于编辑模式
+        bool     need_full_redraw = true;              // 是否需要全屏重绘 
+        bool     ui_dirty = true;                      // UI 是否需要更新
+        bool     is_closed = false;                    // 息屏标志位
+
+        // 按键状态
+        bool key_up_pressed = false; bool key_down_pressed = false;
+        bool key_enter_pressed = false; bool key_back_pressed = false;
+        bool last_k1 = true, last_k2 = true, last_k3 = true, last_k4 = true;                                       
+        
+        // 显存缓冲
+        uint8_t back_buffer[16][12] = {0}; 
+    };
+
+    UIContext ctx;
+
+    // --- 页面布局常量 ---
+    constexpr uint8_t TL_WALL=1<<0, TL_TGT=1<<1, TL_BOX=1<<2, TL_BOMB=1<<3, TL_PATH=1<<4, TL_CRS=1<<5, TL_CAR=1<<6;
+    constexpr int UI_COL_W = 6; 
+    constexpr int UI_ROW_H = 10;
+
+    // --- 巨大的参数字典放到最后或者单独抽离 ---
+    struct ParamItem { const char* name; float* val_ptr; float step; };
+    ParamItem tune_dict[] = { 
+    {"Yaw_Kp  ",   &tune.pid_yaw.kp,                  0.1f  },
+    {"Yaw_Ki  ",   &tune.pid_yaw.ki,                  0.01f },
+    {"Yaw_Kd  ",   &tune.pid_yaw.kd,                  0.01f },
+    {"Spd_Kp  ",   &tune.pid_speed.kp,                0.01f },
+    {"Spd_Ki  ",   &tune.pid_speed.ki,                0.01f },
+    {"ff_Kv   ",   &tune.ff.kv,                       0.01f },
+    {"ff_Ka   ",   &tune.ff.ka,                       1.0f  },
+    {"Max_Duty",   &tune.dynamics.max_duty,           1.0f  },
+    {"Max_Spd ",   &tune.dynamics.max_speed,          1.0f  },
+    {"Max_Acc ",   &tune.dynamics.max_acc,            5.0f  },
+    {"MaxJerk ",   &tune.dynamics.max_jerk,           50.0f },
+    {"MaxASpd ",   &tune.dynamics.max_ang_speed,      0.1f  },
+    {"Gain_X  ",   &tune.dynamics.kinematic_gain_x,   0.001f},
+    {"Gain_Y  ",   &tune.dynamics.kinematic_gain_y,   0.001f},
+    {"Reach_R ",   &tune.tracker.reach_radius,        0.1f  },
+    {"Reach_M ",   &tune.tracker.reach_radius_min,    0.1f  }
+     };
+    constexpr int DICT_SIZE = sizeof(tune_dict) / sizeof(tune_dict[0]);   
+    constexpr int PARAMS_PER_PAGE = 12; 
+}
+
+
+// ====================================================================
+// 2. 内部辅助函数声明
+// ====================================================================
+static void scan_keys();
+static void process_logic();
+static void render_ui();
+static void draw_main_menu();
+static void draw_mode_select();
+static void draw_dashboard();
+static void draw_map_select();
+static void draw_odometry_data();
+static void draw_tune_params();
+static void draw_item(uint8_t row, const char* name, bool is_selected);
+static void draw_float_item(uint8_t row, const char* name, float val, bool is_selected, bool is_editing, uint8_t decimals);
+static void fill_rect(uint8_t x, uint8_t y, uint8_t w, uint8_t h, uint16_t color);
+
+
+// ====================================================================
+// 3. 对外公开接口 (Facade) 
+// ====================================================================
+void init() {
+    ctx = UIContext(); // 瞬间重置所有状态
+
+    gpio_init(KEY1, GPI, GPIO_HIGH, GPI_PULL_UP);
+    gpio_init(KEY2, GPI, GPIO_HIGH, GPI_PULL_UP);
+    gpio_init(KEY3, GPI, GPIO_HIGH, GPI_PULL_UP);
+    gpio_init(KEY4, GPI, GPIO_HIGH, GPI_PULL_UP);
+
+    tft180_set_dir(TFT180_PORTAIT);                  // 竖屏
+    tft180_set_font(TFT180_6X8_FONT);                // 设置字库
+    tft180_set_color(RGB565_BLACK, RGB565_WHITE);    // 白底黑字
+    tft180_init();
+    
+    tft180_full(RGB565_WHITE);
+    system_delay_ms(50);                             // 延时确保初始化完成
+}
+
+
+void run() { 
+    scan_keys(); 
+    if (ctx.is_closed) {
+        if (ctx.key_back_pressed) {     // 按返回键唤醒
+            ctx.is_closed = false;
+            ctx.need_full_redraw = true;
+            ctx.current_page = MenuPage::MAIN_MENU;
+            ctx.cursor_idx = 0;
+            ctx.ui_dirty = true;
+        }
+        return;  // 拦截后续逻辑与渲染
+    }
+    
+    process_logic(); 
+    render_ui(); 
+}
+
+
+// ====================================================================
+// 4. 私有业务逻辑实现细节
+// ====================================================================
+
+// 按键扫描函数：检测按键边缘，更新按键状态变量，并标记 UI 需要刷新
+void scan_keys() { 
+    bool cur_k1 = gpio_get_level(KEY1);
+    bool cur_k2 = gpio_get_level(KEY2);
+    bool cur_k3 = gpio_get_level(KEY3);
+    bool cur_k4 = gpio_get_level(KEY4);
+
+    // 边缘检测触发：只有在按键从 高电平(true) 变到 低电平(false) 的瞬间，才触发一次 true
+    ctx.key_down_pressed  = (ctx.last_k1 && !cur_k1);
+    ctx.key_enter_pressed = (ctx.last_k2 && !cur_k2);
+    ctx.key_up_pressed    = (ctx.last_k3 && !cur_k3);
+    ctx.key_back_pressed  = (ctx.last_k4 && !cur_k4);
+
+    ctx.last_k1 = cur_k1; ctx.last_k2 = cur_k2; 
+    ctx.last_k3 = cur_k3; ctx.last_k4 = cur_k4;
+
+    if (ctx.key_down_pressed || ctx.key_enter_pressed || ctx.key_up_pressed || ctx.key_back_pressed) {
+        ctx.ui_dirty = true;
+    }
+}
+
+// 核心逻辑控制器：状态跳转与参数修改
+void process_logic() {
+    // 高频刷新监控页面
+    if (ctx.current_page == MenuPage::DASHBOARD || ctx.current_page == MenuPage::ODOMETRY_DATA) {
+        ctx.ui_dirty = true;
+    }
+
+    if (!ctx.ui_dirty) return;
+
+    switch (ctx.current_page) {
+        case MenuPage::MAIN_MENU:
+            if (ctx.key_down_pressed) ctx.cursor_idx = (ctx.cursor_idx + 1) % 8;    // 8个主菜单项
+            if (ctx.key_up_pressed)   ctx.cursor_idx = (ctx.cursor_idx == 0) ? 7 : ctx.cursor_idx - 1;
+
+            if (ctx.key_enter_pressed) {
+                if (ctx.cursor_idx == 0) { ctx.current_page = MenuPage::DASHBOARD;  App::g_state.debug.need_bg_redraw = true;}
+                if (ctx.cursor_idx == 1) { ctx.current_page = MenuPage::ODOMETRY_DATA; }
+                if (ctx.cursor_idx == 2) { ctx.current_page = MenuPage::TUNE_PARAMS; ctx.cursor_idx = 0; ctx.scroll_offset = 0; }
+
+                // --- Flash 存储触发 ---
+                if (ctx.cursor_idx == 3) {
+                    Storage::save_params();
+                    tft180_show_string(15 * UI_COL_W, 5 * UI_ROW_H, "[OK]");
+                    system_delay_ms(300);
+                }
+                if (ctx.cursor_idx == 4) {
+                    Storage::load_params();
+                    tft180_show_string(15 * UI_COL_W, 6 * UI_ROW_H, "[OK]");
+                    system_delay_ms(300);
+                }
+                // --- 息屏模式 ---
+                if (ctx.cursor_idx == 5) {
+                    ctx.is_closed = true;
+                    tft180_full(RGB565_WHITE); 
+                    return;
+                }
+                // --- 其他测试功能占位 ---
+                if (ctx.cursor_idx == 6) { App::g_state.control.current_target.y += 100;}
+                if (ctx.cursor_idx == 7) { App::g_state.control.current_target.x += 40;}
+
+                // 页面跳转后触发重绘
+                if (ctx.cursor_idx < 3) {ctx.need_full_redraw = true; ctx.cursor_idx = 0; ctx.ui_dirty = true;} 
+                else { ctx.ui_dirty = true;}
+            }
+            break;
+
+        case MenuPage::TUNE_PARAMS:
+            if (!ctx.is_editing) {
+                // 列表上下移动
+                if (ctx.key_down_pressed) ctx.cursor_idx = (ctx.cursor_idx + 1) % DICT_SIZE;
+                if (ctx.key_up_pressed)   ctx.cursor_idx = (ctx.cursor_idx == 0) ? (DICT_SIZE - 1) : ctx.cursor_idx - 1;
+                
+                // 自动计算滚动窗口，保证光标始终在屏幕内
+                if (ctx.cursor_idx < ctx.scroll_offset) ctx.scroll_offset = ctx.cursor_idx;
+                if (ctx.cursor_idx >= ctx.scroll_offset + PARAMS_PER_PAGE) ctx.scroll_offset = ctx.cursor_idx - PARAMS_PER_PAGE + 1;
+
+                if (ctx.key_enter_pressed) ctx.is_editing = true;
+                if (ctx.key_back_pressed) { ctx.current_page = MenuPage::MAIN_MENU; ctx.cursor_idx = 2; ctx.need_full_redraw = true; ctx.ui_dirty = true; }
+            } else {
+                // 编辑模式：直接操作字典中的指针，一键修改全局黑板变量
+                if (ctx.key_up_pressed)   *(tune_dict[ctx.cursor_idx].val_ptr) += tune_dict[ctx.cursor_idx].step;
+                if (ctx.key_down_pressed) *(tune_dict[ctx.cursor_idx].val_ptr) -= tune_dict[ctx.cursor_idx].step;
+                if (ctx.key_enter_pressed || ctx.key_back_pressed) ctx.is_editing = false;
+            }
+            break;
+
+        case MenuPage::DASHBOARD:
+            // 按确认键注入本地地图
+            if (ctx.key_enter_pressed) {
+                if (App::g_state.game.is_debug_mode) {
+                    ctx.current_page = MenuPage::MODE_SELECT;
+                    ctx.cursor_idx = 0;           // 光标复位，指向 Mock 模式
+                    ctx.need_full_redraw = true; 
+                    ctx.ui_dirty = true;  
+                } else {
+                    // 正赛模式按下回车，给个弹窗提示不可用
+                    tft180_full(RGB565_WHITE);
+                    tft180_show_string(10, 80, "[PROD MODE LOCKED]");
+                    system_delay_ms(300);
+                    ctx.need_full_redraw = true;
+                }
+            }
+            if (ctx.key_back_pressed) { 
+                ctx.current_page = MenuPage::MAIN_MENU; 
+                ctx.need_full_redraw = true; 
+                ctx.ui_dirty = true; 
+            }
+            break;
+
+        case MenuPage::MODE_SELECT:
+            if (ctx.key_down_pressed) ctx.cursor_idx = (ctx.cursor_idx + 1) % 2;
+            if (ctx.key_up_pressed)   ctx.cursor_idx = (ctx.cursor_idx == 0) ? 1 : 0;
+            
+            // 确认模式选择
+            if (ctx.key_enter_pressed) {
+                // 0: Mock模式 (实车), 1: Demo模式 (纯动画)
+                App::g_state.game.is_demo_mode = (ctx.cursor_idx == 0); 
+                
+                ctx.current_page = MenuPage::MAP_SELECT; // 进入选图
+                ctx.map_cursor_idx = 0;       
+                ctx.map_scroll_offset = 0;
+                ctx.need_full_redraw = true; 
+                ctx.ui_dirty = true;  
+            }
+            if (ctx.key_back_pressed) { 
+                ctx.current_page = MenuPage::DASHBOARD; 
+                ctx.need_full_redraw = true;
+                ctx.ui_dirty = true; 
+            }
+            break;
+        
+        case MenuPage::MAP_SELECT:
+            if (ctx.key_down_pressed) ctx.map_cursor_idx = (ctx.map_cursor_idx + 1) % App::GameEngine::get_mock_map_count();
+            if (ctx.key_up_pressed)   ctx.map_cursor_idx = (ctx.map_cursor_idx == 0) ? (App::GameEngine::get_mock_map_count() - 1) : ctx.map_cursor_idx - 1;
+            
+            // 滚动窗口保护计算
+            if (ctx.map_cursor_idx < ctx.map_scroll_offset) ctx.map_scroll_offset = ctx.map_cursor_idx;
+            if (ctx.map_cursor_idx >= ctx.map_scroll_offset + PARAMS_PER_PAGE) ctx.map_scroll_offset = ctx.map_cursor_idx - PARAMS_PER_PAGE + 1;
+
+            // 确认选择：加载对应的地图并跳回 VISION_DATA 监视结果
+            if (ctx.key_enter_pressed) {
+                App::g_state.game.selected_map_id = ctx.map_cursor_idx;
+
+                if (App::g_state.game.is_demo_mode) {
+                    App::GameEngine::load_mock_map(ctx.map_cursor_idx);
+                    App::g_state.game.phase = GamePhase::WAIT_FOR_VISION;
+                } else {
+                    App::g_state.game.phase = GamePhase::INIT_CALIBRATE;
+                }
+                
+                // 屏幕中间打个提示框
+                tft180_full(RGB565_WHITE);
+                tft180_show_string(10, 80, "[ Map Loaded ]");
+                system_delay_ms(200);
+                
+                ctx.current_page = MenuPage::DASHBOARD; // 自动跳回视图层看地图
+                ctx.need_full_redraw = true; 
+                App::g_state.debug.need_bg_redraw = true;
+                ctx.ui_dirty = true;
+            }
+            // 按返回键：取消选择，退回 Vision 层
+            if (ctx.key_back_pressed) { 
+                ctx.current_page = MenuPage::DASHBOARD; 
+                ctx.need_full_redraw = true;
+                ctx.ui_dirty = true; 
+            }
+            break;
+
+        default:
+            if (ctx.key_back_pressed) { ctx.current_page = MenuPage::MAIN_MENU; ctx.need_full_redraw = true; ctx.ui_dirty = true; }
+            break;
+    }
+}
+
+
+
+// ===================================================== UI 渲染 =====================================================
+
+// UI 渲染器：根据 current_page 调用对应的绘制函数
+void render_ui() {
+    if (!ctx.ui_dirty) return;
+    if (ctx.need_full_redraw) { 
+        tft180_full(RGB565_WHITE); 
+        App::g_state.debug.need_bg_redraw = true;
+        ctx.need_full_redraw = false; 
+    }
+
+    switch (ctx.current_page) {
+        case MenuPage::MAIN_MENU:      draw_main_menu(); break;
+        case MenuPage::DASHBOARD:      draw_dashboard(); break;
+        case MenuPage::ODOMETRY_DATA:  draw_odometry_data(); break;
+        case MenuPage::TUNE_PARAMS:    draw_tune_params(); break;
+        case MenuPage::MODE_SELECT:    draw_mode_select(); break;
+        case MenuPage::MAP_SELECT:     draw_map_select(); break;
+    }
+    ctx.ui_dirty = false; 
+}
+
+// 绘制主菜单
+void draw_main_menu() {
+    tft180_show_string(0, 0, "-- COMMAND MENU --");
+    draw_item(2, "Dashboard",  ctx.cursor_idx == 0);
     draw_item(3, "Odometry",   ctx.cursor_idx == 1);
     draw_item(4, "Tuning",     ctx.cursor_idx == 2);
     draw_item(5, "Save Config",ctx.cursor_idx == 3);
@@ -394,19 +394,12 @@ void draw_odometry_data() {
 
     tft180_show_string(0, 2 * UI_ROW_H, "Global X: ");   tft180_show_float(10 * UI_COL_W, 2 * UI_ROW_H, pos.x, 3, 1);
     tft180_show_string(0, 3 * UI_ROW_H, "Global Y: ");   tft180_show_float(10 * UI_COL_W, 3 * UI_ROW_H, pos.y, 3, 1);
-    char ui_buf[32]; 
-    sprintf(ui_buf, "Yaw: %8.2f   ", pos.yaw);     tft180_show_string(0, 4 * UI_ROW_H, ui_buf);
-    sprintf(ui_buf, "Acc_Z: %8.2f   ", imu_icm42688.data.acc_z);     tft180_show_string(0, 5 * UI_ROW_H, ui_buf);
-    sprintf(ui_buf, "Acc_X: %8.2f   ", imu_icm42688.data.acc_x);     tft180_show_string(0, 6 * UI_ROW_H, ui_buf);
-    sprintf(ui_buf, "Acc_Y: %8.2f   ", imu_icm42688.data.acc_y);     tft180_show_string(0, 7 * UI_ROW_H, ui_buf);
-    sprintf(ui_buf, "Gyr_Z: %8.2f   ", imu_icm42688.data.gyro_z);     tft180_show_string(0, 8 * UI_ROW_H, ui_buf);
-    sprintf(ui_buf, "Gyr_X: %8.2f   ", imu_icm42688.data.gyro_x);     tft180_show_string(0, 9 * UI_ROW_H, ui_buf);
-    sprintf(ui_buf, "Gyr_Y: %8.2f   ", imu_icm42688.data.gyro_y);     tft180_show_string(0, 10 * UI_ROW_H, ui_buf);
+    char ui_buf[32]; sprintf(ui_buf, "Yaw: %8.2f   ", pos.yaw);     tft180_show_string(0, 4 * UI_ROW_H, ui_buf);
 
-    tft180_show_string(0, 11 * UI_ROW_H, "Spd LF: ");     tft180_show_float(10 * UI_COL_W, 11 * UI_ROW_H, wheels.lf, 3, 1);
-    tft180_show_string(0, 12 * UI_ROW_H, "Spd LB: ");     tft180_show_float(10 * UI_COL_W, 12 * UI_ROW_H, wheels.lb, 3, 1);
-    tft180_show_string(0, 13 * UI_ROW_H, "Spd RF: ");    tft180_show_float(10 * UI_COL_W, 13 * UI_ROW_H, wheels.rf, 3, 1);
-    tft180_show_string(0, 14 * UI_ROW_H, "Spd RB: ");    tft180_show_float(10 * UI_COL_W, 14 * UI_ROW_H, wheels.rb, 3, 1);
+    tft180_show_string(0, 5 * UI_ROW_H, "Spd LF: ");     tft180_show_float(10 * UI_COL_W, 5 * UI_ROW_H, wheels.lf, 3, 1);
+    tft180_show_string(0, 6 * UI_ROW_H, "Spd LB: ");     tft180_show_float(10 * UI_COL_W, 6 * UI_ROW_H, wheels.lb, 3, 1);
+    tft180_show_string(0, 7 * UI_ROW_H, "Spd RF: ");     tft180_show_float(10 * UI_COL_W, 7 * UI_ROW_H, wheels.rf, 3, 1);
+    tft180_show_string(0, 8 * UI_ROW_H, "Spd RB: ");     tft180_show_float(10 * UI_COL_W, 8 * UI_ROW_H, wheels.rb, 3, 1);
 }
 
 // 绘制参数调节页面
@@ -426,11 +419,25 @@ void draw_tune_params() {
             continue;
         }
 
+        // 根据调节步长动态计算需要显示的小数位数
+        uint8_t dec = 0;
+        float step = tune_dict[item_idx].step;
+        if (step < 0.005f) {
+            dec = 3;       // 步长 0.001 对应 3 位小数
+        } else if (step < 0.05f) {
+            dec = 2;       // 步长 0.01 对应 2 位小数
+        } else if (step < 0.5f) {
+            dec = 1;       // 步长 0.1 对应 1 位小数
+        } else {
+            dec = 0;       // 步长 >= 1 对应 0 位小数 (整数)
+        }
+
         draw_float_item(i + 1, 
             tune_dict[item_idx].name, 
             *(tune_dict[item_idx].val_ptr), 
             ctx.cursor_idx == item_idx, 
-            ctx.is_editing && (ctx.cursor_idx == item_idx));
+            ctx.is_editing && (ctx.cursor_idx == item_idx),
+            dec);
     }
 }
 
@@ -652,19 +659,31 @@ void draw_item(uint8_t row, const char* name, bool is_selected) {
     tft180_show_string(1 * UI_COL_W, row * UI_ROW_H, buf);
 }
 
-void draw_float_item(uint8_t row, const char* name, float val, bool is_selected, bool is_editing_this) {
+void draw_float_item(uint8_t row, const char* name, float val, bool is_selected, bool is_editing_this, uint8_t decimals) {
     // 渲染光标和名称 (占用 0 ~ 9 列)
     draw_item(row, name, is_selected);
     
-    // 渲染编辑标识（与数值区保持不重叠）
+    // 渲染编辑标识
     if (is_selected && is_editing_this) {
-        tft180_show_string(8 * UI_COL_W, row * UI_ROW_H, "[E]");
+        tft180_show_string(9 * UI_COL_W, row * UI_ROW_H, "[E]");
     } else {
-        tft180_show_string(8 * UI_COL_W, row * UI_ROW_H, "   ");
+        tft180_show_string(9 * UI_COL_W, row * UI_ROW_H, "   ");
     }
 
-    // 显示 3 位小数时，整体左移一列，避免最右侧越界。
-    tft180_show_float(11 * UI_COL_W, row * UI_ROW_H, val, 5, 3);
+    // 格式化与防重影：动态生成带格式的字符串 (限制最大宽度为 7 个字符)
+    char val_buf[12];
+    if (decimals == 0) {
+        snprintf(val_buf, sizeof(val_buf), "%-7d", (int)val);  // 整数模式
+    } else if (decimals == 1) {
+        snprintf(val_buf, sizeof(val_buf), "%-7.1f", val);     // 1位小数
+    } else if (decimals == 2) {
+        snprintf(val_buf, sizeof(val_buf), "%-7.2f", val);     // 2位小数
+    } else {
+        snprintf(val_buf, sizeof(val_buf), "%-7.3f", val);     // 3位小数
+    }
+    
+    // 打印组装好的字符串
+    tft180_show_string(12 * UI_COL_W, row * UI_ROW_H, val_buf);
 }
 
 // ================= 基础绘图辅助函数 ===================
@@ -675,4 +694,5 @@ void fill_rect(uint8_t x, uint8_t y, uint8_t w, uint8_t h, uint16_t color) {
     }
 }
 
-} // namespace Subsystem::Display
+
+} // namespace Menu
