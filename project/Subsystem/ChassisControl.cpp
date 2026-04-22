@@ -40,14 +40,14 @@ namespace {
     __attribute__((always_inline)) inline float normalize_angle(float angle) {
         if (angle > 180.0f)       angle -= 360.0f;
         else if (angle < -180.0f) angle += 360.0f;
-        return angle * 3.1415926535f / 180.0f; 
+        return angle * SystemConfig::DEG_TO_RAD;
     }
 
     // 提取符号，用于静摩擦前馈方向判断，并引入死区防止零点震荡
     __attribute__((always_inline)) inline float get_sign(float val) {
-        if (val > 0.5f) return 1.0f;
-        if (val < -0.5f) return -1.0f;
-        return val / 0.5f; // 在 -0.5 到 0.5 之间，平滑地从 -1 过渡到 1，绝不突变
+        if (val > 1.0f) return 1.0f;
+        if (val < -1.0f) return -1.0f;
+        return val / 1.0f; // 在 -1.0 到 1.0 之间，平滑地从 -1 过渡到 1，绝不突变
     }
 
 
@@ -102,7 +102,7 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick() {
     float err_yaw = normalize_angle(ctrl.current_target.yaw - yaw);
 
     // 速度规划
-    Speed2D expected_global_vel = velocity_planner.velocity_planning_1d(err_global_x, err_global_y, 0.02f);
+    Speed2D expected_global_vel = velocity_planner.velocity_planning_1d(err_global_x, err_global_y, SystemConfig::PIT_CH1_DT_S);
 
     // 将全局期望速度投影到小车自身的局部坐标系
     float current_yaw_rad = yaw * SystemConfig::DEG_TO_RAD;  // 转换为弧度
@@ -146,8 +146,8 @@ __attribute__((section(".ramfunc"))) void check_is_stopped() {
         
     // 判定条件：上一帧的控制目标几乎为0，且当前四个轮子的真实反馈速度极小
     App::g_state.physical.is_stopped = 
-        (std::abs(cur_spd.lf) < 0.5f && std::abs(cur_spd.lb) < 0.5f &&
-         std::abs(cur_spd.rf) < 0.5f && std::abs(cur_spd.rb) < 0.5f);
+        (std::abs(cur_spd.lf) < 0.2f && std::abs(cur_spd.lb) < 0.2f &&
+         std::abs(cur_spd.rf) < 0.2f && std::abs(cur_spd.rb) < 0.2f);
 }
 
 }

@@ -44,16 +44,16 @@ struct TuningConfig {
 
 // 全局调参实例，放在 DTCM 区域，供所有模块访问
 __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
-    {9.0f, 0.5f, 0.6f},         // pid_yaw
-    {0.2f, 0.1f, 0.0f},         // pid_speed
-    {0.1f, 0.0f},               // feedforward
+    {4.5f, 0.0f, 0.4f},         // pid_yaw
+    {0.3f, 0.1f, 0.0f},         // pid_speed
+    {0.15f, 0.0f},               // feedforward
 
     // Dynamics 动力学预测参数
     {
-        65.0f,     // max_duty
-        120.0f,    // max_speed
-        80.0f,     // max_acc
-        1200.0f,   // max_jerk
+        60.0f,     // max_duty
+        80.0f,    // max_speed
+        60.0f,     // max_acc
+        1000.0f,   // max_jerk
         3.0f,      // max_ang_speed
         1.03f,     // kinematic_gain_x
         1.01f      // kinematic_gain_y

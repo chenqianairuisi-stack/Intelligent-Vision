@@ -76,7 +76,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
     switch (game.phase) {
         case GamePhase::INIT_CALIBRATE: {
             // 将里程计重置到已知入口位姿
-            Subsystem::PoseEstimator::set_position(ENTRY_X, ENTRY_Y);
+            Subsystem::PoseEstimator::set_position(ENTRY_X, ENTRY_Y, ENTRY_YAW);
             
             // 直接下发出库目标点，切到手动目标模式执行离场
             ctrl.current_target = {OUT_TARGET_X, OUT_TARGET_Y, ENTRY_YAW};

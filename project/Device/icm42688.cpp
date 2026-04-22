@@ -70,13 +70,13 @@ __attribute__((section(".ramfunc"))) void Icm42688::update_all() {
     data.raw_gyro_y = (int16_t)(((uint16_t)buf[10] << 8) | buf[11]);
     data.raw_gyro_z = (int16_t)(((uint16_t)buf[12] << 8) | buf[13]);
 
-    // 乘以预编译的常数转换为物理量
+    // 乘以预编译的常数转换为物理量,并且调整硬件坐标系
     data.temp   = static_cast<float>(data.raw_temp) * TEMP_SCALE + TEMP_OFFSET;
-    data.acc_x  = static_cast<float>(data.raw_acc_x) * ACCEL_SCALE;
-    data.acc_y  = static_cast<float>(data.raw_acc_y) * ACCEL_SCALE;
-    data.acc_z  = static_cast<float>(data.raw_acc_z) * ACCEL_SCALE;
-    data.gyro_x = static_cast<float>(data.raw_gyro_x) * GYRO_SCALE;
-    data.gyro_y = static_cast<float>(data.raw_gyro_y) * GYRO_SCALE;
+    data.acc_x  = static_cast<float>(data.raw_acc_y) * ACCEL_SCALE;
+    data.acc_y  = static_cast<float>(data.raw_acc_x) * ACCEL_SCALE;
+    data.acc_z  = - static_cast<float>(data.raw_acc_z) * ACCEL_SCALE;
+    data.gyro_x = - static_cast<float>(data.raw_gyro_y) * GYRO_SCALE;
+    data.gyro_y = - static_cast<float>(data.raw_gyro_x) * GYRO_SCALE;
     data.gyro_z = - static_cast<float>(data.raw_gyro_z) * GYRO_SCALE;
 }
 

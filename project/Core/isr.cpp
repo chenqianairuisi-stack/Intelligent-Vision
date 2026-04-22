@@ -12,16 +12,19 @@
 
 extern "C" void PIT_IRQHandler(void) {
 
-    // 5ms 定时器中断，用于陀螺仪数据读取与积分
+    // PIT_CH0 定时器中断（周期由 SystemConfig::PIT_CH0_PERIOD_MS 配置），用于陀螺仪数据读取与积分
     if(pit_flag_get(PIT_CH0)) 
     {
         pit_flag_clear(PIT_CH0);
 
-        imu_icm42688.update_gyro_only();                   // 陀螺仪数据读取与转换
-        Subsystem::PoseEstimator::update_yaw_5ms_tick();   // yaw 轴角度更新
+        // 陀螺仪数据读取与转换
+        imu_icm42688.update_all();  
+
+        // yaw 轴角度更新
+        Subsystem::PoseEstimator::update_yaw_1ms_tick();  
     }
     
-    // 20ms 定时器中断，用于底盘控制算法更新和里程计推算
+    // PIT_CH1 定时器中断（周期由 SystemConfig::PIT_CH1_PERIOD_MS 配置），用于底盘控制算法更新和里程计推算
     if(pit_flag_get(PIT_CH1)) 
     {
         pit_flag_clear(PIT_CH1);

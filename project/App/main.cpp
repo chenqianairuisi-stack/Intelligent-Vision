@@ -8,6 +8,7 @@
 #include "Display.h"
 #include "PoseEstimate.h"
 #include "Storage.h"
+#include "system_config.h"
 
 
 extern "C" int main(void) {
@@ -31,8 +32,8 @@ extern "C" int main(void) {
     system_delay_ms(500);
     Subsystem::PoseEstimator::calibrate_gyro_step();
 
-    pit_ms_init(PIT_CH0, 5);                 
-    pit_ms_init(PIT_CH1, 20);               
+    pit_ms_init(PIT_CH0, SystemConfig::PIT_CH0_PERIOD_MS);
+    pit_ms_init(PIT_CH1, SystemConfig::PIT_CH1_PERIOD_MS);
     interrupt_set_priority(PIT_IRQn, 0);    
     interrupt_global_enable(0);
     

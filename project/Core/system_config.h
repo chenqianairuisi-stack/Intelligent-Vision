@@ -11,6 +11,12 @@
 // 全局系统配置和常量定义
 // =================================================================
 namespace SystemConfig {
+    // 定时器参数
+    static constexpr uint32_t PIT_CH0_PERIOD_MS = 1U;          // IMU 采样与姿态解算周期
+    static constexpr uint32_t PIT_CH1_PERIOD_MS = 20U;         // 底盘控制与里程计周期
+    static constexpr float PIT_CH0_DT_S = static_cast<float>(PIT_CH0_PERIOD_MS) * 0.001f;  // 转换为秒
+    static constexpr float PIT_CH1_DT_S = static_cast<float>(PIT_CH1_PERIOD_MS) * 0.001f;  // 转换为秒
+
     // 机械参数
     static constexpr float WHEEL_RADIUS = 3.15f;                // 轮子半径，单位：厘米
     static constexpr float HALF_X_AXIS = 9.0f;                  // x 轴半轴距，单位：厘米
@@ -50,7 +56,8 @@ namespace SystemConfig {
     static constexpr float OUT_TARGET_Y = 30.0f;                // 出库目标位置 Y 坐标
 
     // 数学常数
-    static constexpr float DEG_TO_RAD = 3.1415926535f / 180.0f;
+    static constexpr float DEG_TO_RAD = 0.017453292519943f;
+    static constexpr float RAD_TO_DEG = 57.29577951308232f;
 }
 
 
