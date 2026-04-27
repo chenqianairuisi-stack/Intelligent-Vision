@@ -9,6 +9,7 @@ extern "C" {
 #include "RobotState.h"
 #include "system_config.h"
 #include "tuning_config.h"
+#include "MotionControl.h"
 
 #include "Icm42688.h"
 #include "Encoder.h"
@@ -17,8 +18,6 @@ extern "C" {
 namespace Subsystem::PoseEstimator {
 
 namespace { 
-    float last_gyro_z = 0.0f;         // 上一次的陀螺仪Z轴读数
-
     // ==========================================
     // 基础状态变量
     // ==========================================
@@ -36,14 +35,8 @@ namespace {
     // ==========================================
     // 四元数初始化为绝对水平、Yaw为 90度 [cos(45deg) = 0.70710678f, sin(45deg) = 0.70710678f]
     float q0 = 0.70710678f, q1 = 0.0f, q2 = 0.0f, q3 = 0.70710678f;
-    
-    // 误差积分项 (PI控制器中的I，用来消除稳态误差，但我们有ZUPT，所以用的较少)
-    float exInt = 0.0f, eyInt = 0.0f, ezInt = 0.0f;
 
-    // 算法参数
     constexpr float SAMPLE_FREQ = 1.0f / SystemConfig::PIT_CH0_DT_S;  // 采样频率 (Hz)，根据系统定时器周期计算
-    constexpr float MAHONY_KP   = 1.0f;   // 信任加速度计的权重参数
-    constexpr float MAHONY_KI   = 0.0f;   // 设为 0，因为我们用 ZUPT 处理零漂
 }
 
 
@@ -98,7 +91,7 @@ void set_position(float x, float y, float yaw_deg) {
     // 1. 重置坐标
     App::g_state.physical.pose.x = x;
     App::g_state.physical.pose.y = y;
-    
+
     // 2. 将传入的初始偏航角(度)转换为四元数
     float yaw_rad_half = (yaw_deg * SystemConfig::DEG_TO_RAD) * 0.5f;
     
@@ -128,7 +121,7 @@ void adaptive_mahony_update(float gx, float gy, float gz, float ax, float ay, fl
     };
 
     // 动态 Kp 屏蔽线加速度干扰
-    float Kp_adaptive = MAHONY_KP;
+    float Kp_adaptive = tune.estimate.mahony_kp; // 基础 Kp 参数
     float acc_norm = std::sqrt(ax*ax + ay*ay + az*az);
     
     // 当合加速度不在 0.85g ~ 1.15g 范围内时（急加速/急刹车/剧烈撞击）
@@ -232,7 +225,6 @@ void update_yaw_1ms_tick() {
     App::g_state.physical.pose.yaw = yaw_deg;
 }
 
-
 // ==========================================
 // PIT_CH1 里程计更新定时器
 // ==========================================
@@ -258,10 +250,10 @@ void update_position_20ms_tick(const int16_t* encoder_counts, float current_yaw_
     // 将局部坐标系的位移转换到全局坐标系
     float cos_yaw = cosf(current_yaw_rad);
     float sin_yaw = sinf(current_yaw_rad);
-
     float dx_global = dx_local * sin_yaw + dy_local * cos_yaw;
     float dy_global = -dx_local * cos_yaw + dy_local * sin_yaw;
 
+    // 更新全局物理位姿
     App::g_state.physical.pose.x += dx_global;
     App::g_state.physical.pose.y += dy_global;
 }

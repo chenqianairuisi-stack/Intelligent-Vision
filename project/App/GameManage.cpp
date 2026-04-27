@@ -125,6 +125,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 } else {
                     solver.load_from_vision(logical_level);    // 将视觉数据加载到推箱求解器
                     game.phase = GamePhase::PLAN_SOKOBAN;      // 直接进入推箱子阶段
+                    // game.phase = GamePhase::NONE; 
                 }
             } else {
                 // 未接收到地图帧，超时重试请求地图数据
@@ -197,8 +198,9 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             if (err_yaw > 180.0f) err_yaw = 360.0f - err_yaw;
 
             // 朝向收敛后触发 ART2 捕捉
-            if (err_yaw < 5.0f) { 
+            if (err_yaw < 2.0f) { 
 
+                system_delay_ms(1000);   
                 // 请求 ART2 捕捉该观测点对应实体的语义标签
                 uint8_t current_entity = patrol_actions[game.action_idx].obs.entity_id;
                 bool is_box = patrol_actions[game.action_idx].obs.is_box;

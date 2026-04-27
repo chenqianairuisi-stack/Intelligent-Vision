@@ -8,7 +8,7 @@
 #define FLASH_PAGE_INDEX          (FLASH_PAGE_7)                                
 
 // 魔数校验码 (用于判定 Flash 里存的是不是我们的参数)
-#define CONFIG_MAGIC_WORD         (0xAA55CC47)
+#define CONFIG_MAGIC_WORD         (0xAA55CC48)
 
 
 void Storage::init() {

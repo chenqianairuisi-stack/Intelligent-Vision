@@ -15,12 +15,13 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt) {
     }
 
     // 2. 读取 DTCM 中的全局极限参数
-    float max_acc = tune.dynamics.max_acc;
+    float max_acc_start = tune.dynamics.max_acc; // 起步阶段的最大加速度
+    float max_acc_brake = tune.dynamics.max_acc * tune.dynamics.brake_limit; // 刹车阶段的最大加速度
     float max_jerk = tune.dynamics.max_jerk;
     float max_v_limit = tune.dynamics.max_speed;
 
     // 3. Jerk 动态滞后补偿 (直接使用标量速度，计算极大简化)
-    float t_jerk = max_acc / max_jerk;                      // 刹车加速度建立所需时间 (s)
+    float t_jerk = max_acc_brake / max_jerk;
     float jerk_lag_dist = 0.5f * current_v * t_jerk;        // 额外滑行的物理距离 (cm)
 
     // 4. 计算理论安全刹车速度 (梯形速度规划)
@@ -29,13 +30,16 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt) {
 
     float target_v;
     if (safe_distance > 2.0f) {
-        target_v = std::sqrtf(2.0f * max_acc * safe_distance);
+        target_v = std::sqrtf(2.0f * max_acc_brake * safe_distance);
     } else {
-        float kp = std::sqrtf(max_acc);
+        float kp = std::sqrtf(max_acc_brake);
         target_v = kp * safe_distance;
     }
 
-    target_v = std::min(max_v_limit, target_v);  
+    target_v = std::min(max_v_limit, target_v); 
+
+    // 利用 target_v，进行非对称加速度判定
+    float current_max_acc = (target_v < current_v) ? max_acc_brake : max_acc_start;
     
     // 计算当前需要的期望标量加速度
     float req_a = (target_v - current_v) / dt;
@@ -53,10 +57,10 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt) {
     }
 
     // 【第二级滤波】：Accel 标量限幅
-    if (current_a > max_acc) {
-        current_a = max_acc;
-    } else if (current_a < -max_acc) {
-        current_a = -max_acc;
+    if (current_a > current_max_acc) {
+        current_a = current_max_acc;
+    } else if (current_a < -current_max_acc) {
+        current_a = -current_max_acc;
     }
 
     // 更新真实的物理标量速度

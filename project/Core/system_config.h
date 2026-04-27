@@ -38,7 +38,7 @@ namespace SystemConfig {
     static constexpr int MAP_MAX_HEIGHT = 16;                   // 地图最大高度（网格坐标）
     static constexpr int PLAN_START_X = 4;                      // 出库点 X 坐标（网格坐标）
     static constexpr int PLAN_START_Y = 1;                      // 出库点 Y 坐标（网格坐标）
-    static constexpr int PLAN_END_X = 5;                        // 入库点 X 坐标（网格坐标）
+    static constexpr int PLAN_END_X = 6;                        // 入库点 X 坐标（网格坐标）
     static constexpr int PLAN_END_Y = 1;                        // 入库点 Y 坐标（网格坐标）
     static constexpr int MAX_BOXES = 10;                        // 最大箱子数
     static constexpr int MAX_BOMBS = 3;                         // 最大炸弹数
@@ -49,8 +49,8 @@ namespace SystemConfig {
     static constexpr int MAX_PATH_LENGTH = 100;                 // 最大搜索步数
     
     // 其他全局常量
-    static constexpr float ENTRY_X = 110.0f;                    // 入口位置 X 坐标
-    static constexpr float ENTRY_Y = 10.0f;                     // 入口位置 Y 坐标
+    static constexpr float ENTRY_X = 124.5f;                    // 入口位置 X 坐标
+    static constexpr float ENTRY_Y = 14.0f;                     // 入口位置 Y 坐标
     static constexpr float ENTRY_YAW = 90.0f;                   // 入口位置航向（单位：度，0度为x轴正方向，逆时针为正）
     static constexpr float OUT_TARGET_X = 90.0f;                // 出库目标位置 X 坐标
     static constexpr float OUT_TARGET_Y = 30.0f;                // 出库目标位置 Y 坐标

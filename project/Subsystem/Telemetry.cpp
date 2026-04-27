@@ -18,7 +18,7 @@
 namespace Subsystem::Telemetry {
 
 // ====================================================================
-// 内部隐蔽变量：VOFA 协议体和接收缓存
+// 内部变量
 // ====================================================================
 namespace {
     #pragma pack(push, 1)
@@ -29,70 +29,100 @@ namespace {
         uint8_t tail = 0xBB;
     };
     #pragma pack(pop)
-    
-    VofaJustFloat tx_packet; 
+    VofaJustFloat tx_packet;
+
     char rx_cmd_buf[64];
     uint8_t rx_idx = 0;
 
+    // --- 运动时间监测 ---
     bool is_timing_movement = false;   // 测时器状态标志
     uint32_t movement_start_time = 0;  // 运动开始的系统时间戳 (ms)
     ControlMode current_timing_mode = ControlMode::MANUAL_DEBUG;  // 当前测时器关联的控制模式
 
+    // --- 语义监测 ---
+    bool is_monitoring_semantics = false;                            // 语义监测开关
+    int8_t cached_semantic_labels[SystemConfig::MAX_ENTITIES] = {0}; // 语义缓存，用于比对差异
+
+    // --- 内部函数声明 ---
     void start_movement_timing(ControlMode mode);  // 触发测时器
     void check_movement_completion();              // 在后台循环中检查测时器状态，计算并发送结果
     void dump_semantic_cache();                    // 发送语义缓存内容
     void execute_command(const char* cmd);         // 命令解析函数声明
 }
 
+
 // ====================================================================
 // 公共接口
 // ====================================================================
 
+// 初始化无线串口 (波特率默认115200)
 void init() {
-    wireless_uart_init();  // 初始化无线串口 (波特率默认115200)
+    wireless_uart_init();  
 }
 
-
-// 发送波形数据
+// 发送数据
 void send_wave_data() {
 
-    if (App::g_state.debug.telemetry_mode == -1) return; 
+    // 1. 常规高频波形推送
+    if (App::g_state.debug.telemetry_mode != -1) {
+        if (App::g_state.debug.telemetry_mode == 0) {
+            // 【模式 0】：底盘动力学监控
+            const auto& current_pose = App::g_state.physical.pose;
+            const auto& wheel_speed = App::g_state.physical.current_wheel_speed;
+            Pose2D  target_pos  = App::g_state.control.current_target;  
+            
+            Velocity2D avg_speed = Algorithm::Motion::Kinematics::forward(
+                wheel_speed.lf, wheel_speed.lb,
+                wheel_speed.rf, wheel_speed.rb
+            );
+            float avg_speed_mag = std::sqrt(avg_speed.vx * avg_speed.vx + avg_speed.vy * avg_speed.vy);
 
-    if (App::g_state.debug.telemetry_mode == 0) {
-        // 【模式 0】：底盘动力学监控
-        const auto& current_pose = App::g_state.physical.pose;
-        const auto& wheel_speed = App::g_state.physical.current_wheel_speed;
-        Pose2D  target_pos  = App::g_state.control.current_target;  
+            tx_packet.data_1 = 0;            
+            tx_packet.data_2 = avg_speed_mag;              
+            tx_packet.data_3 = target_pos.x;               
+            tx_packet.data_4 = current_pose.x;
+            tx_packet.data_5 = target_pos.y;               
+            tx_packet.data_6 = current_pose.y;
+            
+        } 
+        else if (App::g_state.debug.telemetry_mode == 1) {
+            // 【模式 1】：定位数据监控
+            const auto& current_pose = App::g_state.physical.pose;
+            const auto& vision_pose = App::g_state.vision.art1_pose;
+
+            tx_packet.data_1 = current_pose.x;
+            tx_packet.data_2 = current_pose.y;
+            tx_packet.data_3 = vision_pose.x;
+            tx_packet.data_4 = vision_pose.y;
+            tx_packet.data_5 = 0;
+            tx_packet.data_6 = 0;
+        } 
+
+        wireless_uart_send_buffer((uint8*)&tx_packet, sizeof(VofaJustFloat));
+    }
+
+    // 2. 增量式语义监测 (仅在监测开启，且数据有实质变更时发送)
+    if (is_monitoring_semantics) {
+        bool has_new_info = false;
+        const auto& current_labels = App::g_state.vision.semantic_labels;
         
-        Velocity2D avg_speed = Algorithm::Motion::Kinematics::forward(
-            wheel_speed.lf, wheel_speed.lb,
-            wheel_speed.rf, wheel_speed.rb
-        );
-        float avg_speed_mag = std::sqrt(avg_speed.vx * avg_speed.vx + avg_speed.vy * avg_speed.vy);
-
-        tx_packet.data_1 = 0;            
-        tx_packet.data_2 = avg_speed_mag;              
-        tx_packet.data_3 = target_pos.x;               
-        tx_packet.data_4 = current_pose.x;
-        tx_packet.data_5 = target_pos.y;               
-        tx_packet.data_6 = current_pose.y;
+        // 极速内存比对 (M7 执行这段循环耗时 < 0.1us)
+        for (int i = 0; i < SystemConfig::MAX_ENTITIES; ++i) {
+            if (current_labels[i] != cached_semantic_labels[i]) {
+                has_new_info = true;
+                cached_semantic_labels[i] = current_labels[i]; // 更新影子缓存
+            }
+        }
         
-    } 
-    else if (App::g_state.debug.telemetry_mode == 1) {
-        auto& vision_data = App::g_state.vision;
-        // 【模式 1】：ART1 视觉定位与地图监控
-        tx_packet.data_1 = vision_data.art1_pose.x;    // CH1: 视觉 X 坐标
-        tx_packet.data_2 = vision_data.art1_pose.y;    // CH2: 视觉 Y 坐标
-        tx_packet.data_3 = vision_data.box_count;      // CH4: 解析出的箱子总数
-        tx_packet.data_4 = vision_data.bomb_count;     // CH5: 解析出的炸弹总数
-        tx_packet.data_5 = 0.0f; 
-        tx_packet.data_6 = 0.0f;         
-    } 
-
-    wireless_uart_send_buffer((uint8*)&tx_packet, sizeof(VofaJustFloat));
+        // 只有当捕捉到“标签翻转”的跳变沿时，才组合字符串下发
+        if (has_new_info) {
+            dump_semantic_cache();
+        }
+    }
+    
 }
 
-// 接收上位机命令
+// 接收上位机指令
 void receive_and_parse_task() {
     uint8_t temp_buf[32]; 
     
@@ -188,7 +218,7 @@ namespace {
         // 组装前缀
         int offset = snprintf(dump_buf, sizeof(dump_buf), "[SEMANTIC_DUMP] ");
         
-        // 遍历整个语义池（假设 MAX_ENTITIES 不会过大，否则需要分包）
+        // 遍历整个语义池，将每个实体的 ID 和标签值追加到字符串中
         for (int i = 0; i < SystemConfig::MAX_ENTITIES; ++i) {
             // 安全追加字符串，防止越界
             if (offset < sizeof(dump_buf) - 16) {
@@ -244,14 +274,26 @@ namespace {
                 }
                 break;
             
-            case 'C':  // 视觉控制类指令
+            case 'V':  // 视觉控制类指令
                 switch (sub) {
                     case 'R': {
                         if (value == 1) Subsystem::Vision::request_map_ART1();
                         else if (value == 2) Subsystem::Vision::request_pose_ART1();
                         break;
                     }
-                    case 'G': dump_semantic_cache(); break;
+                    case 'G': {
+                        // !V G 1 开启监测，!V G 0 关闭监测
+                        if (value > 0.5f) {
+                            is_monitoring_semantics = true;
+                            // 将语义缓存全刷为 -2 (无效标签)，强制下一次轮询立即发送一次全量数据
+                            memset(cached_semantic_labels, -2, sizeof(cached_semantic_labels));
+                            wireless_uart_send_buffer((uint8_t*)"[SYS] Semantic Monitor: ON\r\n", 28);
+                        } else {
+                            is_monitoring_semantics = false;
+                            wireless_uart_send_buffer((uint8_t*)"[SYS] Semantic Monitor: OFF\r\n", 29);
+                        }
+                        break;
+                    }
                     default: return;
                 }
                 break;

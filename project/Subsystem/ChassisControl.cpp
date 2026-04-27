@@ -123,22 +123,6 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick() {
     run_speed_loop(target_wheel_speeds);
 }
 
-__attribute__((section(".ramfunc"))) void update_20ms_tick_debug() {
-
-    // WheelSpeed4 debug_speeds = {
-    //     tune.motors.lf_speed,
-    //     tune.motors.lb_speed,
-    //     tune.motors.rf_speed,
-    //     tune.motors.rb_speed
-    // };
-
-    // run_speed_loop(debug_speeds);
-
-    motors[0].set_duty(30, tune.dynamics.max_duty);
-    motors[1].set_duty(30, tune.dynamics.max_duty);
-    motors[2].set_duty(30, tune.dynamics.max_duty);
-    motors[3].set_duty(30, tune.dynamics.max_duty);
-}
 
 __attribute__((section(".ramfunc"))) void check_is_stopped() {
 

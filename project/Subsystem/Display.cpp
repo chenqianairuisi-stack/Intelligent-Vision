@@ -65,8 +65,12 @@ namespace { // 匿名命名空间，确保这些数据只在本文件可见
     {"MaxASpd ",   &tune.dynamics.max_ang_speed,      0.1f  },
     {"Gain_X  ",   &tune.dynamics.kinematic_gain_x,   0.001f},
     {"Gain_Y  ",   &tune.dynamics.kinematic_gain_y,   0.001f},
+    {"Brake_Lim",   &tune.dynamics.brake_limit,       0.05f },
     {"Reach_R ",   &tune.tracker.reach_radius,        0.1f  },
-    {"Reach_M ",   &tune.tracker.reach_radius_min,    0.1f  }
+    {"Reach_M ",   &tune.tracker.reach_radius_min,    0.1f  },
+    {"Mahony_Kp",  &tune.estimate.mahony_kp,          0.1f  },
+    {"Vis_Thr ",   &tune.estimate.reject_threshold,   1.0f  },
+    {"Vis_Alpha",  &tune.estimate.max_trust_alpha,    0.01f }
      };
     constexpr int DICT_SIZE = sizeof(tune_dict) / sizeof(tune_dict[0]);   
     constexpr int PARAMS_PER_PAGE = 12; 
@@ -390,16 +394,23 @@ void draw_map_select() {
 void draw_odometry_data() {
     tft180_show_string(0, 0, "-- ODO & HW --");
     auto pos = App::g_state.physical.pose;
+    auto vision_pos = App::g_state.vision.art1_pose;
     auto wheels = App::g_state.physical.current_wheel_speed;
 
+    char ui_buf[32]; 
+    
     tft180_show_string(0, 2 * UI_ROW_H, "Global X: ");   tft180_show_float(10 * UI_COL_W, 2 * UI_ROW_H, pos.x, 3, 1);
     tft180_show_string(0, 3 * UI_ROW_H, "Global Y: ");   tft180_show_float(10 * UI_COL_W, 3 * UI_ROW_H, pos.y, 3, 1);
-    char ui_buf[32]; sprintf(ui_buf, "Yaw: %8.2f   ", pos.yaw);     tft180_show_string(0, 4 * UI_ROW_H, ui_buf);
+    sprintf(ui_buf, "Yaw: %8.2f   ", pos.yaw);     tft180_show_string(0, 4 * UI_ROW_H, ui_buf);
 
-    tft180_show_string(0, 5 * UI_ROW_H, "Spd LF: ");     tft180_show_float(10 * UI_COL_W, 5 * UI_ROW_H, wheels.lf, 3, 1);
-    tft180_show_string(0, 6 * UI_ROW_H, "Spd LB: ");     tft180_show_float(10 * UI_COL_W, 6 * UI_ROW_H, wheels.lb, 3, 1);
-    tft180_show_string(0, 7 * UI_ROW_H, "Spd RF: ");     tft180_show_float(10 * UI_COL_W, 7 * UI_ROW_H, wheels.rf, 3, 1);
-    tft180_show_string(0, 8 * UI_ROW_H, "Spd RB: ");     tft180_show_float(10 * UI_COL_W, 8 * UI_ROW_H, wheels.rb, 3, 1);
+    tft180_show_string(0, 5 * UI_ROW_H, "Vision X: ");   tft180_show_float(10 * UI_COL_W, 5 * UI_ROW_H, vision_pos.x, 3, 1);
+    tft180_show_string(0, 6 * UI_ROW_H, "Vision Y: ");   tft180_show_float(10 * UI_COL_W, 6 * UI_ROW_H, vision_pos.y, 3, 1);
+    sprintf(ui_buf, "Yaw: %8.2f   ", vision_pos.yaw);     tft180_show_string(0, 7 * UI_ROW_H, ui_buf);
+
+    tft180_show_string(0, 8 * UI_ROW_H, "Spd LF: ");     tft180_show_float(10 * UI_COL_W, 8 * UI_ROW_H, wheels.lf, 3, 1);
+    tft180_show_string(0, 9 * UI_ROW_H, "Spd LB: ");     tft180_show_float(10 * UI_COL_W, 9 * UI_ROW_H, wheels.lb, 3, 1);
+    tft180_show_string(0, 10 * UI_ROW_H, "Spd RF: ");     tft180_show_float(10 * UI_COL_W, 10 * UI_ROW_H, wheels.rf, 3, 1);
+    tft180_show_string(0, 11 * UI_ROW_H, "Spd RB: ");     tft180_show_float(10 * UI_COL_W, 11 * UI_ROW_H, wheels.rb, 3, 1);
 }
 
 // 绘制参数调节页面
@@ -471,7 +482,7 @@ void draw_dashboard() {
         if (game.phase == GamePhase::ANIMATE_PATROL_DEMO || game.phase == GamePhase::BIND_SEMANTICS || game.phase == GamePhase::PLAN_SOKOBAN) {
             snprintf(hud_line2, 22, "Bm:%3dms GT:%3dms", (int)render_ctx.bomb_plan_time_ms, (int)render_ctx.patrol_plan_time_ms);
         } else if (game.phase == GamePhase::ANIMATE_DEMO || game.phase == GamePhase::FINISHED) {
-            snprintf(hud_line2, 22, "IDA* Time: %4dms", (int)render_ctx.push_plan_time_ms);
+            snprintf(hud_line2, 22, "IDA* Time: %5dms", (int)render_ctx.push_plan_time_ms);
         } else {
             snprintf(hud_line2, 22, "Plan Time: --  ms");
         }

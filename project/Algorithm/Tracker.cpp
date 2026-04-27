@@ -62,7 +62,6 @@ void load_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path) {
 __attribute__((section(".ramfunc"))) void update_target() {
     auto& plan = App::g_state.planning;
     auto& ctrl = App::g_state.control;
-    auto& current_pos = App::g_state.physical.pose;
 
     // 没在循迹就返回最后一次的目标
     if (ctrl.tracker_state != TrackerState::TRACKING) return;
