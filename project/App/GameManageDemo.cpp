@@ -1,6 +1,7 @@
 #include "GameManage.h"
 #include "CoreScheduler.h"
 #include "Vision.h"
+#include <algorithm>
 
 namespace App::GameEngine {
 
@@ -8,6 +9,7 @@ namespace App::GameEngine {
 __attribute__((section(".ramfunc"))) void DemoGameManager::update() {
     auto& game = App::g_state.game;
     auto& phase = game.phase;
+    auto& vision_data = App::g_state.vision;
 
     switch (phase) {  
 
@@ -18,7 +20,7 @@ __attribute__((section(".ramfunc"))) void DemoGameManager::update() {
             // Step A：炸弹任务规划耗时
             auto& bomb_tasks = App::g_state.planning.bomb_tasks;
             uint32_t t0 = Core::Scheduler::get_sys_tick_ms();
-            bomb_tasks = strategic_planner.evaluate_and_assign_bombs(logical_level);
+            bomb_tasks = strategic_planner.evaluate_and_assign_bombs<GameMode::PHASE1_ANY>(logical_level);
             bomb_plan_time_ms = Core::Scheduler::get_sys_tick_ms() - t0;
 
             // Step B：联合巡图规划耗时
@@ -59,9 +61,9 @@ __attribute__((section(".ramfunc"))) void DemoGameManager::update() {
 
                 // 1) 当前动作无段路径时，先生成
                 if (demo.segment_path.empty()) {
-                    bool success = false;
-                    if (act.is_bomb_task) success = patrol_planner.get_bomb_push_path(logical_level, logical_level.player_start, act.bomb, demo.segment_path);
-                    else success = patrol_planner.get_grid_path(logical_level, logical_level.player_start, act.obs.pos, demo.segment_path);
+                    bool success = act.is_bomb_task ? 
+                                   patrol_planner.get_bomb_push_path(logical_level, logical_level.player_start, act.bomb, demo.segment_path) :
+                                   patrol_planner.get_grid_path(logical_level, logical_level.player_start, act.obs.pos, demo.segment_path);
                     
                     if (!success) { 
                         game.error_stage = 1; // 错误阶段1：寻图路径生成失败
@@ -93,9 +95,12 @@ __attribute__((section(".ramfunc"))) void DemoGameManager::update() {
                         point tw = act.bomb.target_wall;
                         point bs = act.bomb.bomb_start;
 
+                        demo.map[tw.y][tw.x] = 0; 
+                        logical_level.map[tw.y][tw.x] = 0;
+
                         for(int dy = -1; dy <= 1; dy++) for(int dx = -1; dx <= 1; dx++) {
                             int ny = tw.y + dy, nx = tw.x + dx;
-                            if (ny > 0 && ny < MAP_MAX_HEIGHT-1 && nx > 0 && nx < MAP_MAX_WIDTH-1 && (demo.map[ny][nx] == TILE_WALL || demo.map[ny][nx] == TILE_BOMB)) {
+                            if (ny > 0 && ny < MAP_MAX_HEIGHT-1 && nx > 0 && nx < MAP_MAX_WIDTH-1 && demo.map[ny][nx] == TILE_WALL) {
                                 demo.map[ny][nx] = 0; 
                                 logical_level.map[ny][nx] = 0;   // 同步逻辑地图，确保后续求解一致
                             }
@@ -123,6 +128,47 @@ __attribute__((section(".ramfunc"))) void DemoGameManager::update() {
                     demo.segment_path.clear();
                     demo.patrol_target_idx++;
                 }
+            }
+            break;
+        }
+
+        case GamePhase::BIND_SEMANTICS: {
+            bool all_done = true;
+
+            // 检查所有“观测动作”对应实体是否已写入语义标签
+            for (int i = 0; i < patrol_actions.size(); i++) {
+                if(patrol_actions[i].is_bomb_task) continue; // 跳过炸弹任务
+
+                uint8_t visited_entity_id = patrol_actions[i].obs.entity_id; 
+
+                // 有任一实体还未出语义结果，则继续等待
+                if (vision_data.semantic_labels[visited_entity_id] == -1) {
+                    all_done = false;
+                    break;
+                }
+            }
+
+            if (all_done) {
+                // N-1 规则匹配箱子与目标点 ID
+                uint8_t matched_ids[SystemConfig::MAX_BOXES];
+                bool is_perfect = patrol_planner.match_semantics(vision_data.semantic_labels, matched_ids);
+                
+                if (!is_perfect) {
+                    game.error_stage = 4; // 错误阶段4：语义匹配失败（不满足 N-1 规则）
+                    game.phase = GamePhase::ERROR_OCCURRED;
+                    break;
+                }
+
+                // 二次炸弹解算（附带语义信息）
+                auto& bombs = App::g_state.planning.bomb_tasks;
+                bombs = strategic_planner.evaluate_and_assign_bombs<GameMode::PHASE2_SPECIFIC>(logical_level);
+
+                App::g_state.debug.need_bg_redraw = true;
+
+                solver.load_from_vision(logical_level);   // 导入当前地形（含爆炸改动与小车位置）
+                solver.bind_semantics(matched_ids);       // 绑定语义映射与当前位置
+                solver.load_bomb_tasks(bombs.data(), bombs.size()); // 加载炸弹任务（如果有的话）
+                game.phase = GamePhase::PLAN_SOKOBAN;
             }
             break;
         }
@@ -160,9 +206,7 @@ __attribute__((section(".ramfunc"))) void DemoGameManager::update() {
                 
                 if (demo.segment_idx >= demo.segment_path.size() - 1) {
                     logical_level.player_start = demo.segment_path.back(); 
-                    logical_level.box_count = 0;     // 强对齐：推箱完成后地图上不应有箱子
-                    logical_level.target_count = 0;  // 强对齐：推箱完成后地图上不应有目标点
-                    phase = GamePhase::PLAN_RETURN_HOME;               
+                    phase = GamePhase::FINISHED;           
                     break;
                 }
 
@@ -182,49 +226,35 @@ __attribute__((section(".ramfunc"))) void DemoGameManager::update() {
                         demo.map[new_box_pos.y][new_box_pos.x] = TILE_BOX; 
                     }
                 }
+                else if (demo.map[next_pos.y][next_pos.x] == TILE_BOMB) {
+                    point new_bomb_pos = {(int8_t)(next_pos.x + dir.x), (int8_t)(next_pos.y + dir.y)};
+                    
+                    // 检查是否撞墙引爆：如果 new_bomb_pos 是墙，则发生爆炸；否则仅推移炸弹
+                    bool explode = false;
+                    if (new_bomb_pos.x >= 0 && new_bomb_pos.x < MAP_MAX_WIDTH && new_bomb_pos.y >= 0 && new_bomb_pos.y < MAP_MAX_HEIGHT) {
+                        if (demo.map[new_bomb_pos.y][new_bomb_pos.x] == TILE_WALL) explode = true;
+                    }
+
+                    if (explode) {
+                        demo.map[next_pos.y][next_pos.x] = TILE_EMPTY; // 炸弹消失
+                        // 执行 3x3 清除动画
+                        for(int dy = -1; dy <= 1; dy++) for(int dx = -1; dx <= 1; dx++) {
+                            int ny = new_bomb_pos.y + dy, nx = new_bomb_pos.x + dx;
+                            if (ny > 0 && ny < MAP_MAX_HEIGHT-1 && nx > 0 && nx < MAP_MAX_WIDTH-1 && demo.map[ny][nx] == TILE_WALL) {
+                                demo.map[ny][nx] = TILE_EMPTY; 
+                                logical_level.map[ny][nx] = 0;   // 同步逻辑地图
+                            }
+                        }
+                        App::g_state.debug.need_bg_redraw = true;
+                    } else {
+                        // 未爆炸，仅仅是推位
+                        demo.map[next_pos.y][next_pos.x] = TILE_EMPTY;
+                        demo.map[new_bomb_pos.y][new_bomb_pos.x] = TILE_BOMB;
+                    }
+                }
                 demo.player = next_pos;
                 demo.segment_idx++;
             } 
-            break;
-        }
-
-        // ====================================================================
-        // 拦截 3：规划回程路径并开启回程动画
-        // ====================================================================
-        case GamePhase::PLAN_RETURN_HOME: {
-            demo.segment_path.clear();
-            point target_point = {SystemConfig::PLAN_END_X, SystemConfig::PLAN_END_Y};
-
-            bool found = patrol_planner.get_grid_path(logical_level, logical_level.player_start, target_point, demo.segment_path);
-            
-            if (found) {
-                demo.segment_idx = 0;
-                demo.player = logical_level.player_start; // 回程动画起点 = 推箱终点
-                demo.last_tick = Core::Scheduler::get_sys_tick_ms();
-                phase = GamePhase::ANIMATE_RETURN_DEMO;
-            } else {
-                game.error_stage = 3; phase = GamePhase::ERROR_OCCURRED;  // 错误阶段3：回程路径生成失败
-            }
-            break;
-        }
-
-        // ====================================================================
-        // 回程动画播放
-        // ====================================================================
-        case GamePhase::ANIMATE_RETURN_DEMO: {
-            if (Core::Scheduler::get_sys_tick_ms() - demo.last_tick > 100) {
-                demo.last_tick = Core::Scheduler::get_sys_tick_ms();
-                
-                // 终点判定：路径节点全部走完
-                if (demo.segment_idx >= demo.segment_path.size()) {
-                    demo.player = {SystemConfig::PLAN_END_X, SystemConfig::PLAN_END_Y}; // 强对齐入库点
-                    phase = GamePhase::FINISHED;
-                    logical_level.player_start = demo.player; // 同步逻辑位置
-                    break;
-                }
-
-                demo.player = demo.segment_path[demo.segment_idx++]; // 沿路径推进一步
-            }
             break;
         }
 
@@ -241,6 +271,10 @@ RenderContext DemoGameManager::get_render_context() const {
     auto& game = App::g_state.game;
     auto& phase = App::g_state.game.phase;
     auto& action_idx = App::g_state.game.action_idx;
+
+    ctx.bomb_plan_time_ms = this->bomb_plan_time_ms;
+    ctx.patrol_plan_time_ms = this->patrol_plan_time_ms;
+    ctx.push_plan_time_ms = this->push_plan_time_ms;
 
     // Lambda 函数：将零散的数组强行压平到单层网格里
     auto flatten_to_map = [&](const auto& base_map, const point* boxes, int box_count, 
@@ -261,7 +295,7 @@ RenderContext DemoGameManager::get_render_context() const {
         // ====================================================================
         // Demo 模式
         // ====================================================================
-        bool is_anim = (phase == GamePhase::ANIMATE_PATROL_DEMO || phase == GamePhase::ANIMATE_DEMO || phase == GamePhase::ANIMATE_RETURN_DEMO);
+        bool is_anim = (phase == GamePhase::ANIMATE_PATROL_DEMO || phase == GamePhase::ANIMATE_DEMO);
 
         if (is_anim) {
             ctx.map = (const std::array<std::array<int8_t, SystemConfig::MAP_MAX_WIDTH>, SystemConfig::MAP_MAX_HEIGHT>*)&demo.map;
@@ -269,7 +303,6 @@ RenderContext DemoGameManager::get_render_context() const {
             // Demo 模式但不在动画中，把 logical_level 压平传给 UI
             flatten_to_map(logical_level.map, logical_level.boxes, logical_level.box_count,
                 logical_level.targets, logical_level.target_count,logical_level.bombs, logical_level.bomb_count);
-
             ctx.map = &flattened_render_map;
         }
 
@@ -284,8 +317,9 @@ RenderContext DemoGameManager::get_render_context() const {
                 ctx.path_ptr = &demo.segment_path;
                 ctx.path_start_idx = demo.segment_idx;
             } else {
-                ctx.path_ptr = (phase == GamePhase::EXEC_SOKOBAN) ? &solver.get_result_path() : &App::g_state.planning.grid_path;
-                ctx.path_start_idx = 0;
+                ctx.path_ptr = nullptr; // 停止演示时不显示路径
+                // ctx.path_ptr = (phase == GamePhase::EXEC_SOKOBAN) ? &solver.get_result_path() : &App::g_state.planning.grid_path;
+                // ctx.path_start_idx = 0;
             }
         }
     } else {

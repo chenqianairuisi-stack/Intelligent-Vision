@@ -142,7 +142,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
         case GamePhase::PLAN_PATROL: {
             // 先解算炸弹任务，再做联合巡图规划（无炸弹时自动退化）
             auto& bombs = App::g_state.planning.bomb_tasks;
-            bombs = strategic_planner.evaluate_and_assign_bombs(logical_level);
+            bombs = strategic_planner.evaluate_and_assign_bombs<GameMode::PHASE1_ANY>(logical_level);
 
             patrol_actions = patrol_planner.plan_optimal_patrol(logical_level.player_start, bombs);
 
@@ -192,7 +192,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             ctrl.current_target.yaw = patrol_actions[game.action_idx].obs.target_yaw;  
             ctrl.mode = ControlMode::MANUAL_DEBUG; // 停止循迹，仅执行角度对齐
 
-            // 检查 Yaw 角度误差是否小于 5 度
+            // 检查 Yaw 角度误差是否小于 2 度
             float current_yaw = App::g_state.physical.pose.yaw;
             float err_yaw = std::abs(ctrl.current_target.yaw - current_yaw);
             if (err_yaw > 180.0f) err_yaw = 360.0f - err_yaw;
@@ -290,8 +290,13 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     break;
                 }
 
+                // 二次炸弹解算（附带语义信息）
+                auto& bombs = App::g_state.planning.bomb_tasks;
+                bombs = strategic_planner.evaluate_and_assign_bombs<GameMode::PHASE2_SPECIFIC>(logical_level);
+
                 solver.load_from_vision(logical_level);   // 导入当前地形（含爆炸改动与小车位置）
                 solver.bind_semantics(matched_ids);       // 绑定语义映射与当前位置
+                solver.load_bomb_tasks(bombs.data(), bombs.size()); // 加载炸弹任务（如果有的话）
                 game.phase = GamePhase::PLAN_SOKOBAN;
             }
             break;
@@ -328,33 +333,14 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
         }
 
         case GamePhase::PLAN_RETURN_HOME: {
-
-            // 回库阶段忽略箱子占位，避免返程路径被阻断
-            for (int i = 0; i < logical_level.box_count; ++i) {
-                logical_level.boxes[i] = {-1, -1}; 
-            }
-            logical_level.box_count = 0;
-
-            StaticArray<point, SystemConfig::MAX_PATH_LENGTH> return_path;
-            point target_point = {SystemConfig::PLAN_END_X, SystemConfig::PLAN_END_Y};  // 入库点
-
-            bool found = patrol_planner.get_grid_path(logical_level, logical_level.player_start, target_point, return_path);
-
-            if (found) {
-                Algorithm::Tracker::load_path(return_path);
-                ctrl.mode = ControlMode::AUTO_TRACKING;
-                game.phase = GamePhase::EXEC_RETURN_HOME;
-            } else {
-                game.error_stage = 3; // 错误阶段3：回程路径生成失败
-                game.phase = GamePhase::ERROR_OCCURRED;
-            }
-
+            ctrl.current_target = {IN_TARGET_X, IN_TARGET_Y, ENTRY_YAW};
+            ctrl.mode = ControlMode::MANUAL_DEBUG;
             break;
         }
 
         case GamePhase::EXEC_RETURN_HOME: {
-            if (ctrl.tracker_state == TrackerState::FINISHED) {
-                game.phase = GamePhase::FINISHED; 
+            if (Algorithm::Tracker::check_arrival({IN_TARGET_X, IN_TARGET_Y}, tune.tracker.reach_radius_min)) {
+                game.phase = GamePhase::FINISHED;
             }
             break;
         }

@@ -8,13 +8,13 @@ __attribute__((section(".dtcm_data"))) Exploration patrol_planner;
 
 
 // ============================================================================
-// 物理学惩罚权重配置
+// [物理学惩罚权重配置]
 // ============================================================================
 static constexpr float COST_PER_GRID = 1.0f;       // 直线行驶 1 格的代价
 static constexpr uint16_t COST_INFINITY = 65535;   // 代表无解 (uint16_t 的最大值)
 
 // ============================================================================
-// 内存池架构
+// [内存池架构]
 // ============================================================================
 struct PlannerWorkspace {
     // 距离矩阵：dist_matrix[k][u][v] (MAX_BOMBS=5, MAX_OBS=40 时，仅需占用约 20KB 的 DTCM 空间)
@@ -41,7 +41,7 @@ __attribute__((section(".dtcm_data"))) static BombPathWorkspace b_ws;
 
 
 // ============================================================================
-// [模块 1] 预处理
+// 模块 1: 预处理
 // ============================================================================
 void Exploration::load_level(const SokobanLevel& level) {
     this->cached_level = level; 
@@ -162,7 +162,7 @@ StaticArray<BombTask, MAX_BOMBS> Exploration::optimize_bomb_timeline(
 
 
 // ============================================================================
-// [模块 2] 巡图规划器核心算法：多重分支 3D 深搜 + 微型 L1 Cache 置换表
+// 模块 2: 巡图规划器核心算法：多重分支 3D 深搜 + 微型 L1 Cache 置换表
 // ===========================================================================
 
 // 限界上下文记录 (存在于快速栈空间)
@@ -315,7 +315,7 @@ StaticArray<PatrolAction, 32> Exploration::plan_optimal_patrol(
         }
 
         // 若已覆盖足够实体且炸弹任务也已完成，则尝试更新全局最优解并返回
-        if (box_seen >= req_boxes && target_seen >= req_targets && k == B) {
+        if (box_seen >= req_boxes && target_seen >= req_targets ) {
             uint32_t final_cost = current_cost;
             // 收尾偏好：若停在目标观测点，增加轻微惩罚，引导停在更稳定位置
             if (u != MACRO_NODE && !obs_points[u].is_box) final_cost += COST_PER_GRID * 5; 
@@ -413,7 +413,7 @@ StaticArray<PatrolAction, 32> Exploration::plan_optimal_patrol(
 
 
 // ============================================================================
-// [模块 3] 底层物理与轨迹生成器
+// 模块 3: 底层物理与轨迹生成器
 // ============================================================================
 
 // BFS 生成最短路径长度 (仅返回距离，不生成路径)
@@ -719,7 +719,7 @@ bool Exploration::get_bomb_push_path(const SokobanLevel& lvl, point player_start
 
 
 // ============================================================================
-// [模块 4] 视觉语义与身份绑定系统
+// 模块 4: 视觉语义与身份绑定系统
 // ============================================================================
 __attribute__((section(".ramfunc"))) 
 bool Exploration::match_semantics(const int8_t* semantic_labels, uint8_t* out_matched_ids) const {

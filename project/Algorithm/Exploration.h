@@ -4,7 +4,7 @@
 #include "Sokoban.h"
 
 // ============================================================================
-// 数据结构定义
+// [数据结构定义]
 // ============================================================================
 
 // 单个观测点结构体 (寻图物理位置与视觉目标)
@@ -31,42 +31,40 @@ struct BombMacroNode {
 
 
 // ============================================================================
-// 视觉探索与巡图规划器核心类
+// [视觉探索与巡图规划器核心类]
 // ============================================================================
 class Exploration {
 public:
     Exploration() = default;
 
-    // --- 初始化与状态查询 ---
+    // --- A.初始化与状态查询 ---
     void load_level(const SokobanLevel& level);
     uint8_t get_entity_count() const { return total_entities; }
 
-    // --- 核心函数 ---
-    // 【API 1】无炸弹纯净巡图：供 Phase 2 调用，返回纯净的最优观测序列
-    StaticArray<ObsPoint, 32> plan_optimal_patrol(point start_pos);
-    // 【API 2】多重分支 3D 巡图：供 Phase 3 调用，自动将“推炸弹”动作与“巡图”无缝交织融合
+    // --- B.核心函数 ---
+    // 多重分支 3D 巡图：供 Phase 3 调用，自动将 “推炸弹” 动作与 “巡图” 无缝交织融合
     StaticArray<PatrolAction, 32> plan_optimal_patrol(point start_pos, const StaticArray<BombTask, MAX_BOMBS>& bomb_tasks);
     
-    // --- 物理底层循迹接口 ---
+    // --- C.物理底层循迹接口 ---
     // 生成真实可用的网格路径坐标数组
     bool get_grid_path(const SokobanLevel& lvl, point start, point end, StaticArray<point, MAX_PATH_LENGTH>& out_path);
     // 专门为推炸弹设计的路径生成，考虑炸弹推行时的特殊碰撞规则
     bool get_bomb_push_path(const SokobanLevel& lvl, point player_start, BombTask bomb_task, StaticArray<point, MAX_PATH_LENGTH>& out_path);
     
-    // 【语义匹配】：融合云台识别结果，进行逻辑演绎与死锁解除
+    // 语义匹配：融合云台识别结果，进行逻辑演绎与死锁解除
     bool match_semantics(const int8_t* semantic_labels, uint8_t* out_matched_ids) const;
 
 private:
-    // --- 内部状态缓存 ---
+    // --- 1.内部状态缓存 ---
     StaticArray<ObsPoint, MAX_OBS_POINTS> obs_points;    // 当前地图所有合法的观测位姿
     uint8_t total_entities;                              // 实体总数 (Box + Target)
     SokobanLevel cached_level;                           // 初始时刻的地图
 
+    // --- 2.内部函数 ---
     // 生成合法观测点
     void generate_obs_points();
     // 炸弹任务时间线优化
     StaticArray<BombTask, MAX_BOMBS> optimize_bomb_timeline(const SokobanLevel& initial_lvl, point start_pos, const StaticArray<BombTask, MAX_BOMBS>& raw_tasks);
-    
     // 寻路函数：支持多重地图分支（不同炸弹爆炸后的地形）
     uint16_t bfs_shortest_path(const SokobanLevel& lvl, point start, point end);
 };

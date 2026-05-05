@@ -1,6 +1,7 @@
 #pragma once
 #include "system_config.h"
-#include "Sokoban.h"
+
+using namespace SystemConfig;
 
 // 炸弹动作定义
 struct BombTask {
@@ -33,12 +34,14 @@ public:
     StrategicPlanner() = default;
 
     // 对外接口：输入地图和玩家位置，输出炸弹任务列表
+    template <GameMode Mode>
     StaticArray<BombTask, MAX_BOMBS> evaluate_and_assign_bombs(const SokobanLevel& level);
 
 private:
     SokobanLevel cached_level;
 
     // 递归搜索核心
+    template <GameMode Mode>
     void dfs_bomb_sequence(
         const SokobanLevel& current_lvl,
         point player_start,
@@ -48,6 +51,7 @@ private:
         DFSResult& best_res);
 
     // 内部物理与搜索工具函数
+    bool can_player_reach(const SokobanLevel& lvl, point start_pos, point target_pos, point ignored_obj, point extra_obs);
     void calc_player_reach(const SokobanLevel& lvl, point start_pos, point ignored_obj, point extra_obs, bool out_visited[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]);
     void fast_push_bfs(const SokobanLevel& lvl, point start_obj, point player_start, bool is_bomb, int16_t out_dist[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]);
     bool has_entity(const SokobanLevel& lvl, int x, int y, int ignored_bomb) const;  // 检测指定坐标是否有箱子/目标/炸弹（可选择忽略某个炸弹）

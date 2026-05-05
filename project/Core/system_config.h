@@ -38,8 +38,6 @@ namespace SystemConfig {
     static constexpr int MAP_MAX_HEIGHT = 16;                   // 地图最大高度（网格坐标）
     static constexpr int PLAN_START_X = 4;                      // 出库点 X 坐标（网格坐标）
     static constexpr int PLAN_START_Y = 1;                      // 出库点 Y 坐标（网格坐标）
-    static constexpr int PLAN_END_X = 6;                        // 入库点 X 坐标（网格坐标）
-    static constexpr int PLAN_END_Y = 1;                        // 入库点 Y 坐标（网格坐标）
     static constexpr int MAX_BOXES = 10;                        // 最大箱子数
     static constexpr int MAX_BOMBS = 3;                         // 最大炸弹数
     static constexpr int MAX_ENTITIES = 2 * MAX_BOXES;          // 最大实体数（箱子+目标点）
@@ -54,6 +52,8 @@ namespace SystemConfig {
     static constexpr float ENTRY_YAW = 90.0f;                   // 入口位置航向（单位：度，0度为x轴正方向，逆时针为正）
     static constexpr float OUT_TARGET_X = 90.0f;                // 出库目标位置 X 坐标
     static constexpr float OUT_TARGET_Y = 30.0f;                // 出库目标位置 Y 坐标
+    static constexpr float IN_TARGET_X = 130.0f;                // 入库目标位置 X 坐标
+    static constexpr float IN_TARGET_Y = 30.0f;                 // 入库目标位置 Y 坐标
 
     // 数学常数
     static constexpr float DEG_TO_RAD = 0.017453292519943f;
@@ -114,6 +114,11 @@ enum class ControlMode : uint8_t {
     AUTO_TRACKING           // 自动模式：听从 Tracker 生成的路径
 };
 
+// 定义赛段模式（编译期路由）
+enum class GameMode : uint8_t {
+    PHASE1_ANY,       // 第一阶段：任意箱子 -> 任意目标
+    PHASE2_SPECIFIC   // 第二阶段：特定箱子 -> 特定目标
+};
 
 // =================================================================
 // 数据结构定义
@@ -167,26 +172,29 @@ struct SokobanLevel {
 // 定长数组：保留常用 vector 风格接口，避免动态内存分配 
 template <typename T, int MAX_LEN>
 struct StaticArray {
-    T data[MAX_LEN];
+    T buffer[MAX_LEN];
     int length = 0;
 
-    void push_back(const T& val) { if (length < MAX_LEN) data[length++] = val; }
+    void push_back(const T& val) { if (length < MAX_LEN) buffer[length++] = val; }
     void pop_back() { if (length > 0) length--; }
     void clear() { length = 0; }
     int size() const { return length; }
     bool empty() const { return length == 0; }
     
-    T& operator[](int i) { return data[i]; }
-    const T& operator[](int i) const { return data[i]; }
+    T& operator[](int i) { return buffer[i]; }
+    const T& operator[](int i) const { return buffer[i]; }
 
-    T& back() { return data[length - 1]; }
-    const T& back() const { return data[length - 1]; }
+    T& back() { return buffer[length - 1]; }
+    const T& back() const { return buffer[length - 1]; }
 
-    T* begin() { return &data[0]; }
-    T* end() { return &data[length]; }
+    T* data() { return buffer; }
+    const T* data() const { return buffer; }
 
-    const T* begin() const { return &data[0]; }
-    const T* end() const { return &data[length]; }
+    T* begin() { return &buffer[0]; }
+    T* end() { return &buffer[length]; }
+
+    const T* begin() const { return &buffer[0]; }
+    const T* end() const { return &buffer[length]; }
 
     void reserve(int n) { (void)n; } 
 };

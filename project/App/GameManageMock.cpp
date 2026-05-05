@@ -81,48 +81,6 @@ constexpr std::array<MockMapDef, 10> mock_map_library = {{
         " Map2_1",
         {
             "############",
-            "#----------#",
-            "#-####-----#",
-            "#-#--#-----#",
-            "#-#.-#-----#",
-            "#-####-----#",
-            "#--------#-#",
-            "#------$-#-#",
-            "#--*-----#-#",
-            "#--------#-#",
-            "#-------.--#",
-            "#-$--------#",
-            "#-------$--#",
-            "#-.--------#",
-            "##-#-------#",
-            "############"
-        }
-    },
-    {
-        " Map2_2",
-        {
-            "############",
-            "#.---------#",
-            "#----------#",
-            "#--$--####-#",
-            "#-#---#-$*-#",
-            "#-#----*-#-#",
-            "#####----#-#",
-            "#--------#-#",
-            "#-###----#-#",
-            "##-------#.#",
-            "#--###---###",
-            "#-##-------#",
-            "#--####----#",
-            "##--.#-*-$-#",
-            "#--#-------#",
-            "############"
-        }
-    },
-    {
-        " Map2_3",
-        {
-            "############",
             "##.--------#",
             "#----------#",
             "#-#-#-##*#-#",
@@ -141,7 +99,7 @@ constexpr std::array<MockMapDef, 10> mock_map_library = {{
         }
     },
     {
-        " Map2_4",
+        " Map2_2",
         {
             "############",
             "#.---------#",
@@ -158,6 +116,48 @@ constexpr std::array<MockMapDef, 10> mock_map_library = {{
             "#--####----#",
             "##--.#-*-$-#",
             "#----------#",
+            "############"
+        }
+    },
+    {
+        " Map2_3",
+        {
+            "############",
+            "#.---##----#",
+            "##---##----#",
+            "##---##----#",
+            "#-#---#$---#",
+            "#---#-#----#",
+            "##----##---#",
+            "###-*-####-#",
+            "####---##--#",
+            "####----#--#",
+            "#-------#$-#",
+            "#-*----*##-#",
+            "#####----#.#",
+            "#---.#-$--##",
+            "#----------#",
+            "############"
+        }
+    },
+        {
+        " Map2_4",
+        {
+            "############",
+            "#-------#--#",
+            "#.#-#---#*-#",
+            "##-#----$.-#",
+            "#---#---#--#",
+            "#-------#--#",
+            "###--#--#--#",
+            "#----------#",
+            "#----------#",
+            "#-$--------#",
+            "#-$--------#",
+            "#-----######",
+            "#-----#--.-#",
+            "#----------#",
+            "#-----#----#",
             "############"
         }
     },
@@ -272,19 +272,21 @@ void load_mock_map(uint8_t map_idx) {
 void MockGameManager::inject_mock_semantics() {
     std::memset(mock_truth_labels, -1, sizeof(mock_truth_labels));
 
+    int num = g_state.vision.box_count;
+
     // 自动构造一组一一对应标签：前 N 个箱子 ↔ 后 N 个目标
-    // for(int i = 0; i < num; i++) {
-    //     mock_truth_labels[i] = i + 1;          // 箱子 ID
-    //     mock_truth_labels[num + i] = i + 1;    // 目标 ID 起始偏移 = BOXE_COUNT，确保不与箱子 ID 冲突
-    // }
+    for(int i = 0; i < num; i++) {
+        mock_truth_labels[i] = i + 1;          // 箱子 ID
+        mock_truth_labels[num + i] = i + 1;    // 目标 ID 起始偏移 = BOXE_COUNT，确保不与箱子 ID 冲突
+    }
 
     // 手动指定标签进行测试
-    mock_truth_labels[0] = 1; 
-    mock_truth_labels[1] = 3; 
-    mock_truth_labels[2] = 2;    
-    mock_truth_labels[logical_level.box_count] = 1;     
-    mock_truth_labels[logical_level.box_count + 1] = 2;  
-    mock_truth_labels[logical_level.box_count + 2] = 3;   
+    // mock_truth_labels[0] = 1;
+    // mock_truth_labels[1] = 3;
+    // mock_truth_labels[2] = 2;
+    // mock_truth_labels[logical_level.box_count] = 1;
+    // mock_truth_labels[logical_level.box_count + 1] = 2;
+    // mock_truth_labels[logical_level.box_count + 2] = 3;
 }
 
 __attribute__((section(".ramfunc"))) void MockGameManager::update() {
@@ -319,13 +321,13 @@ __attribute__((section(".ramfunc"))) void MockGameManager::update() {
             ctrl.current_target.yaw = patrol_actions[game.action_idx].obs.target_yaw;  
             ctrl.mode = ControlMode::MANUAL_DEBUG; // 停止循迹，仅执行角度对齐
 
-            // 检查 Yaw 角度误差是否小于 5 度
+            // 检查 Yaw 角度误差是否小于 2 度
             float current_yaw = App::g_state.physical.pose.yaw;
             float err_yaw = std::abs(ctrl.current_target.yaw - current_yaw);
             if (err_yaw > 180.0f) err_yaw = 360.0f - err_yaw;
 
             // 朝向收敛后触发 ART2 捕捉
-            if (err_yaw < 5.0f) { 
+            if (err_yaw < 2.0f) { 
                 uint8_t entity_id = patrol_actions[game.action_idx].obs.entity_id;
                 App::g_state.vision.semantic_labels[entity_id] = mock_truth_labels[entity_id];
                 
