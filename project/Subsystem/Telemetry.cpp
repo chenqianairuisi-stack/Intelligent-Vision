@@ -38,7 +38,7 @@ namespace {
     // --- 运动时间监测 ---
     bool is_timing_movement = false;   // 测时器状态标志
     uint32_t movement_start_time = 0;  // 运动开始的系统时间戳 (ms)
-    ControlMode current_timing_mode = ControlMode::MANUAL_DEBUG;  // 当前测时器关联的控制模式
+    ControlMode current_timing_mode = ControlMode::POINT_TRACKING;  // 当前测时器关联的控制模式
 
     // --- 语义监测 ---
     bool is_monitoring_semantics = false;                            // 语义监测开关
@@ -348,7 +348,7 @@ namespace {
             case 'M': {  // 全局移动与位移指令
                 float value = atof(&cmd[3]);
                 // 强制切入调试模式，不再理会 Tracker
-                App::g_state.control.mode = ControlMode::MANUAL_DEBUG;
+                App::g_state.control.mode = ControlMode::POINT_TRACKING;
                 Pose2D target = App::g_state.control.current_target; 
 
                 switch (sub) {
@@ -374,7 +374,7 @@ namespace {
 
                 // 下发并重置定时器
                 App::g_state.control.current_target = target;
-                start_movement_timing(ControlMode::MANUAL_DEBUG);
+                start_movement_timing(ControlMode::POINT_TRACKING);
                 break;
             }
         }

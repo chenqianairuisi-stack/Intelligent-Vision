@@ -394,6 +394,11 @@
               <FilePath>..\App\RobotState.h</FilePath>
             </File>
             <File>
+              <FileName>RobotTask.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\App\RobotTask.h</FilePath>
+            </File>
+            <File>
               <FileName>GameManage.cpp</FileName>
               <FileType>8</FileType>
               <FilePath>..\App\GameManage.cpp</FilePath>

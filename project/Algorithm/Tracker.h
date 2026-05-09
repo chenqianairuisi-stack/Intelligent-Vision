@@ -14,4 +14,6 @@ namespace Algorithm::Tracker {
 
     // 停止循迹
     inline void stop() { App::g_state.control.tracker_state = TrackerState::NONE; }
+
+    void track_point(const Pose2D& target); // 直接追踪单个目标点
 }

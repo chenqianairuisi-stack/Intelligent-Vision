@@ -73,16 +73,12 @@ enum class GamePhase : uint8_t {
     EXIT_START_ZONE,        // 出发车区
     WAIT_FOR_VISION,        // 等待摄像头返回地图
 
-    // --- 第二/三阶段 ---
+    // --- 寻图阶段 ---
     PLAN_PATROL,            // GTSP 规划巡图观测路径
-    EXEC_ACTION_DISPATCH,   // 分发：判断当前动作是去观测，还是去推炸弹
-    EXEC_PATROL_MOVE,       // 动作 A1：底盘移动到观测点
-    EXEC_ALIGN_YAW,         // 动作 A2：底盘自旋对准目标，并发送 ART2 捕捉请求
-    WAIT_ART2_CAPTURE_ACK,  // 等待截图成功
-    EXEC_BOMB_PUSH,         // 动作 B：执行推炸宏动作
-    UPDATE_MAP,             // 完成推炸弹，更新地图状态
+    EXEC_ACTION_DISPATCH,   // 分发任务：判断当前动作是去观测，还是去推炸弹
+    EXEC_TASK_QUEUE,        // 执行当前动作队列
 
-    // --- 第一阶段 ---
+    // --- 推箱阶段 ---
     BIND_SEMANTICS,         // 巡视完毕，将识别结果绑定到底层算法
     PLAN_SOKOBAN,           // 规划推箱子路径
     EXEC_SOKOBAN,           // 执行推箱子循迹
@@ -110,7 +106,7 @@ enum class TrackerState : uint8_t {
 
 // 控制模式枚举：手动调试 vs 自动循迹
 enum class ControlMode : uint8_t {
-    MANUAL_DEBUG,           // 调试模式：上位机直接写 target_pose，不理会 Tracker
+    POINT_TRACKING,           // 调试模式：上位机直接写 target_pose，不理会 Tracker
     AUTO_TRACKING           // 自动模式：听从 Tracker 生成的路径
 };
 

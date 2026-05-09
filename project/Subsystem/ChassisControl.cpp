@@ -91,7 +91,7 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick() {
     auto& ctrl = App::g_state.control;
 
     // 根据模式决定是否听 Tracker 的话
-    // 如果是 MANUAL_DEBUG，我们就不调用 update_target，直接用上位机写入 ctrl.current_target 的值
+    // 如果是 POINT_TRACKING，我们就不调用 update_target，直接用上位机写入 ctrl.current_target 的值
     if (ctrl.mode == ControlMode::AUTO_TRACKING && ctrl.tracker_state == TrackerState::TRACKING) {
         Algorithm::Tracker::update_target();
     }

@@ -1,5 +1,6 @@
 #include "GameManage.h"
 #include "tuning_config.h"
+#include "Tracker.h"
 #include <cmath>
 #include <cstring>
 
@@ -297,47 +298,39 @@ __attribute__((section(".ramfunc"))) void MockGameManager::update() {
     // 【多态拦截】：专挑需要 Mock 的阶段截流，其他放行给基类
     switch (game.phase) {
         case GamePhase::EXIT_START_ZONE: {
-            // 监控是否到达出库点
-            float dist = std::sqrt((OUT_TARGET_X - pos.x)*(OUT_TARGET_X - pos.x) + 
-                (OUT_TARGET_Y - pos.y)*(OUT_TARGET_Y - pos.y));
-            
-            // 到位后进入地图输入阶段
-            if (dist < tune.tracker.reach_radius_min) {
-                load_mock_map(App::g_state.game.selected_map_id);  // 直接加载本地测试地图，绕过视觉输入
+            if (Algorithm::Tracker::check_arrival({OUT_TARGET_X, OUT_TARGET_Y}, tune.tracker.reach_radius_min)) {
+                
+                load_mock_map(App::g_state.game.selected_map_id);  // 加载 Mock 地图数据到视觉黑板，触发后续逻辑转储
                 game.phase = GamePhase::WAIT_FOR_VISION;
             }
             break;
         }
         case GamePhase::WAIT_FOR_VISION: {
-            // 在这里拦截，并注入语义
             GameManager::update(); // 调用基类处理，它会发现 art1_map_ready==true 并转储逻辑
             if (game.phase == GamePhase::PLAN_PATROL) {
                 inject_mock_semantics();
             }
             break;
         }
-        case GamePhase::EXEC_ALIGN_YAW: {
-            // 到位后原地对齐朝向，准备触发 ART2 抓拍
-            ctrl.current_target.yaw = patrol_actions[game.action_idx].obs.target_yaw;  
-            ctrl.mode = ControlMode::MANUAL_DEBUG; // 停止循迹，仅执行角度对齐
-
-            // 检查 Yaw 角度误差是否小于 1 度
-            float current_yaw = App::g_state.physical.pose.yaw;
-            float err_yaw = std::abs(ctrl.current_target.yaw - current_yaw);
-            if (err_yaw > 180.0f) err_yaw = 360.0f - err_yaw;
-
-            // 朝向收敛后触发 ART2 捕捉
-            if (err_yaw < 1.0f) { 
-                uint8_t entity_id = patrol_actions[game.action_idx].obs.entity_id;
-                App::g_state.vision.semantic_labels[entity_id] = mock_truth_labels[entity_id];
+        case GamePhase::EXEC_TASK_QUEUE: {
+            // 如果流水线正在执行，且当前任务是“等待视觉抓拍”
+            if (current_task_idx < task_queue.size()) {
+                auto& task = task_queue[current_task_idx];
                 
-                logical_level.player_start = patrol_actions[game.action_idx].obs.pos; 
-                game.action_idx++;
-
-                game.phase = GamePhase::EXEC_ACTION_DISPATCH;
+                if (task.type == TaskType::WAIT_ART2_CAPTURE) {
+                    // 注入伪造的语义信息
+                    uint8_t entity_id = task.param.capture.entity_id;
+                    App::g_state.vision.semantic_labels[entity_id] = mock_truth_labels[entity_id];
+                    
+                    // 伪造硬件 ACK，让基类的任务队列在下一帧自动放行！
+                    App::g_state.vision.capture_ack_received = true; 
+                }
             }
+            // 放行给基类，让基类的物理引擎继续执行车体运动和队列推进
+            GameManager::update();
             break;
         }
+
         default:
             // 未被拦截的阶段，回退使用正赛物理主轴
             GameManager::update();

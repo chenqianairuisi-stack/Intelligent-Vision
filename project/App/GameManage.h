@@ -5,6 +5,8 @@
 
 #include "system_config.h"
 #include "RobotState.h"
+#include "RobotTask.h"
+
 #include "Sokoban.h"
 #include "Exploration.h"
 
@@ -46,6 +48,9 @@ public:
 protected:
     SokobanLevel logical_level;
     StaticArray<PatrolAction, 32> patrol_actions;  // 巡图动作序列
+
+    StaticArray<RobotTask, 16> task_queue;
+    size_t current_task_idx = 0;
 };
 
 

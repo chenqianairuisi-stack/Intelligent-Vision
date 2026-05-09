@@ -502,10 +502,7 @@ void draw_dashboard() {
             case GamePhase::EXIT_START_ZONE:       snprintf(hud_line0, 22, "P: EXIT      "); break;
             case GamePhase::WAIT_FOR_VISION:       snprintf(hud_line0, 22, "P: WAIT ART1 "); break;
             case GamePhase::EXEC_ACTION_DISPATCH:  snprintf(hud_line0, 22, "P: ACT DISP  "); break;
-            case GamePhase::EXEC_PATROL_MOVE:      snprintf(hud_line0, 22, "P: EXEC WATCH"); break;
-            case GamePhase::EXEC_ALIGN_YAW:        snprintf(hud_line0, 22, "P: EXEC YAW  "); break;
-            case GamePhase::WAIT_ART2_CAPTURE_ACK: snprintf(hud_line0, 22, "P: WAIT ART2 "); break;
-            case GamePhase::EXEC_BOMB_PUSH:        snprintf(hud_line0, 22, "P: EXEC BOMB "); break;
+            case GamePhase::EXEC_TASK_QUEUE:       snprintf(hud_line0, 22, "P: EXEC TASK "); break;
             case GamePhase::EXEC_SOKOBAN:          snprintf(hud_line0, 22, "P: EXEC BOX  "); break;
             case GamePhase::EXEC_RETURN_HOME:      snprintf(hud_line0, 22, "P: EXEC HOME "); break;
             case GamePhase::FINISHED:              snprintf(hud_line0, 22, "P: FINISHED  "); break;

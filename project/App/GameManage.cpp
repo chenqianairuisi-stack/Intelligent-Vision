@@ -15,6 +15,10 @@ namespace App::GameEngine {
 
 __attribute__((section(".dtcm_data"))) static DemoGameManager core_engine;
 
+// 倒数计算宏区（利用编译期算好替代除法）
+constexpr float INV_360 = 1.0f / 360.0f;
+constexpr float INV_GRID_SIZE_CM = 1.0f / SystemConfig::GRID_SIZE_CM;
+
 //===================================================================
 // GameEngine 模块对外接口实现
 // ==================================================================
@@ -74,24 +78,21 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
     auto& vision_data = App::g_state.vision;
     
     switch (game.phase) {
+        // =============================================================================
+        // ---- 阶段一：启动出库与建图 ----
+        // =============================================================================
         case GamePhase::INIT_CALIBRATE: {
-            // 将里程计重置到已知入口位姿
             Subsystem::PoseEstimator::set_position(ENTRY_X, ENTRY_Y, ENTRY_YAW);
-            
-            // 直接下发出库目标点，切到手动目标模式执行离场
-            ctrl.current_target = {OUT_TARGET_X, OUT_TARGET_Y, ENTRY_YAW};
-            ctrl.mode = ControlMode::MANUAL_DEBUG;
+            Algorithm::Tracker::track_point({OUT_TARGET_X, OUT_TARGET_Y, ENTRY_YAW});
 
             game.phase = GamePhase::EXIT_START_ZONE;
             break;
         }
 
         case GamePhase::EXIT_START_ZONE: {
-            // 监控是否到达出库点
-            bool arrived = Algorithm::Tracker::check_arrival({OUT_TARGET_X, OUT_TARGET_Y}, tune.tracker.reach_radius_min);
-
             // 到位后请求视觉模块 ART1 返回地图数据，进入等待状态
-            if (arrived) {
+            if (Algorithm::Tracker::check_arrival({OUT_TARGET_X, OUT_TARGET_Y}, tune.tracker.reach_radius_min)) {
+
                 Subsystem::Vision::request_map_ART1();   // 请求 ART1 地图
                 game.phase = GamePhase::WAIT_FOR_VISION;
             }
@@ -139,6 +140,9 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             break;
         }
 
+        // =============================================================================
+        // ---- 阶段二：巡图与任务派发 ----
+        // =============================================================================
         case GamePhase::PLAN_PATROL: {
             // 先解算炸弹任务，再做联合巡图规划（无炸弹时自动退化）
             auto& bombs = App::g_state.planning.bomb_tasks;
@@ -158,135 +162,235 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 // 全部宏动作执行完毕，进入语义绑定阶段
                 game.phase = GamePhase::BIND_SEMANTICS;
             } else {
-                // 获取当前宏动作信息
+                // 获取当前宏动作信息并分发任务
                 const auto& act = patrol_actions[game.action_idx];
-                StaticArray<point, MAX_PATH_LENGTH> segment;
+                task_queue.clear();
+                current_task_idx = 0;
 
-                // 按动作类型生成段路径：观测路径 / 推炸路径
-                bool found = act.is_bomb_task ? 
-                             patrol_planner.get_bomb_push_path(logical_level, logical_level.player_start, act.bomb, segment) :
-                             patrol_planner.get_grid_path(logical_level, logical_level.player_start, act.obs.pos, segment);
-
-                if (found) {
-                    Algorithm::Tracker::load_path(segment);
-                    ctrl.mode = ControlMode::AUTO_TRACKING; // 开启自动循迹执行该段路径
-                    game.phase = act.is_bomb_task ? GamePhase::EXEC_BOMB_PUSH : GamePhase::EXEC_PATROL_MOVE;
+                // 将宏任务转化为精锐极简的微指令流队列
+                if (act.is_bomb_task) {
+                    task_queue.push_back(RobotTask::make_path_bomb(act.bomb));
+                    task_queue.push_back(RobotTask::make_wait_track());
+                    task_queue.push_back(RobotTask::make_update_map(act.bomb.bomb_start, act.bomb.target_wall));
                 } else {
-                    game.error_stage = 1; // 错误阶段1：寻图路径生成失败
-                    game.phase = GamePhase::ERROR_OCCURRED; 
+                    task_queue.push_back(RobotTask::make_path_obs(act.obs.pos));
+                    task_queue.push_back(RobotTask::make_wait_track());
+                    task_queue.push_back(RobotTask::make_align(act.obs.target_yaw));
+                    task_queue.push_back(RobotTask::make_capture(act.obs.entity_id, act.obs.is_box));
                 }
+                game.phase = GamePhase::EXEC_TASK_QUEUE; // 转移到微观流水线
             }
             break;
         }
 
-        case GamePhase::EXEC_PATROL_MOVE: {
-            // 等待到达观测点
-            if (ctrl.tracker_state == TrackerState::FINISHED) {
-                game.phase = GamePhase::EXEC_ALIGN_YAW;
-            }
-            break;
-        }
-
-        case GamePhase::EXEC_ALIGN_YAW: {
-            // 到位后原地对齐朝向，准备触发 ART2 抓拍
-            ctrl.current_target.yaw = patrol_actions[game.action_idx].obs.target_yaw;  
-            ctrl.mode = ControlMode::MANUAL_DEBUG; // 停止循迹，仅执行角度对齐
-
-            // 检查 Yaw 角度误差是否小于 1 度
-            float current_yaw = App::g_state.physical.pose.yaw;
-            float err_yaw = std::abs(ctrl.current_target.yaw - current_yaw);
-            if (err_yaw > 180.0f) err_yaw = 360.0f - err_yaw;
-
-            // 朝向收敛后触发 ART2 捕捉
-            if (err_yaw < 1.0f) { 
-
-                system_delay_ms(1000);   
-                // 请求 ART2 捕捉该观测点对应实体的语义标签
-                uint8_t current_entity = patrol_actions[game.action_idx].obs.entity_id;
-                bool is_box = patrol_actions[game.action_idx].obs.is_box;
-                Subsystem::Vision::request_capture_ART2(current_entity, is_box);
-                game.phase = GamePhase::WAIT_ART2_CAPTURE_ACK;
-            }
-            break;
-        }
-
-        case GamePhase::WAIT_ART2_CAPTURE_ACK: {
-            // Subsystem::Vision::test_loopback_art2_ack(); // ~~~调试阶段短接 ACK 测试~~~
-
-            // 等待 ART2 捕捉 ACK；ACK 到达即进入下一个宏动作
-            if (vision_data.capture_ack_received) {
-                vision_data.capture_ack_received = false;
-                // 更新逻辑位置为当前观测点
-                logical_level.player_start = patrol_actions[game.action_idx].obs.pos; 
+        case GamePhase::EXEC_TASK_QUEUE: {
+            if (current_task_idx >= task_queue.size()) {
                 game.action_idx++;
-                game.phase = GamePhase::EXEC_ACTION_DISPATCH;
-            }
-            break;
-        }
-
-        case GamePhase::EXEC_BOMB_PUSH: {
-            // 等待推炸弹宏动作执行完毕
-            if (ctrl.tracker_state == TrackerState::FINISHED) {
-                game.phase = GamePhase::UPDATE_MAP;
-            }
-            break;
-        }
-
-        case GamePhase::UPDATE_MAP: {
-            point tw = patrol_actions[game.action_idx].bomb.target_wall;
-
-            // 摧毁墙壁
-            for(int dy=-1; dy<=1; dy++) for(int dx=-1; dx<=1; dx++) {
-                if (tw.y+dy > 0 && tw.y+dy < MAP_MAX_HEIGHT-1 && tw.x+dx > 0 && tw.x+dx < MAP_MAX_WIDTH-1)
-                    logical_level.map[tw.y+dy][tw.x+dx] = 0;
+                game.phase = GamePhase::EXEC_ACTION_DISPATCH; // 当前宏任务完成，切回 DISPATCH
+                break;
             }
 
-            // 销该炸弹
-            for (int i = 0; i < logical_level.bomb_count; ++i) {
-                if (logical_level.bombs[i].x == patrol_actions[game.action_idx].bomb.bomb_start.x &&
-                    logical_level.bombs[i].y == patrol_actions[game.action_idx].bomb.bomb_start.y) {
-                    logical_level.bombs[i] = {-1, -1};
+            auto& task = task_queue[current_task_idx];
+            bool task_done = false;
+
+            switch (task.type) {
+                case TaskType::LOAD_PATH_BOMB: {
+                    StaticArray<point, MAX_PATH_LENGTH> segment;
+                    if (patrol_planner.get_bomb_push_path(logical_level, logical_level.player_start, task.param.bomb, segment)) {
+                        Algorithm::Tracker::load_path(segment);
+                        task_done = true;
+                    } else {
+                        game.error_stage = 1; game.phase = GamePhase::ERROR_OCCURRED;
+                    }
+                    break;
+                }
+                case TaskType::LOAD_PATH_OBS: {
+                    StaticArray<point, MAX_PATH_LENGTH> segment;
+                    if (patrol_planner.get_grid_path(logical_level, logical_level.player_start, task.param.target_grid, segment)) {
+                        Algorithm::Tracker::load_path(segment);
+                        task_done = true;
+                    } else {
+                        game.error_stage = 1; game.phase = GamePhase::ERROR_OCCURRED;
+                    }
+                    break;
+                }
+                case TaskType::WAIT_TRACKING_DONE: {
+                    if (ctrl.tracker_state == TrackerState::FINISHED) task_done = true;
+                    break;
+                }
+                case TaskType::ALIGN_YAW: {
+                    ctrl.current_target.yaw = task.param.target_yaw;
+                    ctrl.mode = ControlMode::POINT_TRACKING; // 停止循迹，仅执行角度对齐
+
+                    // 无分支纯浮点 Yaw 包裹算法
+                    float diff = ctrl.current_target.yaw - pos.yaw;
+                    float err_yaw = std::abs(diff - 360.0f * std::roundf(diff * INV_360));
+
+                    // 结合物理底盘是否停稳做决策
+                    if (err_yaw < 1.0f && App::g_state.physical.is_stopped) {
+                        task_done = true;
+                    }
+                    break;
+                }
+                case TaskType::WAIT_ART2_CAPTURE: {
+                    static bool req_sent = false;
+                    if (!req_sent) {
+                        Subsystem::Vision::request_capture_ART2(task.param.capture.entity_id, task.param.capture.is_box);
+                        req_sent = true;
+                    }
+                    if (vision_data.capture_ack_received) {
+                        vision_data.capture_ack_received = false;
+                        logical_level.player_start = patrol_actions[game.action_idx].obs.pos; 
+                        req_sent = false;
+                        task_done = true;
+                    }
+                    break;
+                }
+                case TaskType::UPDATE_MAP_LOGIC: {
+                    point tw = task.param.map_update.target_wall;
+                    // 摧毁墙壁：将目标墙及其周围八格标记为空地
+                    for(int dy=-1; dy<=1; dy++) for(int dx=-1; dx<=1; dx++) {
+                        if (tw.y+dy > 0 && tw.y+dy < MAP_MAX_HEIGHT-1 && tw.x+dx > 0 && tw.x+dx < MAP_MAX_WIDTH-1)
+                            logical_level.map[tw.y+dy][tw.x+dx] = 0;
+                    }
+                    // 销该炸弹：将该炸弹坐标从逻辑地图的炸弹列表中移除
+                    for (int i = 0; i < logical_level.bomb_count; ++i) {
+                        if (logical_level.bombs[i].x == task.param.map_update.bomb_start.x &&
+                            logical_level.bombs[i].y == task.param.map_update.bomb_start.y) {
+                            logical_level.bombs[i] = {-1, -1}; break;
+                        }
+                    }
+
+                    // 更新当前物理位姿对应的逻辑位置
+                    int8_t grid_x = std::clamp<int8_t>(std::lroundf((pos.x - MAP_OFFSET_X) * INV_GRID_SIZE_CM), 0, MAP_MAX_WIDTH - 1);
+                    int8_t grid_y = std::clamp<int8_t>(std::lroundf((pos.y - MAP_OFFSET_Y) * INV_GRID_SIZE_CM), 0, MAP_MAX_HEIGHT - 1);
+                    logical_level.player_start = {grid_x, grid_y};
+                    
+                    task_done = true;
                     break;
                 }
             }
 
-            // 将当前物理位姿投影到网格坐标，刷新逻辑位置
-            const auto& real_pos = App::g_state.physical.pose;
-            int8_t grid_x = static_cast<int8_t>((real_pos.x - MAP_OFFSET_X) / GRID_SIZE_CM + 0.5f);  // static_cast会直接截断小数，这里的 +0.5 是为了四舍五入
-            int8_t grid_y = static_cast<int8_t>((real_pos.y - MAP_OFFSET_Y) / GRID_SIZE_CM + 0.5f);
-            if (grid_x < 0) grid_x = 0; else if (grid_x >= MAP_MAX_WIDTH) grid_x = MAP_MAX_WIDTH - 1;
-            if (grid_y < 0) grid_y = 0; else if (grid_y >= MAP_MAX_HEIGHT) grid_y = MAP_MAX_HEIGHT - 1;
-            logical_level.player_start = {grid_x, grid_y};
-
-            game.action_idx++;
-            game.phase = GamePhase::EXEC_ACTION_DISPATCH;
+            if (task_done) current_task_idx++;
             break;
         }
 
+        // case GamePhase::EXEC_PATROL_MOVE: {
+        //     // 等待到达观测点
+        //     if (ctrl.tracker_state == TrackerState::FINISHED) {
+        //         game.phase = GamePhase::EXEC_ALIGN_YAW;
+        //     }
+        //     break;
+        // }
+
+        // case GamePhase::EXEC_ALIGN_YAW: {
+        //     // 到位后原地对齐朝向，准备触发 ART2 抓拍
+        //     ctrl.current_target.yaw = patrol_actions[game.action_idx].obs.target_yaw;  
+        //     ctrl.mode = ControlMode::POINT_TRACKING; // 停止循迹，仅执行角度对齐
+
+        //     // 检查 Yaw 角度误差是否小于 1 度
+        //     float current_yaw = App::g_state.physical.pose.yaw;
+        //     float err_yaw = std::abs(ctrl.current_target.yaw - current_yaw);
+        //     if (err_yaw > 180.0f) err_yaw = 360.0f - err_yaw;
+
+        //     // 朝向收敛后触发 ART2 捕捉
+        //     if (err_yaw < 1.0f) { 
+
+        //         system_delay_ms(1000);   
+        //         // 请求 ART2 捕捉该观测点对应实体的语义标签
+        //         uint8_t current_entity = patrol_actions[game.action_idx].obs.entity_id;
+        //         bool is_box = patrol_actions[game.action_idx].obs.is_box;
+        //         Subsystem::Vision::request_capture_ART2(current_entity, is_box);
+        //         game.phase = GamePhase::WAIT_ART2_CAPTURE_ACK;
+        //     }
+        //     break;
+        // }
+
+        // case GamePhase::WAIT_ART2_CAPTURE_ACK: {
+        //     // Subsystem::Vision::test_loopback_art2_ack(); // ~~~调试阶段短接 ACK 测试~~~
+
+        //     // 等待 ART2 捕捉 ACK；ACK 到达即进入下一个宏动作
+        //     if (vision_data.capture_ack_received) {
+        //         vision_data.capture_ack_received = false;
+        //         // 更新逻辑位置为当前观测点
+        //         logical_level.player_start = patrol_actions[game.action_idx].obs.pos; 
+        //         game.action_idx++;
+        //         game.phase = GamePhase::EXEC_ACTION_DISPATCH;
+        //     }
+        //     break;
+        // }
+
+        // case GamePhase::EXEC_BOMB_PUSH: {
+        //     // 等待推炸弹宏动作执行完毕
+        //     if (ctrl.tracker_state == TrackerState::FINISHED) {
+        //         game.phase = GamePhase::UPDATE_MAP;
+        //     }
+        //     break;
+        // }
+
+        // case GamePhase::UPDATE_MAP: {
+        //     point tw = patrol_actions[game.action_idx].bomb.target_wall;
+
+        //     // 摧毁墙壁
+        //     for(int dy=-1; dy<=1; dy++) for(int dx=-1; dx<=1; dx++) {
+        //         if (tw.y+dy > 0 && tw.y+dy < MAP_MAX_HEIGHT-1 && tw.x+dx > 0 && tw.x+dx < MAP_MAX_WIDTH-1)
+        //             logical_level.map[tw.y+dy][tw.x+dx] = 0;
+        //     }
+
+        //     // 销该炸弹
+        //     for (int i = 0; i < logical_level.bomb_count; ++i) {
+        //         if (logical_level.bombs[i].x == patrol_actions[game.action_idx].bomb.bomb_start.x &&
+        //             logical_level.bombs[i].y == patrol_actions[game.action_idx].bomb.bomb_start.y) {
+        //             logical_level.bombs[i] = {-1, -1};
+        //             break;
+        //         }
+        //     }
+
+        //     // 将当前物理位姿投影到网格坐标，刷新逻辑位置
+        //     const auto& real_pos = App::g_state.physical.pose;
+        //     int8_t grid_x = static_cast<int8_t>((real_pos.x - MAP_OFFSET_X) / GRID_SIZE_CM + 0.5f);  // static_cast会直接截断小数，这里的 +0.5 是为了四舍五入
+        //     int8_t grid_y = static_cast<int8_t>((real_pos.y - MAP_OFFSET_Y) / GRID_SIZE_CM + 0.5f);
+        //     if (grid_x < 0) grid_x = 0; else if (grid_x >= MAP_MAX_WIDTH) grid_x = MAP_MAX_WIDTH - 1;
+        //     if (grid_y < 0) grid_y = 0; else if (grid_y >= MAP_MAX_HEIGHT) grid_y = MAP_MAX_HEIGHT - 1;
+        //     logical_level.player_start = {grid_x, grid_y};
+
+        //     game.action_idx++;
+        //     game.phase = GamePhase::EXEC_ACTION_DISPATCH;
+        //     break;
+        // }
+
+        // =============================================================================
+        // ---- 阶段三：语义绑定与推箱执行 ----
+        // =============================================================================
         case GamePhase::BIND_SEMANTICS: {
             bool all_done = true;
 
             // 检查所有“观测动作”对应实体是否已写入语义标签
-            for (int i = 0; i < patrol_actions.size(); i++) {
-                if(patrol_actions[i].is_bomb_task) continue; // 跳过炸弹任务
-
-                uint8_t visited_entity_id = patrol_actions[i].obs.entity_id; 
-
-                // 有任一实体还未出语义结果，则继续等待
-                if (vision_data.semantic_labels[visited_entity_id] == -1) {
-                    all_done = false;
-                    break;
+            for (const auto& act : patrol_actions) {
+                if(act.is_bomb_task) continue;
+                if (vision_data.semantic_labels[act.obs.entity_id] == -1) {
+                    all_done = false; break;
                 }
             }
+            // for (int i = 0; i < patrol_actions.size(); i++) {
+            //     if(patrol_actions[i].is_bomb_task) continue; // 跳过炸弹任务
+
+            //     uint8_t visited_entity_id = patrol_actions[i].obs.entity_id; 
+
+            //     // 有任一实体还未出语义结果，则继续等待
+            //     if (vision_data.semantic_labels[visited_entity_id] == -1) {
+            //         all_done = false;
+            //         break;
+            //     }
+            // }
 
             if (all_done) {
                 // N-1 规则匹配箱子与目标点 ID
                 uint8_t matched_ids[SystemConfig::MAX_BOXES];
-                bool is_perfect = patrol_planner.match_semantics(vision_data.semantic_labels, matched_ids);
                 
-                if (!is_perfect) {
-                    game.error_stage = 4; // 错误阶段4：语义匹配失败（不满足 N-1 规则）
-                    game.phase = GamePhase::ERROR_OCCURRED;
+                if (!patrol_planner.match_semantics(vision_data.semantic_labels, matched_ids)) {
+                    // 错误阶段4：语义匹配失败（不满足 N-1 规则）
+                    game.error_stage = 4; game.phase = GamePhase::ERROR_OCCURRED;  
                     break;
                 }
 
@@ -332,9 +436,11 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             break;
         }
 
+        // =============================================================================
+        // ---- 阶段四：返回起点 ----
+        // =============================================================================
         case GamePhase::PLAN_RETURN_HOME: {
-            ctrl.current_target = {IN_TARGET_X, IN_TARGET_Y, ENTRY_YAW};
-            ctrl.mode = ControlMode::MANUAL_DEBUG;
+            Algorithm::Tracker::track_point({IN_TARGET_X, IN_TARGET_Y, ENTRY_YAW});
             break;
         }
 
@@ -347,15 +453,13 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
 
         case GamePhase::FINISHED: {
             // 完成态：保持原地
-            ctrl.current_target = {pos.x, pos.y, SystemConfig::ENTRY_YAW};
-            ctrl.mode = ControlMode::MANUAL_DEBUG;
+            Algorithm::Tracker::track_point({pos.x, pos.y, SystemConfig::ENTRY_YAW});
             break;
         }
 
         case GamePhase::ERROR_OCCURRED: {
             // 错误态：立即停车并保持姿态
-            ctrl.current_target = {pos.x, pos.y, SystemConfig::ENTRY_YAW};
-            ctrl.mode = ControlMode::MANUAL_DEBUG;
+            Algorithm::Tracker::track_point({pos.x, pos.y, SystemConfig::ENTRY_YAW});
             break;
         }
 

@@ -31,8 +31,8 @@ void load_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path) {
             int dx2 = raw_path[i + 1].x - raw_path[i].x;
             int dy2 = raw_path[i + 1].y - raw_path[i].y;
 
-            // 共线且同向的点不保留，其他点都保留（包括拐点和回头点）
-            if (((dx1 * dy2) != (dx2 * dy1)) || ((dx1 * dx2 + dy1 * dy2) < 0)) {
+            // 保留所有拐点（除共线同向之外的点）
+            if ((dx1 != dx2) || (dy1 != dy2)) {
                 plan.grid_path.push_back(raw_path[i]);
             }
         }
@@ -42,8 +42,7 @@ void load_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path) {
 
     // 将格子转为物理坐标 Point2D
     auto to_physical =[](const point& p) -> Point2D {
-        return { p.x * GRID_SIZE_CM + MAP_OFFSET_X, 
-                 p.y * GRID_SIZE_CM + MAP_OFFSET_Y };
+        return { p.x * GRID_SIZE_CM + MAP_OFFSET_X, p.y * GRID_SIZE_CM + MAP_OFFSET_Y };
     };
 
     // 生成物理坐标路径
@@ -53,8 +52,8 @@ void load_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path) {
 
     // 索引 0 是小车当前所在的起点，所以直接去追索引 1（下一个拐点或终点）
     plan.current_wp_idx = 0;
-
     ctrl.tracker_state = TrackerState::TRACKING;
+    ctrl.mode = ControlMode::AUTO_TRACKING;
 }
 
 
@@ -102,6 +101,17 @@ bool check_arrival(Point2D target, float radius) {
     float dist_sq = dx * dx + dy * dy;
 
     return dist_sq <= radius * radius;
+}
+
+void track_point(const Pose2D& target) {
+    auto& plan = App::g_state.planning;
+    auto& ctrl = App::g_state.control;
+
+    plan.grid_path.clear();           
+    plan.physical_path.clear();    
+
+    ctrl.current_target = target;
+    ctrl.mode = ControlMode::POINT_TRACKING;
 }
 
 } // namespace Algorithm::Tracker
