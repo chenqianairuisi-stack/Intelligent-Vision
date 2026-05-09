@@ -29,7 +29,6 @@ extern "C" int main(void) {
     App::GameEngine::init();                  // 游戏管理器初始化 (读取拨码开关，设置初始阶段)
 
     // IMU 开机静态标定
-    system_delay_ms(500);
     Subsystem::PoseEstimator::calibrate_gyro_step();
 
     pit_ms_init(PIT_CH0, SystemConfig::PIT_CH0_PERIOD_MS);

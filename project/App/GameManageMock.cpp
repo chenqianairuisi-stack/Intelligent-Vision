@@ -321,13 +321,13 @@ __attribute__((section(".ramfunc"))) void MockGameManager::update() {
             ctrl.current_target.yaw = patrol_actions[game.action_idx].obs.target_yaw;  
             ctrl.mode = ControlMode::MANUAL_DEBUG; // 停止循迹，仅执行角度对齐
 
-            // 检查 Yaw 角度误差是否小于 2 度
+            // 检查 Yaw 角度误差是否小于 1 度
             float current_yaw = App::g_state.physical.pose.yaw;
             float err_yaw = std::abs(ctrl.current_target.yaw - current_yaw);
             if (err_yaw > 180.0f) err_yaw = 360.0f - err_yaw;
 
             // 朝向收敛后触发 ART2 捕捉
-            if (err_yaw < 2.0f) { 
+            if (err_yaw < 1.0f) { 
                 uint8_t entity_id = patrol_actions[game.action_idx].obs.entity_id;
                 App::g_state.vision.semantic_labels[entity_id] = mock_truth_labels[entity_id];
                 

@@ -9,6 +9,7 @@
 #include "CoreScheduler.h"
 #include "Vision.h"
 #include "MotionControl.h"
+#include "PoseEstimate.h"
 
 #include "zf_common_headfile.h"
 #include "Encoder.h"
@@ -96,7 +97,25 @@ void send_wave_data() {
             tx_packet.data_4 = vision_pose.y;
             tx_packet.data_5 = 0;
             tx_packet.data_6 = 0;
-        } 
+        }
+        else if (App::g_state.debug.telemetry_mode == 2) {
+            // 【模式 2】：IMU 四元数融合监控
+            const auto& probes = Subsystem::PoseEstimator::get_debug_probes();
+            const auto& cur_pose = App::g_state.physical.pose;
+
+            tx_packet.data_1 = probes.pitch_acc;     // 通道1: 假信号(红线)
+            tx_packet.data_2 = probes.pitch_gyro;    // 通道2: 积分信号(蓝线)
+            tx_packet.data_3 = probes.pitch_mahony;  // 通道3: 融合结果(绿线)
+            
+            // 为了在同一张图里看清，把 Kp(0~1) 放大 10 倍显示
+            tx_packet.data_4 = probes.kp_adaptive * 10.0f; // 通道4: 动态 Kp(放大10倍) 
+            
+            // 加速度模长减去 1G，再放大 10 倍，方便和 0 度基准线对比
+            tx_packet.data_5 = (probes.acc_norm - 1.0f) * 10.0f; 
+
+            // 附带监控我们最关心的 Yaw，看看它有没有漂移
+            tx_packet.data_6 = cur_pose.yaw;         
+        }
 
         wireless_uart_send_buffer((uint8*)&tx_packet, sizeof(VofaJustFloat));
     }
@@ -262,12 +281,14 @@ namespace {
                     case 'S': tune.dynamics.max_speed = value; break;
                     case 'D': tune.dynamics.max_acc = value; break;
                     case 'F': tune.dynamics.max_jerk = value; break;
-                    case 'G': tune.dynamics.max_ang_speed = value; break;
+                    case 'H': tune.dynamics.max_ang_speed = value; break;
+                    case 'J': tune.dynamics.kinematic_gain_x = value; break;
+                    case 'K': tune.dynamics.kinematic_gain_y = value; break;
+                    case 'L': tune.dynamics.brake_limit = value; break;
 
-                    case 'Z': tune.dynamics.kinematic_gain_x = value; break;
-                    case 'X': tune.dynamics.kinematic_gain_y = value; break;
-                    case 'C': tune.tracker.reach_radius = value; break;
-                    case 'V': tune.tracker.reach_radius_min = value; break;
+                    case 'Z': tune.tracker.reach_radius = value; break;
+                    case 'X': tune.tracker.reach_radius_min = value; break;
+                    case 'C': tune.estimate.mahony_kp = value; break;
 
                     case 'P': App::g_state.debug.telemetry_mode = (int)value; break; 
                     default: return;

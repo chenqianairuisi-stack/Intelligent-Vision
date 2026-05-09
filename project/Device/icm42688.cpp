@@ -52,7 +52,7 @@ bool Icm42688::init() {
     return true; 
 }
 
-// 极限性能读取：14字节连续读
+// 14字节连读
 __attribute__((section(".ramfunc"))) void Icm42688::update_all() {
     uint8_t buf[14];
     
@@ -72,8 +72,8 @@ __attribute__((section(".ramfunc"))) void Icm42688::update_all() {
 
     // 乘以预编译的常数转换为物理量,并且调整硬件坐标系
     data.temp   = static_cast<float>(data.raw_temp) * TEMP_SCALE + TEMP_OFFSET;
-    data.acc_x  = static_cast<float>(data.raw_acc_y) * ACCEL_SCALE;
-    data.acc_y  = static_cast<float>(data.raw_acc_x) * ACCEL_SCALE;
+    data.acc_x  = - static_cast<float>(data.raw_acc_y) * ACCEL_SCALE;
+    data.acc_y  = - static_cast<float>(data.raw_acc_x) * ACCEL_SCALE;
     data.acc_z  = - static_cast<float>(data.raw_acc_z) * ACCEL_SCALE;
     data.gyro_x = - static_cast<float>(data.raw_gyro_y) * GYRO_SCALE;
     data.gyro_y = - static_cast<float>(data.raw_gyro_x) * GYRO_SCALE;
@@ -81,7 +81,7 @@ __attribute__((section(".ramfunc"))) void Icm42688::update_all() {
 }
 
 
-// 极限性能读取：仅读取陀螺仪三轴 (6 字节)
+// 读取陀螺仪三轴 (6 字节)
 __attribute__((section(".ramfunc"))) void Icm42688::update_gyro_only() {
     uint8_t buf[6];
     
@@ -96,13 +96,13 @@ __attribute__((section(".ramfunc"))) void Icm42688::update_gyro_only() {
     data.raw_gyro_z = (int16_t)(((uint16_t)buf[4] << 8) | buf[5]);
 
     // 转换为物理量
-    data.gyro_x =   static_cast<float>(data.raw_gyro_x) * GYRO_SCALE;
-    data.gyro_y =   static_cast<float>(data.raw_gyro_y) * GYRO_SCALE;
+    data.gyro_x = - static_cast<float>(data.raw_gyro_y) * GYRO_SCALE;
+    data.gyro_y = - static_cast<float>(data.raw_gyro_x) * GYRO_SCALE;
     data.gyro_z = - static_cast<float>(data.raw_gyro_z) * GYRO_SCALE;
 }
 
 
-// 极限性能读取：仅读取加速度计三轴 (6 字节)
+// 读取加速度计三轴 (6 字节)
 __attribute__((section(".ramfunc"))) void Icm42688::update_accel_only() {
     uint8_t buf[6];
     
@@ -117,7 +117,7 @@ __attribute__((section(".ramfunc"))) void Icm42688::update_accel_only() {
     data.raw_acc_z = (int16_t)(((uint16_t)buf[4] << 8) | buf[5]);
 
     // 转换为物理量
-    data.acc_x = static_cast<float>(data.raw_acc_x) * ACCEL_SCALE;
-    data.acc_y = static_cast<float>(data.raw_acc_y) * ACCEL_SCALE;
-    data.acc_z = static_cast<float>(data.raw_acc_z) * ACCEL_SCALE;
+    data.acc_x = - static_cast<float>(data.raw_acc_y) * ACCEL_SCALE;
+    data.acc_y = - static_cast<float>(data.raw_acc_x) * ACCEL_SCALE;
+    data.acc_z = - static_cast<float>(data.raw_acc_z) * ACCEL_SCALE;
 }

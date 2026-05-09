@@ -4,6 +4,7 @@
 #include "GameManage.h"
 #include "Storage.h"
 #include "Encoder.h"
+#include "icm42688.h"
 
 // 硬件引脚定义
 #define KEY1 C13  // 下移 / 减小
@@ -396,6 +397,7 @@ void draw_odometry_data() {
     auto pos = App::g_state.physical.pose;
     auto vision_pos = App::g_state.vision.art1_pose;
     auto wheels = App::g_state.physical.current_wheel_speed;
+    auto data = imu_icm42688.data;
 
     char ui_buf[32]; 
     
@@ -407,10 +409,17 @@ void draw_odometry_data() {
     tft180_show_string(0, 6 * UI_ROW_H, "Vision Y: ");   tft180_show_float(10 * UI_COL_W, 6 * UI_ROW_H, vision_pos.y, 3, 1);
     sprintf(ui_buf, "Yaw: %8.2f   ", vision_pos.yaw);     tft180_show_string(0, 7 * UI_ROW_H, ui_buf);
 
-    tft180_show_string(0, 8 * UI_ROW_H, "Spd LF: ");     tft180_show_float(10 * UI_COL_W, 8 * UI_ROW_H, wheels.lf, 3, 1);
-    tft180_show_string(0, 9 * UI_ROW_H, "Spd LB: ");     tft180_show_float(10 * UI_COL_W, 9 * UI_ROW_H, wheels.lb, 3, 1);
-    tft180_show_string(0, 10 * UI_ROW_H, "Spd RF: ");     tft180_show_float(10 * UI_COL_W, 10 * UI_ROW_H, wheels.rf, 3, 1);
-    tft180_show_string(0, 11 * UI_ROW_H, "Spd RB: ");     tft180_show_float(10 * UI_COL_W, 11 * UI_ROW_H, wheels.rb, 3, 1);
+    tft180_show_string(0, 8 * UI_ROW_H, "Gyro_x: ");     tft180_show_float(10 * UI_COL_W, 8 * UI_ROW_H, data.gyro_x, 3, 1);
+    tft180_show_string(0, 9 * UI_ROW_H, "Gyro_y: ");     tft180_show_float(10 * UI_COL_W, 9 * UI_ROW_H, data.gyro_y, 3, 1);
+    tft180_show_string(0, 10 * UI_ROW_H, "Gyro_z: ");    tft180_show_float(10 * UI_COL_W, 10 * UI_ROW_H, data.gyro_z, 3, 1);
+    tft180_show_string(0, 11 * UI_ROW_H, "Acc_x: ");     tft180_show_float(10 * UI_COL_W, 11 * UI_ROW_H, data.acc_x, 3, 1);
+    tft180_show_string(0, 12 * UI_ROW_H, "Acc_y: ");     tft180_show_float(10 * UI_COL_W, 12 * UI_ROW_H, data.acc_y, 3, 1);
+    tft180_show_string(0, 13 * UI_ROW_H, "Acc_z: ");     tft180_show_float(10 * UI_COL_W, 13 * UI_ROW_H, data.acc_z, 3, 1);
+
+    // tft180_show_string(0, 8 * UI_ROW_H, "Spd LF: ");     tft180_show_float(10 * UI_COL_W, 8 * UI_ROW_H, wheels.lf, 3, 1);
+    // tft180_show_string(0, 9 * UI_ROW_H, "Spd LB: ");     tft180_show_float(10 * UI_COL_W, 9 * UI_ROW_H, wheels.lb, 3, 1);
+    // tft180_show_string(0, 10 * UI_ROW_H, "Spd RF: ");     tft180_show_float(10 * UI_COL_W, 10 * UI_ROW_H, wheels.rf, 3, 1);
+    // tft180_show_string(0, 11 * UI_ROW_H, "Spd RB: ");     tft180_show_float(10 * UI_COL_W, 11 * UI_ROW_H, wheels.rb, 3, 1);
 }
 
 // 绘制参数调节页面
