@@ -24,12 +24,12 @@ __attribute__((section(".dtcm_data"))) static Motor motors[4] = {
     {D3,  PWM2_MODULE3_CHA_D2,  true }    // RB
 };
 
-__attribute__((section(".dtcm_data"))) static Algorithm::Motion::IncPid pid_wheels[4] = {
-    Algorithm::Motion::IncPid(tune.pid_speed), Algorithm::Motion::IncPid(tune.pid_speed),
-    Algorithm::Motion::IncPid(tune.pid_speed), Algorithm::Motion::IncPid(tune.pid_speed)
+__attribute__((section(".dtcm_data"))) static Algorithm::Motion::Speed_PosPid pid_wheels[4] = {
+    Algorithm::Motion::Speed_PosPid(tune.pid_speed), Algorithm::Motion::Speed_PosPid(tune.pid_speed),
+    Algorithm::Motion::Speed_PosPid(tune.pid_speed), Algorithm::Motion::Speed_PosPid(tune.pid_speed)
 };
 
-__attribute__((section(".dtcm_data"))) static Algorithm::Motion::PosPid pid_pos_yaw(tune.pid_yaw);
+__attribute__((section(".dtcm_data"))) static Algorithm::Motion::Angle_PosPid pid_pos_yaw(tune.pid_yaw);
 
 __attribute__((section(".dtcm_data"))) static Algorithm::Motion::Trajectory velocity_planner;
 
@@ -43,13 +43,10 @@ namespace {
         return angle * SystemConfig::DEG_TO_RAD;
     }
 
-    // 提取符号，用于静摩擦前馈方向判断，并引入死区防止零点震荡
-    __attribute__((always_inline)) inline float get_sign(float val) {
-        if (val > 1.0f) return 1.0f;
-        if (val < -1.0f) return -1.0f;
-        return val / 1.0f; // 在 -1.0 到 1.0 之间，平滑地从 -1 过渡到 1，绝不突变
+    __attribute__((always_inline)) inline float smooth_sign(float val) {
+        // 0.5f 决定了过渡带的陡峭程度，值越小越接近阶跃，但不突变
+        return val / (std::abs(val) + 0.5f); 
     }
-
 
     // 速度内环控制：输入四个轮子的目标转速，执行 PID 计算并驱动电机
     __attribute__((always_inline)) inline void run_speed_loop(const WheelSpeed4& targets) {
@@ -57,12 +54,12 @@ namespace {
         const auto& Kv = tune.ff.kv;
 
         // 计算前馈占空比 (简单的线性模型)，并加入符号判断实现静摩擦补偿
-        float ff_lf = targets.lf * Kv + get_sign(targets.lf) * tune.ff.ka;
-        float ff_lb = targets.lb * Kv + get_sign(targets.lb) * tune.ff.ka;
-        float ff_rf = targets.rf * Kv + get_sign(targets.rf) * tune.ff.ka;
-        float ff_rb = targets.rb * Kv + get_sign(targets.rb) * tune.ff.ka;
+        float ff_lf = targets.lf * Kv + smooth_sign(targets.lf) * tune.ff.ka;
+        float ff_lb = targets.lb * Kv + smooth_sign(targets.lb) * tune.ff.ka;
+        float ff_rf = targets.rf * Kv + smooth_sign(targets.rf) * tune.ff.ka;
+        float ff_rb = targets.rb * Kv + smooth_sign(targets.rb) * tune.ff.ka;
 
-        // 速度环增量式 PID 计算占空比输出
+        // 速度环位置式 PID + 前馈计算占空比输出
         float duty_lf = ff_lf + pid_wheels[0].calculate(targets.lf, current_speeds.lf);
         float duty_lb = ff_lb + pid_wheels[1].calculate(targets.lb, current_speeds.lb);
         float duty_rf = ff_rf + pid_wheels[2].calculate(targets.rf, current_speeds.rf);

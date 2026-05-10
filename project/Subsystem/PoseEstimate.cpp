@@ -9,8 +9,11 @@ extern "C" {
 #include "RobotState.h"
 #include "system_config.h"
 #include "tuning_config.h"
-#include "MotionControl.h"
 
+#include "MotionControl.h"
+#include "Telemetry.h"
+
+#include "zf_common_headfile.h"
 #include "Icm42688.h"
 #include "Encoder.h"
 #include <cmath>
@@ -44,17 +47,38 @@ namespace {
     }
 }
 
-const DebugProbes& get_debug_probes() {
-    return g_probes;
-}
 
-// 初始化与标定
+// =============================================================================
+// 模块 1: 初始化与坐标重置
+// =============================================================================
 void init() {
     gyro_z_offset = 0.0f; gyro_x_offset = 0.0f; gyro_y_offset = 0.0f;
     dynamic_deadband = 0.1f;
     is_calibrated = false;
     q0 = 0.70710678f; q1 = 0.0f; q2 = 0.0f; q3 = 0.70710678f;  // 初始化四元数 (Yaw = 90度)
     imu_icm42688.init();  // ICM42688 IMU 初始化 (spi)
+}
+
+void set_position(float x, float y, float yaw_deg) {
+    // 1. 重置坐标
+    App::g_state.physical.pose.x = x;
+    App::g_state.physical.pose.y = y;
+
+    // 2. 将传入的初始偏航角(度)转换为四元数
+    float yaw_rad_half = (yaw_deg * SystemConfig::DEG_TO_RAD) * 0.5f;
+    q0 = std::cos(yaw_rad_half); q1 = 0.0f; q2 = 0.0f; q3 = std::sin(yaw_rad_half);
+    
+    // 3. 同步状态树
+    App::g_state.physical.pose.yaw = yaw_deg;
+}
+
+
+// =============================================================================
+// 模块 2: IMU 数据更新与融合算法
+// =============================================================================
+
+const DebugProbes& get_debug_probes() {
+    return g_probes;
 }
 
 // IMU 开机静态标定，累计 600 次数据求平均，得到 gyro_z_offset
@@ -104,25 +128,7 @@ void calibrate_gyro_step() {
     is_calibrated = true; 
 }
 
-
-// 强行重置里程计坐标
-void set_position(float x, float y, float yaw_deg) {
-    // 1. 重置坐标
-    App::g_state.physical.pose.x = x;
-    App::g_state.physical.pose.y = y;
-
-    // 2. 将传入的初始偏航角(度)转换为四元数
-    float yaw_rad_half = (yaw_deg * SystemConfig::DEG_TO_RAD) * 0.5f;
-    q0 = std::cos(yaw_rad_half); q1 = 0.0f; q2 = 0.0f; q3 = std::sin(yaw_rad_half);
-    
-    // 3. 同步状态树
-    App::g_state.physical.pose.yaw = yaw_deg;
-}
-
-
-// ==========================================
 // 自适应四元数解算
-// ==========================================
 __attribute__((section(".ramfunc")))
 void adaptive_mahony_update(float gx, float gy, float gz, float ax, float ay, float az) {
     float norm;
@@ -183,10 +189,7 @@ void adaptive_mahony_update(float gx, float gy, float gz, float ax, float ay, fl
     q0 *= norm; q1 *= norm; q2 *= norm; q3 *= norm;
 }
 
-
-// ==========================================
 // 1ms 姿态解算定时器
-// ==========================================
 __attribute__((section(".ramfunc")))
 void update_yaw_1ms_tick() {
     if (!is_calibrated) return; 
@@ -269,10 +272,11 @@ void update_yaw_1ms_tick() {
 }
 
 
+// =============================================================================
+// 模块 3: 编码器定位
+// =============================================================================
 
-// ==========================================
-// PIT_CH1 里程计更新定时器
-// ==========================================
+// 20ms 位置更新定时器：基于当前的 Yaw 角度和编码器增量进行里程计计算
 __attribute__((section(".ramfunc")))
 void update_position_20ms_tick(const int16_t* encoder_counts, float current_yaw_deg) {
 
@@ -302,5 +306,72 @@ void update_position_20ms_tick(const int16_t* encoder_counts, float current_yaw_
     App::g_state.physical.pose.x += dx_global;
     App::g_state.physical.pose.y += dy_global;
 }
+
+
+// =============================================================================
+// 模块 4: 视觉标定与坐标修正
+// =============================================================================
+__attribute__((section(".dtcm_data"))) VisionCalibrator vision_calibrator;
+
+
+__attribute__((section(".ramfunc"))) 
+bool calibrate_vision(uint32_t timeout_ms) {
+    auto& pos = App::g_state.physical.pose;
+    auto& ctrl = App::g_state.control;
+    auto& vision_data = App::g_state.vision;
+
+    // 1. 切换到原地单点伺服模式，防止底盘模块更新目标点
+    ctrl.mode = ControlMode::POINT_TRACKING; 
+
+    // 2. 清理旧数据，重置滤波器
+    vision_calibrator.reset();
+    vision_data.art1_pose_updated = false;
+
+    uint32_t start_tick = Core::Scheduler::get_sys_tick_ms();
+
+    // 3. 开启阻塞式等待（死循环）
+    while ((Core::Scheduler::get_sys_tick_ms() - start_tick) < timeout_ms) {
+        
+        // 抓取视觉 DMA 回传的新数据
+        if (vision_data.art1_pose_updated) {
+            vision_data.art1_pose_updated = false;
+            vision_calibrator.push(vision_data.art1_pose.x, vision_data.art1_pose.y, vision_data.art1_pose.yaw);
+        }
+
+        // 检查滤波器是否收敛
+        if (vision_calibrator.is_converged()) {
+            auto optimal = vision_calibrator.get_optimal_pose();
+            
+            float dx = std::abs(optimal.x - pos.x);
+            float dy = std::abs(optimal.y - pos.y);
+
+            // 偏差校验
+            if (dx > 5 || dy > 5) {
+                // 偏差太大，直接拒绝并退出阻塞
+                Subsystem::Telemetry::log_vision_calibration(optimal.x, optimal.y, optimal.yaw, pos.x, pos.y, pos.yaw, false);
+                return false; 
+            } else {
+                Subsystem::Telemetry::log_vision_calibration(optimal.x, optimal.y, optimal.yaw, pos.x, pos.y, pos.yaw, true);
+                
+                // 重置底层里程计，并更新控制目标为视觉校准后的结果
+                pos.x = optimal.x;
+                pos.y = optimal.y;
+                ctrl.current_target.x = optimal.x;
+                ctrl.current_target.y = optimal.y;
+                
+                return true;
+            }
+        }
+
+        system_delay_ms(1); 
+    }
+
+    // 4. 超时退出
+    char msg[128]; snprintf(msg, sizeof(msg), "[VIS_CALIB] TIMEOUT! Frames collected: %d. Skipped.\r\n", vision_calibrator.get_count());
+    wireless_uart_send_buffer((uint8_t*)msg, strlen(msg));
+
+    return false;
+}
+
 
 } // namespace Subsystem::PoseEstimator

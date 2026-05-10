@@ -3,73 +3,49 @@
 
 namespace Algorithm::Motion {
 
-// 一维速度规划算法：严格算出标量梯形速度，最后投影分解
+// 一维速度规划
 __attribute__((section(".ramfunc"))) 
 Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt) {
     
-    // 1. 计算当前距离，死区判断
     float distance = std::sqrtf(dx * dx + dy * dy);  
+
     if (distance < tune.tracker.reach_radius_min) {
-        reset();
+        current_v = 0.0f; // 动量清零
         return {0.0f, 0.0f}; 
     }
 
-    // 2. 读取 DTCM 中的全局极限参数
-    float max_acc_start = tune.dynamics.max_acc; // 起步阶段的最大加速度
-    float max_acc_brake = tune.dynamics.max_acc * tune.dynamics.brake_limit; // 刹车阶段的最大加速度
-    float max_jerk = tune.dynamics.max_jerk;
-    float max_v_limit = tune.dynamics.max_speed;
-
-    // 3. Jerk 动态滞后补偿 (直接使用标量速度，计算极大简化)
-    float t_jerk = max_acc_brake / max_jerk;
-    float jerk_lag_dist = 0.5f * current_v * t_jerk;        // 额外滑行的物理距离 (cm)
-
-    // 4. 计算理论安全刹车速度 (梯形速度规划)
-    float safe_distance = distance - jerk_lag_dist;
-    if (safe_distance < 0.0f) safe_distance = 0.0f;         
-
-    float target_v;
-    if (safe_distance > 2.0f) {
-        target_v = std::sqrtf(2.0f * max_acc_brake * safe_distance);
-    } else {
-        float kp = std::sqrtf(max_acc_brake);
-        target_v = kp * safe_distance;
-    }
-
-    target_v = std::min(max_v_limit, target_v); 
-
-    // 利用 target_v，进行非对称加速度判定
-    float current_max_acc = (target_v < current_v) ? max_acc_brake : max_acc_start;
+    float max_speed   = tune.dynamics.max_speed;
+    float max_acc     = tune.dynamics.max_acc;
+    float brake_acc   = max_acc * tune.dynamics.brake_limit;
     
-    // 计算当前需要的期望标量加速度
-    float req_a = (target_v - current_v) / dt;
+    // 理论所需刹车距离: v^2 / (2 * a)
+    float brake_dist = (max_speed * max_speed) / (2.0f * brake_acc);
 
-    // 【第一级滤波】：Jerk 标量限幅
-    float da = req_a - current_a;
-    float max_da = max_jerk * dt; 
+    float target_v = max_speed; // 默认巡航
+    
+    if (distance <= brake_dist) {
+        // 刹车段：由于 v = sqrt(2 * a * S)，直接利用乘法
+        target_v = std::sqrtf(2.0f * brake_acc * distance);
+        
+        // 克服静摩擦的最小蠕行速度
+        constexpr float MIN_CREEP_SPEED = 10.0f; 
+        if (target_v < MIN_CREEP_SPEED) {
+            target_v = MIN_CREEP_SPEED;
+        }
+    }
 
-    if (da > max_da) {
-        current_a += max_da;
-    } else if (da < -max_da) {
-        current_a -= max_da;
+    float max_dv_acc = max_acc * dt;
+    float max_dv_dec = brake_acc * dt;
+
+    if (target_v > current_v) {
+        current_v = std::min(current_v + max_dv_acc, target_v);
     } else {
-        current_a = req_a;
+        current_v = std::max(current_v - max_dv_dec, target_v);
     }
 
-    // 【第二级滤波】：Accel 标量限幅
-    if (current_a > current_max_acc) {
-        current_a = current_max_acc;
-    } else if (current_a < -current_max_acc) {
-        current_a = -current_max_acc;
-    }
-
-    // 更新真实的物理标量速度
-    current_v += current_a * dt;
-    if (current_v < 0.0f) current_v = 0.0f; // 防下溢倒车
-
-    // 最终投影：顺着目标点的方向线，将绝对纯净的标量速度分解
-    float ux = dx / distance;
-    float uy = dy / distance;
+    float inv_dist = 1.0f / distance;
+    float ux = dx * inv_dist;
+    float uy = dy * inv_dist;
 
     return {current_v * ux, current_v * uy};
 }

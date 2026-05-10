@@ -61,6 +61,23 @@ void init() {
     wireless_uart_init();  
 }
 
+void log_vision_calibration(float v_x, float v_y, float v_yaw, 
+                            float o_x, float o_y, float o_yaw, bool accepted) {
+    char msg[128];
+    // 计算偏差
+    float dx = std::abs(v_x - o_x);
+    float dy = std::abs(v_y - o_y);
+    float dyaw = std::abs(v_yaw - o_yaw);
+    if (dyaw > 180.0f) dyaw = 360.0f - dyaw;
+
+    snprintf(msg, sizeof(msg),
+             "[VIS_CALIB] %s | Vis(%.1f, %.1f, %.1f) Odom(%.1f, %.1f, %.1f) Err(%.1f, %.1f, %.1f)\r\n",
+             accepted ? "ACCEPT" : "REJECT",
+             v_x, v_y, v_yaw, o_x, o_y, o_yaw, dx, dy, dyaw);
+             
+    wireless_uart_send_buffer((uint8_t*)msg, strlen(msg));
+}
+
 // 发送数据
 void send_wave_data() {
 

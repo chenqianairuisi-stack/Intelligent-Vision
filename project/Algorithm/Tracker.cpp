@@ -73,16 +73,12 @@ __attribute__((section(".ramfunc"))) void update_target() {
     float current_radius = is_last_point ? tune.tracker.reach_radius_min : tune.tracker.reach_radius;
 
     // 状态切换判断
-    if (check_arrival(target_phys, current_radius)) {
+    if (check_arrival(target_phys, current_radius) && App::g_state.physical.is_stopped) {
         if (!is_last_point) {
-            // 中间点：直接切到下一个点
             plan.current_wp_idx++;
             target_phys = plan.physical_path[plan.current_wp_idx];
         } else {
-            // 终点：不仅要求距离足够近，还必须等待底盘物理静止            
-            if (App::g_state.physical.is_stopped) {
-                ctrl.tracker_state = TrackerState::FINISHED;
-            }
+            ctrl.tracker_state = TrackerState::FINISHED;
         }
     }
 

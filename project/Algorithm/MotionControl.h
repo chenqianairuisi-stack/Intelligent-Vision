@@ -51,42 +51,10 @@ namespace Kinematics {
 // 3. PID 算法库
 // ==========================================
 
-// 增量式 PID (适合速度内环)
-class IncPid {
+// 角度环 PID
+class Angle_PosPid { 
 public:
-    IncPid(const PidParams& p) : params(p) {}
-    
-    __attribute__((always_inline)) 
-    inline float calculate(float target, float current) {
-        float err = target - current;
-        float p_term = params.kp * (err - last_err);
-        float i_term = params.ki * err;
-        float d_term = params.kd * (err - 2.0f * last_err + prev_err);
-        
-        // 防止积分项过大导致的风车效应
-        if (i_term > 2.0f) i_term = 2.0f;
-        if (i_term < -2.0f) i_term = -2.0f;
-        if (out >= 50.0f && i_term > 0.0f) {
-            i_term = 0.0f;
-        } else if (out <= -50.0f && i_term < 0.0f) {
-            i_term = 0.0f;
-        }
-
-        prev_err = last_err;
-        last_err = err;
-        
-        out += (p_term + i_term + d_term);
-        return out;
-    }
-private:
-    const PidParams& params;
-    float last_err = 0.0f, prev_err = 0.0f, out = 0.0f;
-};
-
-// 位置式 PID (适合角度外环)
-class PosPid { 
-public:
-    PosPid(const PidParams& p) : params(p) {}
+    Angle_PosPid(const PidParams& p) : params(p) {}
     
     __attribute__((always_inline))
     inline float calculate(float target, float current) {
@@ -109,6 +77,36 @@ public:
 private:
     const PidParams& params;
     float last_err = 0.0f, i_out = 0.0f;
+};
+
+// 速度环 PID
+class Speed_PosPid {
+public:
+    Speed_PosPid(const PidParams& p) : params(p) {}
+    
+    void reset() { i_out = 0.0f;}  // 断电/急停/初始化时，必须调用此函数清零历史状态
+
+    __attribute__((always_inline))
+    inline float calculate(float target, float current) {
+        if (std::abs(target) < 0.1f && std::abs(current) < 0.5f) {
+            i_out = 0.0f;
+            return 0.0f;
+        }
+
+        float err = target - current;
+        
+        i_out += params.ki * err;
+
+        // 积分抗饱和
+        i_out = std::clamp(i_out, -20.0f, 20.0f);
+
+        // 最终返回 PI 补偿占空比
+        return (params.kp * err) + i_out;
+    }
+
+private:
+    const PidParams& params;
+    float i_out = 0.0f;
 };
 
 } // namespace Algorithm::Motion

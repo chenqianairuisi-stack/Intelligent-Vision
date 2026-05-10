@@ -7,4 +7,6 @@ namespace Subsystem::Telemetry {
     
     void send_wave_data();           // 发送波形给上位机
     void receive_and_parse_task();   // 解析上位机发来的控制命令
+
+    void log_vision_calibration(float v_x, float v_y, float v_yaw, float o_x, float o_y, float o_yaw, bool accepted);
 }

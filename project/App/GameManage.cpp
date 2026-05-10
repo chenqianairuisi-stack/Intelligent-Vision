@@ -228,6 +228,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
 
                     // 结合物理底盘是否停稳做决策
                     if (err_yaw < 1.0f && App::g_state.physical.is_stopped) {
+                        Subsystem::PoseEstimator::calibrate_vision(4000);   // 视觉校准（重置物理位姿与视觉位姿的偏差，确保后续路径追踪的准确性）
                         task_done = true;
                     }
                     break;
@@ -274,90 +275,6 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             if (task_done) current_task_idx++;
             break;
         }
-
-        // case GamePhase::EXEC_PATROL_MOVE: {
-        //     // 等待到达观测点
-        //     if (ctrl.tracker_state == TrackerState::FINISHED) {
-        //         game.phase = GamePhase::EXEC_ALIGN_YAW;
-        //     }
-        //     break;
-        // }
-
-        // case GamePhase::EXEC_ALIGN_YAW: {
-        //     // 到位后原地对齐朝向，准备触发 ART2 抓拍
-        //     ctrl.current_target.yaw = patrol_actions[game.action_idx].obs.target_yaw;  
-        //     ctrl.mode = ControlMode::POINT_TRACKING; // 停止循迹，仅执行角度对齐
-
-        //     // 检查 Yaw 角度误差是否小于 1 度
-        //     float current_yaw = App::g_state.physical.pose.yaw;
-        //     float err_yaw = std::abs(ctrl.current_target.yaw - current_yaw);
-        //     if (err_yaw > 180.0f) err_yaw = 360.0f - err_yaw;
-
-        //     // 朝向收敛后触发 ART2 捕捉
-        //     if (err_yaw < 1.0f) { 
-
-        //         system_delay_ms(1000);   
-        //         // 请求 ART2 捕捉该观测点对应实体的语义标签
-        //         uint8_t current_entity = patrol_actions[game.action_idx].obs.entity_id;
-        //         bool is_box = patrol_actions[game.action_idx].obs.is_box;
-        //         Subsystem::Vision::request_capture_ART2(current_entity, is_box);
-        //         game.phase = GamePhase::WAIT_ART2_CAPTURE_ACK;
-        //     }
-        //     break;
-        // }
-
-        // case GamePhase::WAIT_ART2_CAPTURE_ACK: {
-        //     // Subsystem::Vision::test_loopback_art2_ack(); // ~~~调试阶段短接 ACK 测试~~~
-
-        //     // 等待 ART2 捕捉 ACK；ACK 到达即进入下一个宏动作
-        //     if (vision_data.capture_ack_received) {
-        //         vision_data.capture_ack_received = false;
-        //         // 更新逻辑位置为当前观测点
-        //         logical_level.player_start = patrol_actions[game.action_idx].obs.pos; 
-        //         game.action_idx++;
-        //         game.phase = GamePhase::EXEC_ACTION_DISPATCH;
-        //     }
-        //     break;
-        // }
-
-        // case GamePhase::EXEC_BOMB_PUSH: {
-        //     // 等待推炸弹宏动作执行完毕
-        //     if (ctrl.tracker_state == TrackerState::FINISHED) {
-        //         game.phase = GamePhase::UPDATE_MAP;
-        //     }
-        //     break;
-        // }
-
-        // case GamePhase::UPDATE_MAP: {
-        //     point tw = patrol_actions[game.action_idx].bomb.target_wall;
-
-        //     // 摧毁墙壁
-        //     for(int dy=-1; dy<=1; dy++) for(int dx=-1; dx<=1; dx++) {
-        //         if (tw.y+dy > 0 && tw.y+dy < MAP_MAX_HEIGHT-1 && tw.x+dx > 0 && tw.x+dx < MAP_MAX_WIDTH-1)
-        //             logical_level.map[tw.y+dy][tw.x+dx] = 0;
-        //     }
-
-        //     // 销该炸弹
-        //     for (int i = 0; i < logical_level.bomb_count; ++i) {
-        //         if (logical_level.bombs[i].x == patrol_actions[game.action_idx].bomb.bomb_start.x &&
-        //             logical_level.bombs[i].y == patrol_actions[game.action_idx].bomb.bomb_start.y) {
-        //             logical_level.bombs[i] = {-1, -1};
-        //             break;
-        //         }
-        //     }
-
-        //     // 将当前物理位姿投影到网格坐标，刷新逻辑位置
-        //     const auto& real_pos = App::g_state.physical.pose;
-        //     int8_t grid_x = static_cast<int8_t>((real_pos.x - MAP_OFFSET_X) / GRID_SIZE_CM + 0.5f);  // static_cast会直接截断小数，这里的 +0.5 是为了四舍五入
-        //     int8_t grid_y = static_cast<int8_t>((real_pos.y - MAP_OFFSET_Y) / GRID_SIZE_CM + 0.5f);
-        //     if (grid_x < 0) grid_x = 0; else if (grid_x >= MAP_MAX_WIDTH) grid_x = MAP_MAX_WIDTH - 1;
-        //     if (grid_y < 0) grid_y = 0; else if (grid_y >= MAP_MAX_HEIGHT) grid_y = MAP_MAX_HEIGHT - 1;
-        //     logical_level.player_start = {grid_x, grid_y};
-
-        //     game.action_idx++;
-        //     game.phase = GamePhase::EXEC_ACTION_DISPATCH;
-        //     break;
-        // }
 
         // =============================================================================
         // ---- 阶段三：语义绑定与推箱执行 ----
