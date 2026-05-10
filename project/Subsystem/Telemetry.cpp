@@ -293,19 +293,21 @@ namespace {
                     case 'Y': tune.pid_speed.kd = value; break;
                     case 'U': tune.ff.kv = value; break;
                     case 'I': tune.ff.ka = value; break;
+                    case 'O': tune.ff.k_stiction = value; break;
                     
                     case 'A': tune.dynamics.max_duty = value; break;
-                    case 'S': tune.dynamics.max_speed = value; break;
+                    case 'S': tune.dynamics.max_vel = value; break;
                     case 'D': tune.dynamics.max_acc = value; break;
-                    case 'F': tune.dynamics.max_jerk = value; break;
-                    case 'H': tune.dynamics.max_ang_speed = value; break;
+                    case 'F': tune.dynamics.max_ang_vel = value; break;
+                    case 'H': tune.dynamics.max_ang_acc = value; break;
                     case 'J': tune.dynamics.kinematic_gain_x = value; break;
                     case 'K': tune.dynamics.kinematic_gain_y = value; break;
                     case 'L': tune.dynamics.brake_limit = value; break;
 
                     case 'Z': tune.tracker.reach_radius = value; break;
                     case 'X': tune.tracker.reach_radius_min = value; break;
-                    case 'C': tune.estimate.mahony_kp = value; break;
+                    case 'C': tune.tracker.ang_tolerance = value; break;
+                    case 'V': tune.estimate.mahony_kp = value; break;
 
                     case 'P': App::g_state.debug.telemetry_mode = (int)value; break; 
                     default: return;

@@ -12,10 +12,20 @@ namespace Algorithm::Motion {
 class Trajectory {
 public:
     inline void reset() { current_v = 0.0f; current_a = 0.0f; }  
-    Speed2D velocity_planning_1d(float dx, float dy, float dt);  // 根据当前距离，规划最优速度
+    Speed2D velocity_planning_1d(float dx, float dy, float dt);
 private:
-    float current_v = 0.0f;  // 当前速度
-    float current_a = 0.0f;  // 当前加速度
+    float current_v = 0.0f;  
+    float current_a = 0.0f; 
+};
+
+
+class YawProfiled {
+public:
+    void reset() { current_vw = 0.0f; }
+    float calculate(float err, float dt, bool is_translating);
+
+private:
+    float current_vw = 0.0f;
 };
 
 
@@ -94,7 +104,7 @@ public:
         }
 
         float err = target - current;
-        
+
         i_out += params.ki * err;
 
         // 积分抗饱和

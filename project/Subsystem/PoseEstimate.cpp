@@ -202,26 +202,26 @@ void update_yaw_1ms_tick() {
     float az = imu_icm42688.data.acc_z;
 
     // ZUPT 零速修正
-    gyro_buffer[buf_idx] = raw_gz;
-    buf_idx = (buf_idx + 1) % 20;
+    // gyro_buffer[buf_idx] = raw_gz;
+    // buf_idx = (buf_idx + 1) % 20;
 
-    float max_g = gyro_buffer[0], min_g = gyro_buffer[0];
-    for(int i=1; i<20; i++) {
-        if(gyro_buffer[i] > max_g) max_g = gyro_buffer[i];
-        if(gyro_buffer[i] < min_g) min_g = gyro_buffer[i];
-    }
+    // float max_g = gyro_buffer[0], min_g = gyro_buffer[0];
+    // for(int i=1; i<20; i++) {
+    //     if(gyro_buffer[i] > max_g) max_g = gyro_buffer[i];
+    //     if(gyro_buffer[i] < min_g) min_g = gyro_buffer[i];
+    // }
 
-    // 如果指令停止，且物理底噪极小 (小于标定死区的 2倍)
-    if (App::g_state.physical.is_stopped && (max_g - min_g) < (dynamic_deadband * 2.0f)) { 
-        stop_settle_counter++;
-        if (stop_settle_counter > 50) {
-            // 极速吸收温漂
-            gyro_z_offset = gyro_z_offset * 0.999f + raw_gz * 0.001f; 
-            raw_gz = gyro_z_offset; // 强行让本次纯净输入归零
-        }
-    } else {
-        stop_settle_counter = 0;
-    }
+    // // 如果指令停止，且物理底噪极小 (小于标定死区的 2倍)
+    // if (App::g_state.physical.is_stopped && (max_g - min_g) < (dynamic_deadband * 2.0f)) { 
+    //     stop_settle_counter++;
+    //     if (stop_settle_counter > 50) {
+    //         // 极速吸收温漂
+    //         gyro_z_offset = gyro_z_offset * 0.999f + raw_gz * 0.001f; 
+    //         raw_gz = gyro_z_offset; // 强行让本次纯净输入归零
+    //     }
+    // } else {
+    //     stop_settle_counter = 0;
+    // }
 
     // 扣除零偏，并压入动态死区
     float pure_gx = raw_gx - gyro_x_offset;
@@ -312,65 +312,71 @@ void update_position_20ms_tick(const int16_t* encoder_counts, float current_yaw_
 // 模块 4: 视觉标定与坐标修正
 // =============================================================================
 __attribute__((section(".dtcm_data"))) VisionCalibrator vision_calibrator;
+static AsyncCalibState s_calib_state = AsyncCalibState::IDLE;
 
+void reset_async_calibrate() {
+    s_calib_state = AsyncCalibState::IDLE;
+}
 
 __attribute__((section(".ramfunc"))) 
-bool calibrate_vision(uint32_t timeout_ms) {
+AsyncCalibState async_calibrate_vision(uint32_t timeout_ms, float reject_threshold) {
     auto& pos = App::g_state.physical.pose;
     auto& ctrl = App::g_state.control;
     auto& vision_data = App::g_state.vision;
 
-    // 1. 切换到原地单点伺服模式，防止底盘模块更新目标点
-    ctrl.mode = ControlMode::POINT_TRACKING; 
-
-    // 2. 清理旧数据，重置滤波器
-    vision_calibrator.reset();
-    vision_data.art1_pose_updated = false;
-
-    uint32_t start_tick = Core::Scheduler::get_sys_tick_ms();
-
-    // 3. 开启阻塞式等待（死循环）
-    while ((Core::Scheduler::get_sys_tick_ms() - start_tick) < timeout_ms) {
-        
-        // 抓取视觉 DMA 回传的新数据
-        if (vision_data.art1_pose_updated) {
-            vision_data.art1_pose_updated = false;
-            vision_calibrator.push(vision_data.art1_pose.x, vision_data.art1_pose.y, vision_data.art1_pose.yaw);
-        }
-
-        // 检查滤波器是否收敛
-        if (vision_calibrator.is_converged()) {
-            auto optimal = vision_calibrator.get_optimal_pose();
-            
-            float dx = std::abs(optimal.x - pos.x);
-            float dy = std::abs(optimal.y - pos.y);
-
-            // 偏差校验
-            if (dx > 5 || dy > 5) {
-                // 偏差太大，直接拒绝并退出阻塞
-                Subsystem::Telemetry::log_vision_calibration(optimal.x, optimal.y, optimal.yaw, pos.x, pos.y, pos.yaw, false);
-                return false; 
-            } else {
-                Subsystem::Telemetry::log_vision_calibration(optimal.x, optimal.y, optimal.yaw, pos.x, pos.y, pos.yaw, true);
-                
-                // 重置底层里程计，并更新控制目标为视觉校准后的结果
-                pos.x = optimal.x;
-                pos.y = optimal.y;
-                ctrl.current_target.x = optimal.x;
-                ctrl.current_target.y = optimal.y;
-                
-                return true;
-            }
-        }
-
-        system_delay_ms(1); 
+    // 如果是第一次进入，执行初始化动作
+    if (s_calib_state == AsyncCalibState::IDLE) {
+        ctrl.mode = ControlMode::POINT_TRACKING; // 锁死底盘
+        vision_calibrator.reset();
+        vision_data.art1_pose_updated = false;
+        s_calib_state = AsyncCalibState::BUSY;
+        return AsyncCalibState::BUSY;
     }
 
-    // 4. 超时退出
-    char msg[128]; snprintf(msg, sizeof(msg), "[VIS_CALIB] TIMEOUT! Frames collected: %d. Skipped.\r\n", vision_calibrator.get_count());
-    wireless_uart_send_buffer((uint8_t*)msg, strlen(msg));
+    // 如果已经结束了，直接返回结果，防止被重复执行
+    if (s_calib_state != AsyncCalibState::BUSY) {
+        return s_calib_state;
+    }
 
-    return false;
+    // --- 下面是 BUSY 状态下的非阻塞逻辑 ---
+    // 检查超时
+    if (vision_calibrator.is_timed_out(timeout_ms)) {
+        char msg[128]; snprintf(msg, sizeof(msg), "[VIS_CALIB] TIMEOUT! Frames collected: %d. Skipped.\r\n", vision_calibrator.get_count());
+        wireless_uart_send_buffer((uint8_t*)msg, strlen(msg));
+
+        s_calib_state = AsyncCalibState::ERROR;
+        return s_calib_state;
+    }
+
+    // 喂入新数据
+    if (vision_data.art1_pose_updated) {
+        vision_data.art1_pose_updated = false;
+        vision_calibrator.push(vision_data.art1_pose.x, vision_data.art1_pose.y, vision_data.art1_pose.yaw);
+    }
+
+    // 检查收敛
+    if (vision_calibrator.is_converged()) {
+        auto optimal = vision_calibrator.get_optimal_pose();
+        
+        float dx = std::abs(optimal.x - pos.x);
+        float dy = std::abs(optimal.y - pos.y);
+
+        if (dx > reject_threshold || dy > reject_threshold) {
+            Subsystem::Telemetry::log_vision_calibration(optimal.x, optimal.y, optimal.yaw, pos.x, pos.y, pos.yaw, false);
+            s_calib_state = AsyncCalibState::ERROR;
+        } else {
+            Subsystem::Telemetry::log_vision_calibration(optimal.x, optimal.y, optimal.yaw, pos.x, pos.y, pos.yaw, true);
+
+            pos.x = optimal.x; 
+            pos.y = optimal.y;
+            ctrl.current_target.x = optimal.x; 
+            ctrl.current_target.y = optimal.y;
+
+            s_calib_state = AsyncCalibState::SUCCESS;
+        }
+    }
+
+    return s_calib_state; // BUSY
 }
 
 

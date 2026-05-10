@@ -14,7 +14,7 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt) {
         return {0.0f, 0.0f}; 
     }
 
-    float max_speed   = tune.dynamics.max_speed;
+    float max_speed   = tune.dynamics.max_vel;
     float max_acc     = tune.dynamics.max_acc;
     float brake_acc   = max_acc * tune.dynamics.brake_limit;
     
@@ -48,6 +48,43 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt) {
     float uy = dy * inv_dist;
 
     return {current_v * ux, current_v * uy};
+}
+
+
+// Yaw 角速度规划
+__attribute__((section(".ramfunc")))
+float YawProfiled::calculate(float err, float dt, bool is_translating) {
+
+    // 容差死区判断：到达目标后彻底切断动力，防止持续微调引起的抖动
+    if (std::abs(err) <= tune.tracker.ang_tolerance) {
+        current_vw = 0.0f;
+        return 0.0f; 
+    }
+
+    // 纯 P 控制：距离越近，要求速度越小
+    float target_vw = tune.pid_yaw.kp * err;
+
+    // 静摩擦补偿：当目标速度过小时，提供一个最小的补偿速度，帮助克服静摩擦阈值
+    if (!is_translating) {
+        if (std::abs(target_vw) < tune.ff.k_stiction) {
+            target_vw = std::copysign(tune.ff.k_stiction, err);
+        }
+    }
+
+    // 速度物理限幅
+    target_vw = std::clamp(target_vw, -tune.dynamics.max_ang_vel, tune.dynamics.max_ang_vel);
+
+    // 加速度物理限幅：防止起步打滑和急刹打滑
+    float max_dv = tune.dynamics.max_ang_acc * dt;
+    if (target_vw > current_vw + max_dv) {
+        current_vw += max_dv;       
+    } else if (target_vw < current_vw - max_dv) {
+        current_vw -= max_dv;      
+    } else {
+        current_vw = target_vw; 
+    }
+
+    return current_vw;
 }
 
 } // namespace Algorithm::Motion

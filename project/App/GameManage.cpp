@@ -120,6 +120,11 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 // 异步请求位姿，用于后续全局定位校准
                 Subsystem::Vision::request_pose_ART1(); 
 
+                // 异步非阻塞式视觉校准，确保位姿数据的准确性
+                auto calib_result = Subsystem::PoseEstimator::async_calibrate_vision(4000, 8.0f);
+                if (calib_result == Subsystem::PoseEstimator::AsyncCalibState::BUSY) break; 
+                Subsystem::PoseEstimator::reset_async_calibrate();
+
                 if (game.is_advanced_stage) {  
                     patrol_planner.load_level(logical_level);  // 将视觉数据加载到巡图规划引擎
                     game.phase = GamePhase::PLAN_PATROL;       // 进入巡图
@@ -228,7 +233,12 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
 
                     // 结合物理底盘是否停稳做决策
                     if (err_yaw < 1.0f && App::g_state.physical.is_stopped) {
-                        Subsystem::PoseEstimator::calibrate_vision(4000);   // 视觉校准（重置物理位姿与视觉位姿的偏差，确保后续路径追踪的准确性）
+
+                        // 异步非阻塞式视觉校准，确保位姿数据的准确性
+                        auto calib_result = Subsystem::PoseEstimator::async_calibrate_vision(4000, 8.0f);
+                        if (calib_result == Subsystem::PoseEstimator::AsyncCalibState::BUSY) break; 
+                        Subsystem::PoseEstimator::reset_async_calibrate();
+
                         task_done = true;
                     }
                     break;

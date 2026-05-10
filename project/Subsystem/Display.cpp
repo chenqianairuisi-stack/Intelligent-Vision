@@ -53,26 +53,23 @@ namespace { // 匿名命名空间，确保这些数据只在本文件可见
     struct ParamItem { const char* name; float* val_ptr; float step; };
     ParamItem tune_dict[] = { 
     {"Yaw_Kp  ",   &tune.pid_yaw.kp,                  0.1f  },
-    {"Yaw_Ki  ",   &tune.pid_yaw.ki,                  0.01f },
-    {"Yaw_Kd  ",   &tune.pid_yaw.kd,                  0.01f },
     {"Spd_Kp  ",   &tune.pid_speed.kp,                0.01f },
     {"Spd_Ki  ",   &tune.pid_speed.ki,                0.01f },
     {"ff_Kv   ",   &tune.ff.kv,                       0.01f },
     {"ff_Ka   ",   &tune.ff.ka,                       1.0f  },
+    {"ff_Ks   ",   &tune.ff.k_stiction,               0.01f },
     {"Max_Duty",   &tune.dynamics.max_duty,           1.0f  },
-    {"Max_Spd ",   &tune.dynamics.max_speed,          1.0f  },
+    {"Max_Vel ",   &tune.dynamics.max_vel,            1.0f  },
     {"Max_Acc ",   &tune.dynamics.max_acc,            5.0f  },
-    {"MaxJerk ",   &tune.dynamics.max_jerk,           50.0f },
-    {"MaxASpd ",   &tune.dynamics.max_ang_speed,      0.1f  },
+    {"MaxAVel ",   &tune.dynamics.max_ang_vel,        0.1f  },
+    {"MaxAAcc ",   &tune.dynamics.max_ang_acc,        0.1f  },
     {"Gain_X  ",   &tune.dynamics.kinematic_gain_x,   0.001f},
     {"Gain_Y  ",   &tune.dynamics.kinematic_gain_y,   0.001f},
-    {"Brake_Lim",   &tune.dynamics.brake_limit,       0.05f },
+    {"Brake_Lim",  &tune.dynamics.brake_limit,        0.05f },
     {"Reach_R ",   &tune.tracker.reach_radius,        0.1f  },
     {"Reach_M ",   &tune.tracker.reach_radius_min,    0.1f  },
-    {"Mahony_Kp",  &tune.estimate.mahony_kp,          0.1f  },
-    {"Vis_Thr ",   &tune.estimate.reject_threshold,   1.0f  },
-    {"Vis_Alpha",  &tune.estimate.max_trust_alpha,    0.01f }
-     };
+    {"Ang_Tol ",   &tune.tracker.ang_tolerance,       0.001 },
+    };
     constexpr int DICT_SIZE = sizeof(tune_dict) / sizeof(tune_dict[0]);   
     constexpr int PARAMS_PER_PAGE = 12; 
 }

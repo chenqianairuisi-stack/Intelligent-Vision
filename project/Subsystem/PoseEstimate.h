@@ -26,96 +26,106 @@ namespace Subsystem::PoseEstimator {
     // 获取探针数据的接口
     const DebugProbes& get_debug_probes();
 
-
-class VisionCalibrator {
-public:
-    // 配置参数
-    static constexpr size_t WINDOW_SIZE = 10;     // 收集10帧视觉数据
-    static constexpr float MAX_VARIANCE = 1.0f;   // 允许的最大方差(cm^2)，越小要求画面越稳定
-
-    void reset() {
-        m_count = 0;
-        m_start_tick = Core::Scheduler::get_sys_tick_ms();
-        m_converged = false;
-    }
-
-    // 压入视觉传感器传来的绝对坐标
-    __attribute__((section(".ramfunc"))) 
-    void push(float x, float y, float yaw) {
-        if (m_converged) return; // 收敛后不再接收，直到下次 reset
-        
-        m_buffer_x[m_count % WINDOW_SIZE] = x;
-        m_buffer_y[m_count % WINDOW_SIZE] = y;
-        m_buffer_yaw[m_count % WINDOW_SIZE] = yaw;
-        m_count++;
-
-        if (m_count >= WINDOW_SIZE) {
-            check_convergence();
-        }
-    }
-
-    bool is_timed_out(uint32_t timeout_ms) const {
-        return (Core::Scheduler::get_sys_tick_ms() - m_start_tick) > timeout_ms;
-    }
-
-    [[nodiscard]] bool is_converged() const { return m_converged; }
-    [[nodiscard]] size_t get_count() const { return m_count; }
-    // 获取滤波后的最佳位姿
-    [[nodiscard]] Pose2D get_optimal_pose() const { return m_optimal_pose; }
-
-private:
-    std::array<float, WINDOW_SIZE> m_buffer_x{};
-    std::array<float, WINDOW_SIZE> m_buffer_y{};
-    std::array<float, WINDOW_SIZE> m_buffer_yaw{};
-    
-    size_t m_count = 0;
-    uint32_t m_start_tick = 0; // 私有化时间戳，不被外部污染
-    bool m_converged = false;
-    Pose2D m_optimal_pose{};
-
-    // 核心算法：截尾均值与方差校验
-    __attribute__((section(".ramfunc"))) 
-    void check_convergence() {
-        // 拷贝数据以便排序（防止破坏时序窗口）
-        std::array<float, WINDOW_SIZE> sorted_x = m_buffer_x;
-        std::array<float, WINDOW_SIZE> sorted_y = m_buffer_y;
-        
-        std::sort(sorted_x.begin(), sorted_x.end());
-        std::sort(sorted_y.begin(), sorted_y.end());
-
-        // 剔除突变离群点 (最高和最低的 20%)
-        constexpr size_t trim_count = WINDOW_SIZE / 5; 
-        constexpr size_t valid_count = WINDOW_SIZE - 2 * trim_count;
-
-        float sum_x = 0.0f, sum_y = 0.0f;
-        for (size_t i = trim_count; i < WINDOW_SIZE - trim_count; ++i) {
-            sum_x += sorted_x[i];
-            sum_y += sorted_y[i];
-        }
-
-        float mean_x = sum_x / valid_count;
-        float mean_y = sum_y / valid_count;
-
-        // 计算有效数据的方差
-        float var_x = 0.0f, var_y = 0.0f;
-        for (size_t i = trim_count; i < WINDOW_SIZE - trim_count; ++i) {
-            var_x += (sorted_x[i] - mean_x) * (sorted_x[i] - mean_x);
-            var_y += (sorted_y[i] - mean_y) * (sorted_y[i] - mean_y);
-        }
-        var_x /= valid_count;
-        var_y /= valid_count;
-
-        // 如果方差满足要求，说明画面已经稳定，识别结果可信
-        if (var_x < MAX_VARIANCE && var_y < MAX_VARIANCE) {
-            m_converged = true;
-            m_optimal_pose.x = mean_x;
-            m_optimal_pose.y = mean_y;
-            
-            // m_optimal_pose.yaw = m_buffer_yaw[(m_count - 1) % WINDOW_SIZE]; 
-        }
+    enum class AsyncCalibState {
+        IDLE,       // 空闲/刚复位
+        BUSY,       // 正在采集中
+        SUCCESS,    // 收敛并已覆盖位姿
+        ERROR       // 超时或偏差过大
     };
-};
 
+    class VisionCalibrator {
+    public:
+        // 配置参数
+        static constexpr size_t WINDOW_SIZE = 10;     // 收集10帧视觉数据
+        static constexpr float MAX_VARIANCE = 1.0f;   // 允许的最大方差(cm^2)，越小要求画面越稳定
+
+        void reset() {
+            m_count = 0;
+            m_start_tick = Core::Scheduler::get_sys_tick_ms();
+            m_converged = false;
+        }
+
+        bool is_timed_out(uint32_t timeout_ms) const {
+            return (Core::Scheduler::get_sys_tick_ms() - m_start_tick) > timeout_ms;
+        }
+
+        // 压入视觉传感器传来的绝对坐标
+        __attribute__((section(".ramfunc"))) 
+        void push(float x, float y, float yaw) {
+            if (m_converged) return; // 收敛后不再接收，直到下次 reset
+            
+            m_buffer_x[m_count % WINDOW_SIZE] = x;
+            m_buffer_y[m_count % WINDOW_SIZE] = y;
+            m_buffer_yaw[m_count % WINDOW_SIZE] = yaw;
+            m_count++;
+
+            if (m_count >= WINDOW_SIZE) {
+                check_convergence();
+            }
+        }
+
+        // 重置异步函数的内部状态（在每次需要开始一次新标定时调用）
+
+        [[nodiscard]] bool is_converged() const { return m_converged; }
+        [[nodiscard]] size_t get_count() const { return m_count; }
+        // 获取滤波后的最佳位姿
+        [[nodiscard]] Pose2D get_optimal_pose() const { return m_optimal_pose; }
+
+    private:
+        std::array<float, WINDOW_SIZE> m_buffer_x{};
+        std::array<float, WINDOW_SIZE> m_buffer_y{};
+        std::array<float, WINDOW_SIZE> m_buffer_yaw{};
+        
+        size_t m_count = 0;
+        uint32_t m_start_tick = 0; // 私有化时间戳，不被外部污染
+        bool m_converged = false;
+        Pose2D m_optimal_pose{};
+
+        // 核心算法：截尾均值与方差校验
+        __attribute__((section(".ramfunc"))) 
+        void check_convergence() {
+            // 拷贝数据以便排序（防止破坏时序窗口）
+            std::array<float, WINDOW_SIZE> sorted_x = m_buffer_x;
+            std::array<float, WINDOW_SIZE> sorted_y = m_buffer_y;
+            
+            std::sort(sorted_x.begin(), sorted_x.end());
+            std::sort(sorted_y.begin(), sorted_y.end());
+
+            // 剔除突变离群点 (最高和最低的 20%)
+            constexpr size_t trim_count = WINDOW_SIZE / 5; 
+            constexpr size_t valid_count = WINDOW_SIZE - 2 * trim_count;
+
+            float sum_x = 0.0f, sum_y = 0.0f;
+            for (size_t i = trim_count; i < WINDOW_SIZE - trim_count; ++i) {
+                sum_x += sorted_x[i];
+                sum_y += sorted_y[i];
+            }
+
+            float mean_x = sum_x / valid_count;
+            float mean_y = sum_y / valid_count;
+
+            // 计算有效数据的方差
+            float var_x = 0.0f, var_y = 0.0f;
+            for (size_t i = trim_count; i < WINDOW_SIZE - trim_count; ++i) {
+                var_x += (sorted_x[i] - mean_x) * (sorted_x[i] - mean_x);
+                var_y += (sorted_y[i] - mean_y) * (sorted_y[i] - mean_y);
+            }
+            var_x /= valid_count;
+            var_y /= valid_count;
+
+            // 如果方差满足要求，说明画面已经稳定，识别结果可信
+            if (var_x < MAX_VARIANCE && var_y < MAX_VARIANCE) {
+                m_converged = true;
+                m_optimal_pose.x = mean_x;
+                m_optimal_pose.y = mean_y;                
+            }
+        };
+    };
+
+    // 重置异步函数的内部状态（在每次需要开始一次新标定时调用） 
+    void reset_async_calibrate();
+    // 异步非阻塞视觉标定函数
+    AsyncCalibState async_calibrate_vision(uint32_t timeout_ms = 2000, float reject_threshold = 4.0f);
 
     // 初始化与标定
     void init();
@@ -128,6 +138,7 @@ private:
     void update_yaw_1ms_tick();
     void update_position_20ms_tick(const int16_t* encoder_counts, float current_yaw_deg);
 
-    // 全局阻塞式视觉标定函数
-    bool calibrate_vision(uint32_t timeout_ms = 1000);
+    
+    
+
 }

@@ -29,12 +29,12 @@ __attribute__((section(".dtcm_data"))) static Algorithm::Motion::Speed_PosPid pi
     Algorithm::Motion::Speed_PosPid(tune.pid_speed), Algorithm::Motion::Speed_PosPid(tune.pid_speed)
 };
 
-__attribute__((section(".dtcm_data"))) static Algorithm::Motion::Angle_PosPid pid_pos_yaw(tune.pid_yaw);
+// __attribute__((section(".dtcm_data"))) static Algorithm::Motion::Angle_PosPid pid_pos_yaw(tune.pid_yaw);
 
 __attribute__((section(".dtcm_data"))) static Algorithm::Motion::Trajectory velocity_planner;
+__attribute__((section(".dtcm_data"))) static Algorithm::Motion::YawProfiled yaw_controller;
 
-
-// --- 内部辅助函数声明 (使用匿名 namespace 彻底隐藏) ---
+// --- 内部辅助函数声明 ---
 namespace {
     // 防止偏航角误差出现 359度 变成 -1度 导致的疯狂原地打转，将角度归一化到 [-pi, pi] 范围内
     __attribute__((always_inline)) inline float normalize_angle(float angle) {
@@ -98,7 +98,7 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick() {
     float err_global_y = ctrl.current_target.y - posi.y;
     float err_yaw = normalize_angle(ctrl.current_target.yaw - yaw);
 
-    // 速度规划
+    // 平移速度规划
     Speed2D expected_global_vel = velocity_planner.velocity_planning_1d(err_global_x, err_global_y, SystemConfig::PIT_CH1_DT_S);
 
     // 将全局期望速度投影到小车自身的局部坐标系
@@ -108,10 +108,11 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick() {
     float expected_local_vx = expected_global_vel.vx * sin_theta - expected_global_vel.vy * cos_theta;
     float expected_local_vy = expected_global_vel.vx * cos_theta + expected_global_vel.vy * sin_theta;
 
-    // PID 单独计算期望的旋转速度(rad/s)并限幅
-    float expected_local_vw = pid_pos_yaw.calculate(err_yaw, 0.0f);
-    if(expected_local_vw > tune.dynamics.max_ang_speed) expected_local_vw = tune.dynamics.max_ang_speed; 
-    if(expected_local_vw < -tune.dynamics.max_ang_speed) expected_local_vw = -tune.dynamics.max_ang_speed;
+
+    // Yaw 角速度规划：根据当前的偏航误差，计算出一个平滑的期望角速度
+    bool is_translating = (std::abs(expected_local_vx) > 2.0f || std::abs(expected_local_vy) > 2.0f);
+    float expected_local_vw = yaw_controller.calculate(err_yaw, SystemConfig::PIT_CH1_DT_S, is_translating);
+
 
     // 逆运动学解算：将期望的底盘全向速度分配给 4 个轮子，得到每个轮子的目标转速 (v1, v2, v3, v4)
     WheelSpeed4 target_wheel_speeds = Algorithm::Motion::Kinematics::inverse(expected_local_vx, expected_local_vy, expected_local_vw);
