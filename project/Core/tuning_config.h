@@ -51,27 +51,27 @@ struct TuningConfig {
 
 // 全局调参实例，放在 DTCM 区域，供所有模块访问
 __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
-    {3.7f, 0.0f, 0.16f},          // pid_yaw
-    {0.26f, 0.03f, 0.0f},         // pid_speed
+    {3.7f, 0.0f, 0.0f},           // pid_yaw
+    {0.45f, 0.08f, 0.0f},         // pid_speed
     {0.2f, 4.0f, 0.54f},          // feedforward
 
     // Dynamics 动力学预测参数
     {
         80.0f,     // max_duty
-        100.0f,    // max_vel
-        80.0f,     // max_acc
+        150.0f,    // max_vel
+        65.0f,     // max_acc
         3.0f,      // max_ang_vel
         4.6f,      // max_ang_acc
         1.044f,    // kinematic_gain_x
-        1.014f,    // kinematic_gain_y
-        0.5f       // brake_limit
+        1.015f,    // kinematic_gain_y
+        0.6f       // brake_limit
     },
     
     // Tracker 几何预测参数
     {
         0.3f,      // reach_radius: 10cm 切弯
         0.2f,      // reach_radius_min: 终点停稳极小宽容度
-        0.006f       // ang_tolerance: 角度容差
+        0.006f     // ang_tolerance: 角度容差
     },
     
     // Odometer 里程计融合参数 

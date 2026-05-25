@@ -177,6 +177,8 @@ LR_m_text m_flash_config_start m_text_start+m_text_size-m_flash_config_start {  
   
   ;OCRAM
   OCRAM_cache m_data2_start m_data2_size { ; 
+    *(.ocram_bss)
+    *(.ocram_bss.*)
     * (OCRAM_CACHE.init)
     * (*OCRAM_CACHE)
   }

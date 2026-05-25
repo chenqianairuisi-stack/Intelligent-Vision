@@ -10,7 +10,6 @@
 #include <algorithm>
 #include "zf_common_headfile.h"
 
-
 namespace App::GameEngine {
 
 __attribute__((section(".dtcm_data"))) static DemoGameManager core_engine;
@@ -68,7 +67,7 @@ RenderContext get_render_context() {
 
 //===================================================================
 // GameManager 基类实现
-// ==================================================================
+//===================================================================
 
 // 全局业务状态机更新函数：根据当前阶段执行对应逻辑
 __attribute__((section(".ramfunc"))) void GameManager::update() {
@@ -120,18 +119,11 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 // 异步请求位姿，用于后续全局定位校准
                 Subsystem::Vision::request_pose_ART1(); 
 
-                // 异步非阻塞式视觉校准，确保位姿数据的准确性
-                auto calib_result = Subsystem::PoseEstimator::async_calibrate_vision(4000, 8.0f);
-                if (calib_result == Subsystem::PoseEstimator::AsyncCalibState::BUSY) break; 
-                Subsystem::PoseEstimator::reset_async_calibrate();
-
                 if (game.is_advanced_stage) {  
-                    patrol_planner.load_level(logical_level);  // 将视觉数据加载到巡图规划引擎
                     game.phase = GamePhase::PLAN_PATROL;       // 进入巡图
                 } else {
                     solver.load_from_vision(logical_level);    // 将视觉数据加载到推箱求解器
                     game.phase = GamePhase::PLAN_SOKOBAN;      // 直接进入推箱子阶段
-                    // game.phase = GamePhase::NONE; 
                 }
             } else {
                 // 未接收到地图帧，超时重试请求地图数据
@@ -149,40 +141,46 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
         // ---- 阶段二：巡图与任务派发 ----
         // =============================================================================
         case GamePhase::PLAN_PATROL: {
-            // 先解算炸弹任务，再做联合巡图规划（无炸弹时自动退化）
+            // 解算炸弹任务（无炸弹时自动退化）
             auto& bombs = App::g_state.planning.bomb_tasks;
             bombs = strategic_planner.evaluate_and_assign_bombs<GameMode::PHASE1_ANY>(logical_level);
 
-            patrol_actions = patrol_planner.plan_optimal_patrol(logical_level.player_start, bombs);
+            // 规划巡图路径，得到宏观动作参考序列
+            patrol_planner.load_level(logical_level);
+            reference_patrol_actions = patrol_planner.plan_optimal_patrol(logical_level.player_start, bombs, ENTRY_YAW, 0);
 
+            // 初始化实时规划器，加载参考序列，准备进入宏观动作调度阶段
+            macro_planner.reset(logical_level);
+            macro_planner.set_reference_plan(reference_patrol_actions);
+
+            // 重置观测状态
+            observed_mask = 0;
+            current_observe_yaw = ENTRY_YAW;
+            executed_patrol_actions.clear();
             game.action_idx = 0;
+
             Subsystem::Vision::reset_semantic_labels();   // 清空语义池，准备重新填充
             game.phase = GamePhase::EXEC_ACTION_DISPATCH;
             break;
         }
 
         case GamePhase::EXEC_ACTION_DISPATCH: {
+            // 每次派发新动作前，先同步一次视觉模块已经识别的语义标签，刷新算法内部的配对状态
+            macro_planner.sync_semantics(vision_data.semantic_labels);
 
-            if (game.action_idx >= patrol_actions.size()) {
-                // 全部宏动作执行完毕，进入语义绑定阶段
+            // 如果参考序列完成且语义信息足够，进入推箱子阶段；否则继续派发下一个宏动作
+            if (macro_planner.ready_for_sokoban(logical_level)) {
                 game.phase = GamePhase::BIND_SEMANTICS;
             } else {
-                // 获取当前宏动作信息并分发任务
-                const auto& act = patrol_actions[game.action_idx];
-                task_queue.clear();
-                current_task_idx = 0;
-
-                // 将宏任务转化为精锐极简的微指令流队列
-                if (act.is_bomb_task) {
-                    task_queue.push_back(RobotTask::make_path_bomb(act.bomb));
-                    task_queue.push_back(RobotTask::make_wait_track());
-                    task_queue.push_back(RobotTask::make_update_map(act.bomb.bomb_start, act.bomb.target_wall));
-                } else {
-                    task_queue.push_back(RobotTask::make_path_obs(act.obs.pos));
-                    task_queue.push_back(RobotTask::make_wait_track());
-                    task_queue.push_back(RobotTask::make_align(act.obs.target_yaw));
-                    task_queue.push_back(RobotTask::make_capture(act.obs.entity_id, act.obs.is_box));
+                MacroAction act;
+                if (!plan_next_macro_action(act)) {
+                    game.error_stage = 1;
+                    game.phase = GamePhase::ERROR_OCCURRED;
+                    break;
                 }
+
+                // 将宏动作转换成底层任务序列并加载到调度器
+                start_macro_action(act);
                 game.phase = GamePhase::EXEC_TASK_QUEUE; // 转移到微观流水线
             }
             break;
@@ -190,7 +188,6 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
 
         case GamePhase::EXEC_TASK_QUEUE: {
             if (current_task_idx >= task_queue.size()) {
-                game.action_idx++;
                 game.phase = GamePhase::EXEC_ACTION_DISPATCH; // 当前宏任务完成，切回 DISPATCH
                 break;
             }
@@ -201,21 +198,35 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             switch (task.type) {
                 case TaskType::LOAD_PATH_BOMB: {
                     StaticArray<point, MAX_PATH_LENGTH> segment;
-                    if (patrol_planner.get_bomb_push_path(logical_level, logical_level.player_start, task.param.bomb, segment)) {
+                    BombTask bomb = make_bomb_task(task.param.bomb_push);
+                    if (PlanningCommon::get_bomb_push_path(logical_level, logical_level.player_start, bomb, segment)) {
                         Algorithm::Tracker::load_path(segment);
                         task_done = true;
                     } else {
-                        game.error_stage = 1; game.phase = GamePhase::ERROR_OCCURRED;
+                        game.error_stage = 2; game.phase = GamePhase::ERROR_OCCURRED;
+                    }
+                    break;
+                }
+                case TaskType::LOAD_PATH_BOX: {
+                    StaticArray<point, MAX_PATH_LENGTH> segment;
+                    SokobanLevel probe = logical_level;
+                    point probe_player = logical_level.player_start;
+                    BoxPushTask box_push = make_box_push_task(task.param.box_push);
+                    if (PlanningCommon::append_box_push_path(probe, probe_player, box_push, segment)) {
+                        Algorithm::Tracker::load_path(segment);
+                        task_done = true;
+                    } else {
+                        game.error_stage = 3; game.phase = GamePhase::ERROR_OCCURRED;
                     }
                     break;
                 }
                 case TaskType::LOAD_PATH_OBS: {
                     StaticArray<point, MAX_PATH_LENGTH> segment;
-                    if (patrol_planner.get_grid_path(logical_level, logical_level.player_start, task.param.target_grid, segment)) {
+                    if (PlanningCommon::get_grid_time_path(logical_level, logical_level.player_start, task.param.target_grid, segment)) {
                         Algorithm::Tracker::load_path(segment);
                         task_done = true;
                     } else {
-                        game.error_stage = 1; game.phase = GamePhase::ERROR_OCCURRED;
+                        game.error_stage = 4; game.phase = GamePhase::ERROR_OCCURRED;
                     }
                     break;
                 }
@@ -233,56 +244,75 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
 
                     // 结合物理底盘是否停稳做决策
                     if (err_yaw < 1.0f && App::g_state.physical.is_stopped) {
-
-                        // 异步非阻塞式视觉校准，确保位姿数据的准确性
-                        auto calib_result = Subsystem::PoseEstimator::async_calibrate_vision(4000, 8.0f);
-                        if (calib_result == Subsystem::PoseEstimator::AsyncCalibState::BUSY) break; 
-                        Subsystem::PoseEstimator::reset_async_calibrate();
-
                         task_done = true;
                     }
                     break;
                 }
                 case TaskType::WAIT_ART2_CAPTURE: {
                     static bool req_sent = false;
+                    static bool ack_seen = false;
+                    uint8_t entity_id = task.param.capture.entity_id;
                     if (!req_sent) {
-                        Subsystem::Vision::request_capture_ART2(task.param.capture.entity_id, task.param.capture.is_box);
+                        ack_seen = false;
+                        Subsystem::Vision::request_capture_ART2(entity_id, task.param.capture.is_box);
                         req_sent = true;
                     }
+
                     if (vision_data.capture_ack_received) {
                         vision_data.capture_ack_received = false;
-                        logical_level.player_start = patrol_actions[game.action_idx].obs.pos; 
+                        ack_seen = true;
+                    }
+
+                    // RESULT 和 ACK 都到齐后，才把该实体计入已观测
+                    if (ack_seen && vision_data.semantic_labels[entity_id] != -1) {
+
+                        logical_level.player_start = current_macro_action.observe.view.pos;
+                        macro_planner.sync_semantics(vision_data.semantic_labels);
+                        // 单个抓拍完成后立即更新观测位，便于 Macro 尽早触发完成式推箱
+                        uint32_t entity_bit = (1UL << entity_id);
+                        observed_mask |= entity_bit;
+                        macro_planner.apply_observation(logical_level, entity_bit);
+                        
                         req_sent = false;
+                        ack_seen = false;
                         task_done = true;
                     }
                     break;
                 }
-                case TaskType::UPDATE_MAP_LOGIC: {
-                    point tw = task.param.map_update.target_wall;
-                    // 摧毁墙壁：将目标墙及其周围八格标记为空地
-                    for(int dy=-1; dy<=1; dy++) for(int dx=-1; dx<=1; dx++) {
-                        if (tw.y+dy > 0 && tw.y+dy < MAP_MAX_HEIGHT-1 && tw.x+dx > 0 && tw.x+dx < MAP_MAX_WIDTH-1)
-                            logical_level.map[tw.y+dy][tw.x+dx] = 0;
-                    }
-                    // 销该炸弹：将该炸弹坐标从逻辑地图的炸弹列表中移除
-                    for (int i = 0; i < logical_level.bomb_count; ++i) {
-                        if (logical_level.bombs[i].x == task.param.map_update.bomb_start.x &&
-                            logical_level.bombs[i].y == task.param.map_update.bomb_start.y) {
-                            logical_level.bombs[i] = {-1, -1}; break;
-                        }
-                    }
+                case TaskType::APPLY_BOMB_RESULT: {
+                    // 真实执行完成后，同时结算地图状态和剩余炸弹任务
+                    PlanningCommon::apply_executed_bomb_push_result(
+                        logical_level,
+                        App::g_state.planning.bomb_tasks,
+                        task.param.bomb_push
+                    );
 
                     // 更新当前物理位姿对应的逻辑位置
-                    int8_t grid_x = std::clamp<int8_t>(std::lroundf((pos.x - MAP_OFFSET_X) * INV_GRID_SIZE_CM), 0, MAP_MAX_WIDTH - 1);
-                    int8_t grid_y = std::clamp<int8_t>(std::lroundf((pos.y - MAP_OFFSET_Y) * INV_GRID_SIZE_CM), 0, MAP_MAX_HEIGHT - 1);
-                    logical_level.player_start = {grid_x, grid_y};
+                    logical_level.player_start = current_grid_from_pose(pos);
                     
+                    task_done = true;
+                    break;
+                }
+                case TaskType::UPDATE_BOX_LOGIC: {
+                    PlanningCommon::apply_box_push_action_effect(logical_level, task.param.box_push);
+                    logical_level.player_start = current_grid_from_pose(pos);
                     task_done = true;
                     break;
                 }
             }
 
-            if (task_done) current_task_idx++;
+            if (task_done) {
+                current_task_idx++;
+                if (current_task_idx >= task_queue.size()) {
+                    if (current_macro_action.kind == MacroActionKind::OBSERVE) {
+                        uint32_t mask = observe_mask_of(current_macro_action);
+                        observed_mask |= mask;
+                        current_observe_yaw = current_macro_action.observe.view.target_yaw;
+                        macro_planner.sync_semantics(vision_data.semantic_labels);
+                        macro_planner.apply_observation(logical_level, mask);
+                    }
+                }
+            }
             break;
         }
 
@@ -293,49 +323,49 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             bool all_done = true;
 
             // 检查所有“观测动作”对应实体是否已写入语义标签
-            for (const auto& act : patrol_actions) {
-                if(act.is_bomb_task) continue;
-                if (vision_data.semantic_labels[act.obs.entity_id] == -1) {
-                    all_done = false; break;
+            for (uint8_t entity_id = 0; entity_id < SystemConfig::MAX_ENTITIES; ++entity_id) {
+                if ((observed_mask & (1UL << entity_id)) && vision_data.semantic_labels[entity_id] == -1) {
+                    all_done = false;
+                    break;
                 }
             }
-            // for (int i = 0; i < patrol_actions.size(); i++) {
-            //     if(patrol_actions[i].is_bomb_task) continue; // 跳过炸弹任务
-
-            //     uint8_t visited_entity_id = patrol_actions[i].obs.entity_id; 
-
-            //     // 有任一实体还未出语义结果，则继续等待
-            //     if (vision_data.semantic_labels[visited_entity_id] == -1) {
-            //         all_done = false;
-            //         break;
-            //     }
-            // }
 
             if (all_done) {
                 // N-1 规则匹配箱子与目标点 ID
                 uint8_t matched_ids[SystemConfig::MAX_BOXES];
                 
-                if (!patrol_planner.match_semantics(vision_data.semantic_labels, matched_ids)) {
-                    // 错误阶段4：语义匹配失败（不满足 N-1 规则）
-                    game.error_stage = 4; game.phase = GamePhase::ERROR_OCCURRED;  
+                macro_planner.sync_semantics(vision_data.semantic_labels);
+                if (!macro_planner.fill_matched_ids(matched_ids, logical_level.box_count)) {
+                    // 错误阶段 5：语义匹配失败（不满足 N-1 规则）
+                    game.error_stage = 5; game.phase = GamePhase::ERROR_OCCURRED;  
                     break;
+                }
+
+                // 将匹配结果写回逻辑地图，供后续求解器使用
+                for (int i = 0; i < logical_level.box_count; ++i) {
+                    logical_level.box_ids[i] = matched_ids[i];
                 }
 
                 // 二次炸弹解算（附带语义信息）
                 auto& bombs = App::g_state.planning.bomb_tasks;
                 bombs = strategic_planner.evaluate_and_assign_bombs<GameMode::PHASE2_SPECIFIC>(logical_level);
 
-                solver.load_from_vision(logical_level);   // 导入当前地形（含爆炸改动与小车位置）
-                solver.bind_semantics(matched_ids);       // 绑定语义映射与当前位置
-                solver.load_bomb_tasks(bombs.data(), bombs.size()); // 加载炸弹任务（如果有的话）
+                // 加载推箱求解器
+                solver.load_from_vision(logical_level);              // 导入当前地形（含爆炸改动与小车位置）
+                solver.bind_semantics(matched_ids);                  // 绑定语义映射与当前位置
+                solver.load_bomb_tasks(bombs.data(), bombs.size());  // 加载炸弹任务
                 game.phase = GamePhase::PLAN_SOKOBAN;
             }
             break;
         }
-
+        
         case GamePhase::PLAN_SOKOBAN: {
             // 按赛段调用不同求解模式
             bool success = game.is_advanced_stage ? solver.solve(GameMode::PHASE2_SPECIFIC) : solver.solve(GameMode::PHASE1_ANY);
+            if (!success && game.is_advanced_stage) {
+                prepare_phase2_solver(true);
+                success = solver.solve(GameMode::PHASE2_SPECIFIC);
+            }
 
             if (success) {
                 // 求解成功：加载路径并启动自动执行
@@ -343,7 +373,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 ctrl.mode = ControlMode::AUTO_TRACKING;
                 game.phase = GamePhase::EXEC_SOKOBAN;
             } else {
-                game.error_stage = 2; // 错误阶段2：推箱子路径求解失败
+                game.error_stage = 6; // 错误阶段 6：推箱子路径求解失败
                 game.phase = GamePhase::ERROR_OCCURRED;
             }
             break;
@@ -395,5 +425,107 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
     }
 }
 
+
+//===================================================================
+// GameManager 内部辅助函数
+//===================================================================
+
+/// \brief 准备第二阶段推箱求解器
+/// \param dynamic_fallback 是否启用二阶段动态炸弹兜底策略
+///
+/// \details
+/// 函数会根据当前 logical_level.box_ids 恢复语义绑定，
+/// 重新计算第二阶段炸弹任务，并把当前逻辑地图、语义关系、
+/// 炸弹任务一起载入 Sokoban 求解器。求解失败重试时会传入 true，
+/// 让 Strategy 使用更激进的动态兜底策略重新选择炸弹任务。
+void GameManager::prepare_phase2_solver(bool dynamic_fallback) {
+    uint8_t matched_ids[SystemConfig::MAX_BOXES];
+    for (int i = 0; i < logical_level.box_count; ++i) {
+        matched_ids[i] = logical_level.box_ids[i];
+    }
+
+    auto& bombs = App::g_state.planning.bomb_tasks;
+    strategic_planner.set_phase2_dynamic_fallback(dynamic_fallback);
+    bombs = strategic_planner.evaluate_and_assign_bombs<GameMode::PHASE2_SPECIFIC>(logical_level);
+    strategic_planner.set_phase2_dynamic_fallback(false);
+
+    solver.load_from_vision(logical_level);
+    solver.bind_semantics(matched_ids);
+    solver.load_bomb_tasks(bombs.empty() ? nullptr : bombs.data(), bombs.size());
+}
+
+
+/// \brief 规划下一条巡图宏动作
+/// \param out_action 输出选中的宏动作
+/// \return 成功得到宏动作时返回 true，MacroPlanner 和 fallback 都失败时返回 false
+///
+/// \details
+/// 函数统一构造 MacroPlanContext，把 GameManager 持有的真实世界状态传给 MacroPlanner
+bool GameManager::plan_next_macro_action(MacroAction& out_action) {
+    MacroPlanContext ctx;
+    ctx.level = logical_level;
+    ctx.player = logical_level.player_start;
+    ctx.yaw = current_observe_yaw;
+    ctx.bomb_tasks = &App::g_state.planning.bomb_tasks;
+
+    return macro_planner.plan_next_action(ctx, out_action);
+}
+
+
+/// \brief 启动一条宏动作
+/// \param action 由 MacroPlanner 选出的宏动作
+///
+/// \details
+/// 函数会记录当前宏动作、更新 UI 使用的动作序列索引，并将 PUSH_BOMB、PUSH_BOX、OBSERVE 三类宏动作转换为底层 RobotTask 队列。
+/// 后续 EXEC_TASK_QUEUE 阶段只负责逐条执行这些微任务。
+void GameManager::start_macro_action(const MacroAction& action) {
+    // 更新当前宏动作
+    current_macro_action = action;  
+
+    // 将 action 记录到已执行动作序列 （仅供 UI 展示）
+    executed_patrol_actions.push_back(action);
+    App::g_state.game.action_idx = executed_patrol_actions.size() - 1;
+
+    // 根据宏动作类型生成底层任务队列
+    task_queue.clear();
+    current_task_idx = 0;
+
+    if (action.kind == MacroActionKind::PUSH_BOMB) {
+        task_queue.push_back(RobotTask::make_path_bomb(action.bomb_push));
+        task_queue.push_back(RobotTask::make_wait_track());
+        task_queue.push_back(RobotTask::make_apply_bomb_result(action.bomb_push));
+    } else if (action.kind == MacroActionKind::PUSH_BOX) {
+        task_queue.push_back(RobotTask::make_path_box(action.box_push));
+        task_queue.push_back(RobotTask::make_wait_track());
+        task_queue.push_back(RobotTask::make_update_box(action.box_push));
+    } else {
+        const ViewPose& view = action.observe.view;
+        uint32_t mask = action.observe.active_mask;
+
+        task_queue.push_back(RobotTask::make_path_obs(view.pos));
+        task_queue.push_back(RobotTask::make_wait_track());
+        task_queue.push_back(RobotTask::make_align(view.target_yaw));
+
+        // 根据激活掩码为每个需要观测的实体生成一个捕获任务
+        for (uint8_t entity_id = 0; entity_id < SystemConfig::MAX_ENTITIES; ++entity_id) {
+            if (mask & (1UL << entity_id)) {
+                task_queue.push_back(RobotTask::make_capture(entity_id, entity_id < logical_level.box_count));
+            }
+        }
+    }
+}
+
+// 根据物理坐标计算当前网格位置
+point GameManager::current_grid_from_pose(const Pose2D& pos) const {
+    int8_t grid_x = std::clamp<int8_t>(std::lroundf((pos.x - MAP_OFFSET_X) * INV_GRID_SIZE_CM), 0, MAP_MAX_WIDTH - 1);
+    int8_t grid_y = std::clamp<int8_t>(std::lroundf((pos.y - MAP_OFFSET_Y) * INV_GRID_SIZE_CM), 0, MAP_MAX_HEIGHT - 1);
+    return {grid_x, grid_y};
+}
+
+// 获取观察动作的激活掩码
+uint32_t GameManager::observe_mask_of(const MacroAction& action) const {
+    if (action.kind != MacroActionKind::OBSERVE) return 0;
+    return action.observe.active_mask;
+}
 
 } // namespace App::GameEngine

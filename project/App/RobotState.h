@@ -41,7 +41,7 @@ struct RobotState {
         bool art2_result_ready = false;
         // ART2 异步流水线状态
         bool capture_ack_received = false;
-        // 语义缓存池 (-1 表示未识别/正在后台推理，1~10 表示识别到的特征数字，先箱子再目标点，顺序与 patrol_actions 中的 entity_id 一一对应)
+        // 语义缓存池（-1 表示未知，0~9 表示识别到的特征数字；索引顺序为先箱子、再目标点）
         int8_t semantic_labels[SystemConfig::MAX_ENTITIES];
     } vision;
 

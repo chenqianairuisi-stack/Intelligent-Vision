@@ -7,10 +7,10 @@
 #include "icm42688.h"
 
 // 硬件引脚定义
-#define KEY1 C13  // 下移 / 减小
-#define KEY2 C12  // 确认 / 编辑模式
-#define KEY3 C15  // 上移 / 增大
-#define KEY4 C14  // 返回 / 退出编辑
+#define KEY1 C12  // 下移 / 减小
+#define KEY2 C15  // 确认 / 编辑模式
+#define KEY3 C14  // 上移 / 增大
+#define KEY4 C13  // 返回 / 退出编辑
 
 
 namespace Subsystem::Display {
@@ -89,6 +89,7 @@ static void draw_odometry_data();
 static void draw_tune_params();
 static void draw_item(uint8_t row, const char* name, bool is_selected);
 static void draw_float_item(uint8_t row, const char* name, float val, bool is_selected, bool is_editing, uint8_t decimals);
+static void format_plan_time_line(char* out, size_t size, const char* label, uint32_t ms);
 static void fill_rect(uint8_t x, uint8_t y, uint8_t w, uint8_t h, uint16_t color);
 
 
@@ -238,7 +239,11 @@ void process_logic() {
                     ctx.need_full_redraw = true;
                 }
             }
-            if (ctx.key_back_pressed) { 
+            if (ctx.key_back_pressed) {
+                if (App::g_state.game.is_demo_mode) {
+                    App::g_state.game.phase = GamePhase::NONE;
+                    App::g_state.game.is_demo_mode = false;
+                }
                 ctx.current_page = MenuPage::MAIN_MENU; 
                 ctx.need_full_redraw = true; 
                 ctx.ui_dirty = true; 
@@ -406,17 +411,17 @@ void draw_odometry_data() {
     tft180_show_string(0, 6 * UI_ROW_H, "Vision Y: ");   tft180_show_float(10 * UI_COL_W, 6 * UI_ROW_H, vision_pos.y, 3, 1);
     sprintf(ui_buf, "Yaw: %8.2f   ", vision_pos.yaw);     tft180_show_string(0, 7 * UI_ROW_H, ui_buf);
 
-    tft180_show_string(0, 8 * UI_ROW_H, "Gyro_x: ");     tft180_show_float(10 * UI_COL_W, 8 * UI_ROW_H, data.gyro_x, 3, 1);
-    tft180_show_string(0, 9 * UI_ROW_H, "Gyro_y: ");     tft180_show_float(10 * UI_COL_W, 9 * UI_ROW_H, data.gyro_y, 3, 1);
-    tft180_show_string(0, 10 * UI_ROW_H, "Gyro_z: ");    tft180_show_float(10 * UI_COL_W, 10 * UI_ROW_H, data.gyro_z, 3, 1);
-    tft180_show_string(0, 11 * UI_ROW_H, "Acc_x: ");     tft180_show_float(10 * UI_COL_W, 11 * UI_ROW_H, data.acc_x, 3, 1);
-    tft180_show_string(0, 12 * UI_ROW_H, "Acc_y: ");     tft180_show_float(10 * UI_COL_W, 12 * UI_ROW_H, data.acc_y, 3, 1);
-    tft180_show_string(0, 13 * UI_ROW_H, "Acc_z: ");     tft180_show_float(10 * UI_COL_W, 13 * UI_ROW_H, data.acc_z, 3, 1);
+    // tft180_show_string(0, 8 * UI_ROW_H, "Gyro_x: ");     tft180_show_float(10 * UI_COL_W, 8 * UI_ROW_H, data.gyro_x, 3, 1);
+    // tft180_show_string(0, 9 * UI_ROW_H, "Gyro_y: ");     tft180_show_float(10 * UI_COL_W, 9 * UI_ROW_H, data.gyro_y, 3, 1);
+    // tft180_show_string(0, 10 * UI_ROW_H, "Gyro_z: ");    tft180_show_float(10 * UI_COL_W, 10 * UI_ROW_H, data.gyro_z, 3, 1);
+    // tft180_show_string(0, 11 * UI_ROW_H, "Acc_x: ");     tft180_show_float(10 * UI_COL_W, 11 * UI_ROW_H, data.acc_x, 3, 1);
+    // tft180_show_string(0, 12 * UI_ROW_H, "Acc_y: ");     tft180_show_float(10 * UI_COL_W, 12 * UI_ROW_H, data.acc_y, 3, 1);
+    // tft180_show_string(0, 13 * UI_ROW_H, "Acc_z: ");     tft180_show_float(10 * UI_COL_W, 13 * UI_ROW_H, data.acc_z, 3, 1);
 
-    // tft180_show_string(0, 8 * UI_ROW_H, "Spd LF: ");     tft180_show_float(10 * UI_COL_W, 8 * UI_ROW_H, wheels.lf, 3, 1);
-    // tft180_show_string(0, 9 * UI_ROW_H, "Spd LB: ");     tft180_show_float(10 * UI_COL_W, 9 * UI_ROW_H, wheels.lb, 3, 1);
-    // tft180_show_string(0, 10 * UI_ROW_H, "Spd RF: ");     tft180_show_float(10 * UI_COL_W, 10 * UI_ROW_H, wheels.rf, 3, 1);
-    // tft180_show_string(0, 11 * UI_ROW_H, "Spd RB: ");     tft180_show_float(10 * UI_COL_W, 11 * UI_ROW_H, wheels.rb, 3, 1);
+    tft180_show_string(0, 8 * UI_ROW_H, "Spd LF: ");     tft180_show_float(10 * UI_COL_W, 8 * UI_ROW_H, wheels.lf, 3, 1);
+    tft180_show_string(0, 9 * UI_ROW_H, "Spd LB: ");     tft180_show_float(10 * UI_COL_W, 9 * UI_ROW_H, wheels.lb, 3, 1);
+    tft180_show_string(0, 10 * UI_ROW_H, "Spd RF: ");     tft180_show_float(10 * UI_COL_W, 10 * UI_ROW_H, wheels.rf, 3, 1);
+    tft180_show_string(0, 11 * UI_ROW_H, "Spd RB: ");     tft180_show_float(10 * UI_COL_W, 11 * UI_ROW_H, wheels.rb, 3, 1);
 }
 
 // 绘制参数调节页面
@@ -465,9 +470,16 @@ void draw_dashboard() {
 
     // 1. 局部组装字符串
     char hud_line0[22] = {0}, hud_line1[22] = {0}, hud_line2[22] = {0};
+    char hud_line3[22] = {0}, hud_line4[22] = {0}, hud_line5[22] = {0};
     snprintf(hud_line1, sizeof(hud_line1), "Stage: %d", game.is_advanced_stage ? 2 : 1);
 
     if (game.is_demo_mode) {
+        // 规划耗时只在 Demo 动画模式展示，避免普通仪表盘误显示 0ms
+        format_plan_time_line(hud_line2, sizeof(hud_line2), "P1 Bomb:", render_ctx.patrol_bomb_plan_time_ms);
+        format_plan_time_line(hud_line3, sizeof(hud_line3), "Explore:", render_ctx.exploration_plan_time_ms);
+        format_plan_time_line(hud_line4, sizeof(hud_line4), "P2 Bomb:", render_ctx.push_bomb_plan_time_ms);
+        format_plan_time_line(hud_line5, sizeof(hud_line5), "Sokoban:", render_ctx.push_plan_time_ms);
+
         switch(game.phase) {
             case GamePhase::NONE:                  snprintf(hud_line0, 22, "Phase: NONE       "); break;
             case GamePhase::WAIT_FOR_VISION:       snprintf(hud_line0, 22, "Phase: WAITING MAP"); break;
@@ -485,13 +497,6 @@ void draw_dashboard() {
         if (game.phase == GamePhase::ERROR_OCCURRED) {
             tft180_show_int (14 * UI_COL_W, 0, App::g_state.game.error_stage, 2);
         }
-        if (game.phase == GamePhase::ANIMATE_PATROL_DEMO || game.phase == GamePhase::BIND_SEMANTICS || game.phase == GamePhase::PLAN_SOKOBAN) {
-            snprintf(hud_line2, 22, "Bm:%3dms GT:%3dms", (int)render_ctx.bomb_plan_time_ms, (int)render_ctx.patrol_plan_time_ms);
-        } else if (game.phase == GamePhase::ANIMATE_DEMO || game.phase == GamePhase::FINISHED) {
-            snprintf(hud_line2, 22, "IDA* Time: %5dms", (int)render_ctx.push_plan_time_ms);
-        } else {
-            snprintf(hud_line2, 22, "Plan Time: --  ms");
-        }
     } else {
         switch(game.phase) {
             case GamePhase::NONE:                  snprintf(hud_line0, 22, "P: NONE      "); break;
@@ -506,16 +511,16 @@ void draw_dashboard() {
             case GamePhase::ERROR_OCCURRED:        snprintf(hud_line0, 22, "P: ERROR : %d", App::g_state.game.error_stage); break;
             default:                               snprintf(hud_line0, 22, "P: COMPUTING "); break;
         }
-
-        snprintf(hud_line2, 22, "Plan Time: --  ms");
     }
 
     // 2. 顶部 HUD 防闪烁渲染
     static char last_hud0[22] = {0}, last_hud1[22] = {0}, last_hud2[22] = {0};
+    static char last_hud3[22] = {0}, last_hud4[22] = {0}, last_hud5[22] = {0};
     
     // 如果外部触发了强制重绘，顺便把文字的记忆清空
     if (App::g_state.debug.need_bg_redraw) {
         last_hud0[0] = '\0'; last_hud1[0] = '\0'; last_hud2[0] = '\0';
+        last_hud3[0] = '\0'; last_hud4[0] = '\0'; last_hud5[0] = '\0';
     }
 
     // last_hud 与 hud_line不一样，才用空格覆盖旧的，然后画上新字
@@ -533,6 +538,21 @@ void draw_dashboard() {
         tft180_show_string(0, 2 * UI_ROW_H, "                     ");
         tft180_show_string(0, 2 * UI_ROW_H, hud_line2);
         strncpy(last_hud2, hud_line2, 22);
+    }
+    if (strncmp(last_hud3, hud_line3, 22) != 0) {
+        tft180_show_string(0, 3 * UI_ROW_H, "                     ");
+        tft180_show_string(0, 3 * UI_ROW_H, hud_line3);
+        strncpy(last_hud3, hud_line3, 22);
+    }
+    if (strncmp(last_hud4, hud_line4, 22) != 0) {
+        tft180_show_string(0, 4 * UI_ROW_H, "                     ");
+        tft180_show_string(0, 4 * UI_ROW_H, hud_line4);
+        strncpy(last_hud4, hud_line4, 22);
+    }
+    if (strncmp(last_hud5, hud_line5, 22) != 0) {
+        tft180_show_string(0, 5 * UI_ROW_H, "                     ");
+        tft180_show_string(0, 5 * UI_ROW_H, hud_line5);
+        strncpy(last_hud5, hud_line5, 22);
     }
 
     // 3. 在内存中合成静态画布 （地图+目标+箱子+炸弹+路径+观测点）
@@ -555,11 +575,14 @@ void draw_dashboard() {
     }
     if (render_ctx.actions_ptr) {
         for(size_t i = render_ctx.action_start_idx; i < render_ctx.actions_ptr->size(); i++) 
-            if(!(*render_ctx.actions_ptr)[i].is_bomb_task) canvas[(*render_ctx.actions_ptr)[i].obs.pos.y][(*render_ctx.actions_ptr)[i].obs.pos.x] |= TL_CRS;
+            if((*render_ctx.actions_ptr)[i].kind == MacroActionKind::OBSERVE) {
+                point p = (*render_ctx.actions_ptr)[i].observe.view.pos;
+                canvas[p.y][p.x] |= TL_CRS;
+            }
     }
 
     // 像素级小车独立计算系统
-    int map_start_y = 3 * UI_ROW_H + 4;
+    int map_start_y = game.is_demo_mode ? (6 * UI_ROW_H + 4) : (3 * UI_ROW_H + 4);
     static float last_car_sx = -1.0f, last_car_sy = -1.0f;
     float current_car_sx = 0.0f, current_car_sy = 0.0f;
     
@@ -698,6 +721,23 @@ void draw_float_item(uint8_t row, const char* name, float val, bool is_selected,
     
     // 打印组装好的字符串
     tft180_show_string(12 * UI_COL_W, row * UI_ROW_H, val_buf);
+}
+
+// 格式化规划耗时，毫秒字符串放不下时自动退化为秒
+void format_plan_time_line(char* out, size_t size, const char* label, uint32_t ms) {
+    int written = snprintf(out, size, "%s %lums", label, static_cast<unsigned long>(ms));
+    if (written >= 0 && static_cast<size_t>(written) < size) return;
+
+    uint32_t seconds_x10 = (ms + 50U) / 100U;
+    written = snprintf(out, size, "%s %lu.%lus",
+        label,
+        static_cast<unsigned long>(seconds_x10 / 10U),
+        static_cast<unsigned long>(seconds_x10 % 10U));
+    if (written >= 0 && static_cast<size_t>(written) < size) return;
+
+    snprintf(out, size, "%s %lus",
+        label,
+        static_cast<unsigned long>((ms + 500U) / 1000U));
 }
 
 // ================= 基础绘图辅助函数 ===================

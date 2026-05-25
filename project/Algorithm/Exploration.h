@@ -1,72 +1,118 @@
 #pragma once
-#include "system_config.h"
-#include "Strategy.h"
-#include "Sokoban.h"
 
-// ============================================================================
-// [数据结构定义]
-// ============================================================================
+#include "PlanningCommon.h"
 
-// 单个观测点结构体 (寻图物理位置与视觉目标)
-struct ObsPoint {
-    point pos;           // 底盘需要到达的网格坐标
-    float target_yaw;    // 车头需要对齐的偏航角 (deg)
-    uint8_t entity_id;   // 关联的实体 ID[0, MAX_ENTITIES)
-    bool is_box;         // true: 观测的是箱子, false: 观测的是目标点
+/// \brief 单个候选观测位姿及其跨炸弹阶段的可见实体信息
+struct ViewPose {
+    point    pos;                         // 车辆驻留网格
+    float    target_yaw;                  // 观测目标朝向
+    uint32_t mask[MAX_BOMBS + 1];         // 每个阶段可观测实体掩码
+    uint16_t penalty[MAX_BOMBS + 1];      // 每个阶段的观测位姿惩罚
 };
 
-// 全局宏动作指令
-struct PatrolAction {
-    bool is_bomb_task;    // false: 常规巡图观测; true: 切换为推炸弹宏动作
-    ObsPoint obs;         // 若为观测任务，读取此字段
-    BombTask bomb;        // 若为推炸弹任务，读取此字段
+/// \brief 巡图宏动作类型
+enum class MacroActionKind : uint8_t {
+    OBSERVE,
+    PUSH_BOX,
+    PUSH_BOMB
 };
 
-// 推炸弹宏动作节点 (用于生成推炸弹的连续路径)
-struct BombMacroNode {
-    int8_t bx, by;          // 炸弹坐标
-    uint8_t p_dir;          // 小车站在炸弹的哪一侧 (0~3，对应 MOVE[0~3] 的反方向)
-    uint16_t parent_idx;    // 父节点索引 (最多 1024 个节点，uint16_t 绰绰有余)
+/// \brief 观测宏动作载荷
+struct ObserveAction {
+    ViewPose view;            // 实际执行的观测位姿
+    uint32_t active_mask = 0; // 本动作贡献的实体掩码
 };
 
+/// \brief 巡图阶段输出给上层调度的宏动作
+struct MacroAction {
+    MacroActionKind kind = MacroActionKind::OBSERVE; // 动作类型
+    ObserveAction observe;                           // 观测动作数据
+    BoxPushAction box_push;                          // 推箱动作数据
+    BombPushAction bomb_push;                        // 推炸弹动作数据
+    uint16_t real_cost = 0;                          // 上层可直接使用的真实代价
+};
 
-// ============================================================================
-// [视觉探索与巡图规划器核心类]
-// ============================================================================
+// 构造观测宏动作
+inline MacroAction make_observe_macro_action(const ViewPose& view, uint32_t active_mask, uint16_t real_cost = 0) {
+    MacroAction action{};
+    action.kind = MacroActionKind::OBSERVE;
+    action.observe = {view, active_mask};
+    action.real_cost = real_cost;
+    return action;
+}
+
+// 构造推箱宏动作
+inline MacroAction make_box_push_macro_action(const BoxPushTask& task, uint8_t box_id, uint16_t real_cost = 0) {
+    MacroAction action{};
+    action.kind = MacroActionKind::PUSH_BOX;
+    action.box_push = make_box_push_action(task, box_id);
+    action.real_cost = real_cost;
+    return action;
+}
+
+// 构造终止引爆型推炸弹宏动作
+inline MacroAction make_bomb_push_macro_action(const BombTask& task, uint16_t real_cost = 0) {
+    MacroAction action{};
+    action.kind = MacroActionKind::PUSH_BOMB;
+    action.bomb_push = make_terminal_bomb_push_action(task);
+    action.real_cost = real_cost;
+    return action;
+}
+
+// 构造指定推炸弹载荷的宏动作
+inline MacroAction make_bomb_push_macro_action(const BombPushAction& bomb_push, uint16_t real_cost = 0) {
+    MacroAction action{};
+    action.kind = MacroActionKind::PUSH_BOMB;
+    action.bomb_push = bomb_push;
+    action.real_cost = real_cost;
+    return action;
+}
+
+// 从宏动作还原推箱任务
+inline BoxPushTask macro_box_task(const MacroAction& action) {
+    return make_box_push_task(action.box_push);
+}
+
+// 从宏动作还原炸弹任务
+inline BombTask macro_bomb_task(const MacroAction& action) {
+    return make_bomb_task(action.bomb_push);
+}
+
+/// \brief 巡图观测规划器
 class Exploration {
 public:
     Exploration() = default;
 
-    // --- A.初始化与状态查询 ---
+    // 缓存当前地图快照
     void load_level(const SokobanLevel& level);
+
+    // 返回当前缓存地图中的实体数量
     uint8_t get_entity_count() const { return total_entities; }
 
-    // --- B.核心函数 ---
-    // 多重分支 3D 巡图：供 Phase 3 调用，自动将 “推炸弹” 动作与 “巡图” 无缝交织融合
-    StaticArray<PatrolAction, 32> plan_optimal_patrol(point start_pos, const StaticArray<BombTask, MAX_BOMBS>& bomb_tasks);
-    
-    // --- C.物理底层循迹接口 ---
-    // 生成真实可用的网格路径坐标数组
-    bool get_grid_path(const SokobanLevel& lvl, point start, point end, StaticArray<point, MAX_PATH_LENGTH>& out_path);
-    // 专门为推炸弹设计的路径生成，考虑炸弹推行时的特殊碰撞规则
-    bool get_bomb_push_path(const SokobanLevel& lvl, point player_start, BombTask bomb_task, StaticArray<point, MAX_PATH_LENGTH>& out_path);
-    
-    // 语义匹配：融合云台识别结果，进行逻辑演绎与死锁解除
-    bool match_semantics(const int8_t* semantic_labels, uint8_t* out_matched_ids) const;
+    /// \brief 搜索当前地图的巡图宏动作序列
+    /// \param start_pos 巡图起点
+    /// \param bomb_tasks 策略层给出的炸弹任务序列
+    /// \param start_yaw 起始朝向，负值表示忽略初始转向代价
+    /// \param start_mask 已经观测到的实体掩码
+    /// \return 可执行的巡图宏动作序列
+    StaticArray<MacroAction, 32> plan_optimal_patrol(
+        point start_pos,
+        const StaticArray<BombTask, MAX_BOMBS>& bomb_tasks,
+        float start_yaw = -1.0f,
+        uint32_t start_mask = 0
+    );
+
+    // 构建当前地图所有候选观测位姿
+    StaticArray<ViewPose, MAX_OBS_POINTS> build_current_views(const SokobanLevel& level);
 
 private:
-    // --- 1.内部状态缓存 ---
-    StaticArray<ObsPoint, MAX_OBS_POINTS> obs_points;    // 当前地图所有合法的观测位姿
-    uint8_t total_entities;                              // 实体总数 (Box + Target)
-    SokobanLevel cached_level;                           // 初始时刻的地图
+    StaticArray<ViewPose, 40> entity_views[32]; // 每个实体对应的候选观测位姿
+    uint8_t total_entities;                     // 当前巡图实体总数
+    SokobanLevel cached_level;                  // 最近一次加载的地图快照
 
-    // --- 2.内部函数 ---
-    // 生成合法观测点
-    void generate_obs_points();
-    // 炸弹任务时间线优化
+    void build_entity_views(const SokobanLevel* multi_maps, int B);
     StaticArray<BombTask, MAX_BOMBS> optimize_bomb_timeline(const SokobanLevel& initial_lvl, point start_pos, const StaticArray<BombTask, MAX_BOMBS>& raw_tasks);
-    // 寻路函数：支持多重地图分支（不同炸弹爆炸后的地形）
-    uint16_t bfs_shortest_path(const SokobanLevel& lvl, point start, point end);
+    void apply_macro_bomb_effect(SokobanLevel& lvl, const BombTask& task) const;
 };
 
 extern Exploration patrol_planner;

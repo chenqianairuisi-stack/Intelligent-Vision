@@ -16,7 +16,7 @@
 ```text
 .
 ├── README.md
-├── Algorithm_Planning_Memory_Analysis.md
+├── README_PLANNING.md
 ├── libraries/                        # SDK、驱动、组件库（第三方与平台层）
 │   ├── sdk/
 │   ├── zf_common/
@@ -30,12 +30,14 @@
     │   ├── main.cpp
     │   ├── GameManage.cpp/.h
     │   ├── RobotState.h
-    │   └── TestMap.cpp/.h
+    │   └── RobotTask.h
     ├── Algorithm/                    # 算法层（规划 + 控制）
+    │   ├── PlanningCommon.cpp/.h
+    │   ├── Strategy.cpp/.h
     │   ├── MotionControl.cpp/.h
     │   ├── Tracker.cpp/.h
     │   ├── Exploration.cpp/.h
-    │   ├── Strategy.cpp/.h
+    │   ├── MacroPlanner.cpp/.h
     │   └── Sokoban.cpp/.h
     ├── Subsystem/                    # 业务子系统编排层
     │   ├── Vision.cpp/.h
@@ -81,7 +83,7 @@
 1. 时钟与调试初始化
 2. 调度器、遥测、姿态估计、视觉、底盘初始化
 3. 参数存储与 TFT 菜单初始化
-4. 游戏管理器初始化与调试语义注入
+4. 游戏管理器初始化，按开关选择实车、Mock 或 Demo 流程
 5. IMU 开机静态标定
 6. 启动 5ms/20ms 周期中断
 7. 主循环执行：视觉更新 + 任务调度 + 业务状态机
@@ -105,17 +107,19 @@ flowchart TD
    C -->|地图就绪 且 阶段1| K[PLAN_SOKOBAN]
 
    D --> E[EXEC_ACTION_DISPATCH]
-   E -->|动作耗尽| J[BIND_SEMANTICS]
-   E -->|观测动作| F[EXEC_PATROL_MOVE]
-   E -->|炸弹动作| H[EXEC_BOMB_PUSH]
+   E -->|语义与参考序列满足条件| J[BIND_SEMANTICS]
+   E -->|Macro 观测动作| F[EXEC_PATROL_MOVE]
+   E -->|Macro 推炸弹动作| H[EXEC_BOMB_PUSH]
+   E -->|Macro 完成式推箱动作| P[EXEC_BOX_PUSH]
    E -->|路径失败| Z[ERROR_OCCURRED]
 
    F -->|到达观测点| G[EXEC_ALIGN_YAW]
-   G -->|对准后触发ART2抓拍| G2[WAIT_ART2_CAPTURE_ACK]
-   G2 -->|收到ACK| E
+   G -->|对准后触发ART2抓拍| G2[WAIT_ART2_CAPTURE]
+   G2 -->|语义结果与ACK均到齐| E
 
    H -->|动作完成| I[UPDATE_MAP]
    I --> E
+   P -->|动作完成| E
 
    J -->|语义绑定完成| K
 
@@ -124,9 +128,10 @@ flowchart TD
 
    L -->|路径执行完成| M[FINISHED]
 
-   subgraph DebugGameManager 拦截分支
+   subgraph Mock / Demo 拦截分支
+      G2 -->|Mock注入语义并直接结算抓拍| E
       D --> D1[ANIMATE_PATROL_DEMO]
-      D1 -->|巡图动画结束| J
+      D1 -->|Demo动画完成并同步语义| J
       K --> K1[ANIMATE_DEMO]
       K1 -->|推箱动画结束| M
    end
@@ -135,7 +140,8 @@ flowchart TD
 说明：
 
 - 主流程状态机位于 `GameManager::update()`。
-- 调试动画分支由 `DebugGameManager::update()` 拦截 `PLAN_PATROL` 与 `PLAN_SOKOBAN` 两个状态实现。
+- Mock 模式只拦截地图与 ART2 抓拍输入，仍使用真实底盘执行路径。
+- Demo 模式在 Mock 语义基础上拦截底盘动作，用内部动画推演巡图与推箱。
 - `ERROR_OCCURRED` 与 `FINISHED` 均会将底盘目标锁定为当前位置，进入停车保持。
 
 ## 5. 视觉通信协议摘要
@@ -154,21 +160,31 @@ Checksum = MsgType + Len + Sum(Payload)
 - ART1 -> 主控：地图包、定位包
 - ART2 -> 主控：抓拍 ACK、语义识别结果
 
+ART2 语义缓存规则：
+
+- `semantic_labels[i] = -1` 表示未知；`0~9` 表示识别到的图案类别。
+- 实体索引按 ART1 地图顺序排列：`0..box_count-1` 为箱子，`box_count..box_count+target_count-1` 为目标点。
+- 实车抓拍任务在对应实体的语义结果与 ACK 都到齐后才结算。
+- Mock 模式在自身流程中注入同格式语义，不修改基类真实视觉请求逻辑。
+
+语义匹配采用 N-1 规则：先用已观测的同语义箱子和目标点直接配对；若只剩一个未识别目标点，则把已识别但未找到同标签目标的箱子补到它；若只剩一个未识别箱子，则把已识别但未找到同标签箱子的目标反向补到它；最后只允许唯一剩余箱子和唯一剩余目标互补。
+
 ## 6. 算法与性能说明
 
 - 推箱求解：IDA* + 剪枝策略（含哈希与置换表）
-- 巡图规划：结合动作序列分发与执行
+- 巡图规划：Exploration 生成参考序列，MacroPlanner 在线调度观测、推炸弹与完成式推箱
+- 语义绑定：MacroPlanner 同步视觉语义池，满足 N-1 规则后导出 box -> target 配对供 Sokoban 使用
 - 控制模块：轨迹规划 + 运动学解算 + PID 闭环
-- 内存分析参考：`Algorithm_Planning_Memory_Analysis.md`
+- 规划模块与内存说明参考：`README_PLANNING.md`
 
-## 6. 开发约束建议
+## 7. 开发约束建议
 
 - 以静态内存为主，避免运行期动态分配
 - 高频逻辑优先放入合适段（如 ramfunc）
 - C/C++ 混编接口显式处理链接边界
 - 中断逻辑尽量短小，将复杂逻辑下放到任务或模块函数
 
-## 7. 参考文档
+## 8. 参考文档
 
-- 算法内存分析：Algorithm_Planning_Memory_Analysis.md
+- 规划模块说明：README_PLANNING.md
 - 第三方许可与版本：libraries/doc 与 libraries/LICENSE

@@ -499,6 +499,16 @@
               <FilePath>..\Algorithm\Exploration.h</FilePath>
             </File>
             <File>
+              <FileName>MacroPlanner.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\Algorithm\MacroPlanner.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>MacroPlanner.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Algorithm\MacroPlanner.h</FilePath>
+            </File>
+            <File>
               <FileName>Sokoban.cpp</FileName>
               <FileType>8</FileType>
               <FilePath>..\Algorithm\Sokoban.cpp</FilePath>
@@ -507,6 +517,16 @@
               <FileName>Sokoban.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\Algorithm\Sokoban.h</FilePath>
+            </File>
+            <File>
+              <FileName>PlanningCommon.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\Algorithm\PlanningCommon.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>PlanningCommon.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Algorithm\PlanningCommon.h</FilePath>
             </File>
             <File>
               <FileName>Tracker.cpp</FileName>

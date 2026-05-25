@@ -2,6 +2,8 @@
 #include <cstdint>
 #include <array>
 
+#define MCU_OCRAM_BSS __attribute__((section(".ocram_bss")))
+
 //---------------------------------------------------------------------------------
 //全局坐标系：x 轴正方向为右，y 轴正方向为前，逆时针为正旋转（x 轴设为 0 度）
 //全局地图：大小 240cm*320cm, 分为 12*16 格，原点(0,0)在左下角，x 轴向右，y 轴向上
@@ -44,7 +46,7 @@ namespace SystemConfig {
     static constexpr int MAX_ENTITY_MASK = 1 << MAX_ENTITIES;   // 实体访问状态总数（bitmask）
     static constexpr int MAX_OBS_POINTS = 4 * MAX_ENTITIES;     // 最大观测点数（每个实体最多4个观测点，分别对应4个朝向）
     static constexpr int MAP_CELL_COUNT = MAP_MAX_WIDTH * MAP_MAX_HEIGHT;   // 地图总格子数
-    static constexpr int MAX_PATH_LENGTH = 100;                 // 最大搜索步数
+    static constexpr int MAX_PATH_LENGTH = 200;                 // 最大搜索步数
     
     // 其他全局常量
     static constexpr float ENTRY_X = 124.5f;                    // 入口位置 X 坐标

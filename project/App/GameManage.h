@@ -9,6 +9,7 @@
 
 #include "Sokoban.h"
 #include "Exploration.h"
+#include "MacroPlanner.h"
 
 
 namespace App::GameEngine {
@@ -16,9 +17,10 @@ namespace App::GameEngine {
 // 渲染上下文：将游戏状态转换为 UI 层可直接使用的格式
 struct RenderContext {
     // 规划耗时统计（ms）
-    uint32_t bomb_plan_time_ms = 0;
-    uint32_t patrol_plan_time_ms = 0;
-    uint32_t push_plan_time_ms = 0;
+    uint32_t patrol_bomb_plan_time_ms = 0;  // 寻图阶段炸弹解算耗时
+    uint32_t exploration_plan_time_ms = 0;  // Exploration 参考巡图规划耗时
+    uint32_t push_bomb_plan_time_ms = 0;    // 推箱阶段炸弹解算耗时
+    uint32_t push_plan_time_ms = 0;         // Sokoban 推箱解算耗时
 
     // 地图与实体数据源：所有的墙、箱、靶、炸弹都在这一个指针里，UI 直接渲染这个数据源即可
     const std::array<std::array<int8_t, SystemConfig::MAP_MAX_WIDTH>, SystemConfig::MAP_MAX_HEIGHT>* map = nullptr;
@@ -32,7 +34,7 @@ struct RenderContext {
     
     // 宏动作序列与炸弹任务列表
     uint8_t action_start_idx = 0;
-    const StaticArray<PatrolAction, 32>* actions_ptr = nullptr;  // 当前阶段巡逻动作序列
+    const StaticArray<MacroAction, 32>* actions_ptr = nullptr;  // 当前阶段巡逻动作序列
     const StaticArray<BombTask, SystemConfig::MAX_BOMBS>* bomb_tasks_ptr = nullptr;  // 当前阶段炸弹任务列表（用于 UI 绘制炸弹目标框）
 };
 
@@ -46,11 +48,24 @@ public:
     virtual void update();
 
 protected:
-    SokobanLevel logical_level;
-    StaticArray<PatrolAction, 32> patrol_actions;  // 巡图动作序列
+    SokobanLevel logical_level;  // 逻辑层地图状态
+    uint32_t observed_mask = 0;  // 已经观测到的实体掩码
+    float current_observe_yaw = SystemConfig::ENTRY_YAW;  // 当前航向角
 
-    StaticArray<RobotTask, 16> task_queue;
+    StaticArray<MacroAction, 32> reference_patrol_actions; // 参考巡图动作序列
+    StaticArray<MacroAction, 32> executed_patrol_actions;  // 已执行的巡图动作序列（仅供 UI 展示，调度器内部以 current_macro_action 为准）
+    MacroAction current_macro_action;  // 当前正在执行的宏动作
+    
+    // 微观任务队列（由 current_macro_action 转换而来）
+    StaticArray<RobotTask, 10> task_queue;
     size_t current_task_idx = 0;
+
+    // --- 内部函数 ---
+    bool plan_next_macro_action(MacroAction& out_action);
+    void start_macro_action(const MacroAction& action);
+    void prepare_phase2_solver(bool dynamic_fallback);
+    point current_grid_from_pose(const Pose2D& pos) const;
+    uint32_t observe_mask_of(const MacroAction& action) const;
 };
 
 
@@ -88,10 +103,12 @@ private:
 
         StaticArray<point, SystemConfig::MAX_PATH_LENGTH> segment_path;  // 当前宏动作的细分路径
         uint16_t segment_idx;  // 当前宏动作细分路径索引
+        bool has_active_macro = false; // 是否已有正在播放的宏动作
     } demo;
 
-    uint32_t bomb_plan_time_ms = 0;
-    uint32_t patrol_plan_time_ms = 0;
+    uint32_t patrol_bomb_plan_time_ms = 0;
+    uint32_t exploration_plan_time_ms = 0;
+    uint32_t push_bomb_plan_time_ms = 0;
     uint32_t push_plan_time_ms = 0;
 
     mutable std::array<std::array<int8_t, SystemConfig::MAP_MAX_WIDTH>, SystemConfig::MAP_MAX_HEIGHT> flattened_render_map;
