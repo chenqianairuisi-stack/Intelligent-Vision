@@ -335,11 +335,14 @@ int Sokoban::ida_star_search(const GameState& state, int g, int depth, int thres
     // 保持局部数组还能避免长期占用宝贵的 DTCM 全局空间。
     TinyMove moves[MAX_NODE_MOVES];
     int num_moves = generate_moves<Mode>(state, occupancy, active_bombs, moves);
-    SOKOBAN_PROFILE_ADD(generated_moves, static_cast<uint32_t>(num_moves));
+    MacroMove macro_moves[MAX_NODE_MACROS];
+    int num_macros = generate_bomb_macros<Mode>(state, h, active_entities, macro_moves);
+    SOKOBAN_PROFILE_ADD(generated_moves, static_cast<uint32_t>(num_moves + num_macros));
 
     int min_next_threshold = 9999;
 
-    EvalMove sorted_moves[MAX_NODE_MOVES];
+    EvalMove sorted_moves[MAX_NODE_ACTIONS];
+    int action_count = 0;
 
     // 热路径性能优先：动作评分直接留在 IDA* 主循环所在函数内。
     // 这样编译器能同时看见 moves、state 和递归参数，减少寄存器溢出和重复取址。
@@ -420,10 +423,14 @@ int Sokoban::ida_star_search(const GameState& state, int g, int depth, int thres
         if (mv.triggers_explosion) sort_key -= explosion_bonus;
         sort_key -= mv.slide_dist * slide_bonus;
 
-        sorted_moves[m] = {static_cast<uint8_t>(m), static_cast<int16_t>(sort_key)};
+        sorted_moves[action_count++] = {static_cast<uint8_t>(m), 0, static_cast<int16_t>(sort_key)};
     }
 
-    for (int i = 1; i < num_moves; ++i) {
+    for (int m = 0; m < num_macros; ++m) {
+        sorted_moves[action_count++] = {static_cast<uint8_t>(m), 1, macro_moves[m].sort_key};
+    }
+
+    for (int i = 1; i < action_count; ++i) {
         EvalMove key = sorted_moves[i];
         int j = i - 1;
         while (j >= 0 && sorted_moves[j].sort_key > key.sort_key) {
@@ -433,7 +440,31 @@ int Sokoban::ida_star_search(const GameState& state, int g, int depth, int thres
         sorted_moves[j + 1] = key;
     }
 
-    for (int m = 0; m < num_moves; ++m) {
+    for (int m = 0; m < action_count; ++m) {
+        if (sorted_moves[m].is_macro) {
+            MacroMove& macro = macro_moves[sorted_moves[m].move_idx];
+            int res = ida_star_search<Mode>(
+                macro.next_state,
+                g + macro.path_cost,
+                depth + 1,
+                threshold,
+                path,
+                macro.entity_idx,
+                macro.final_push_dir);
+
+            if (unlikely(res == -1)) {
+                StaticArray<point, MAX_PATH_LENGTH> macro_path;
+                if (!build_bomb_macro_path(state, macro.bomb_idx, macro_path)) return 9999;
+                for (int i = macro_path.size() - 1; i >= 0; --i) {
+                    path.push_back(macro_path[i]);
+                }
+                return -1;
+            }
+
+            if (res < min_next_threshold) min_next_threshold = res;
+            continue;
+        }
+
         TinyMove& mv = moves[sorted_moves[m].move_idx];
 
         bool is_bomb_entity = (mv.entity_idx >= state.num_boxes);
@@ -895,6 +926,136 @@ __attribute__((always_inline)) inline int Sokoban::generate_moves(
     }
 
     return num_moves;
+}
+
+void Sokoban::build_level_from_state(const GameState& state, SokobanLevel& out_level) const {
+    out_level = SokobanLevel{};
+    out_level.map = map;
+    out_level.player_start = state.player;
+
+    for (int y = 0; y < MAP_MAX_HEIGHT; ++y) {
+        for (int x = 0; x < MAP_MAX_WIDTH; ++x) {
+            if ((wall_clear_mask[y][x] & state.blown_mask) != 0) {
+                out_level.map[y][x] = 0;
+            }
+        }
+    }
+
+    out_level.box_count = state.num_boxes;
+    for (int i = 0; i < state.num_boxes; ++i) {
+        out_level.boxes[i] = {state.box_x[i], state.box_y[i]};
+        out_level.box_ids[i] = state.box_ids[i];
+    }
+
+    out_level.target_count = initial_targets.size();
+    for (int i = 0; i < initial_targets.size(); ++i) {
+        out_level.targets[i] = initial_targets[i];
+    }
+
+    out_level.bomb_count = state.num_bombs;
+    for (int b = 0; b < state.num_bombs; ++b) {
+        if (state.blown_mask & (1 << b)) out_level.bombs[b] = {-1, -1};
+        else out_level.bombs[b] = {state.bomb_x[b], state.bomb_y[b]};
+    }
+}
+
+uint8_t Sokoban::infer_final_bomb_push_dir(point final_player, point target_wall) const {
+    for (uint8_t d = 0; d < 4; ++d) {
+        if (final_player + MOVE[d] == target_wall) return d;
+    }
+    return 4;
+}
+
+bool Sokoban::build_bomb_macro_path(
+    const GameState& state,
+    int bomb_idx,
+    StaticArray<point, MAX_PATH_LENGTH>& out_path) const {
+    out_path.clear();
+    if (bomb_idx < 0 || bomb_idx >= state.num_bombs) return false;
+    if (state.blown_mask & (1 << bomb_idx)) return false;
+    if (bomb_tasks[bomb_idx].target_wall.x == -1) return false;
+    if (b_dist[bomb_idx][state.bomb_y[bomb_idx]][state.bomb_x[bomb_idx]] == -1) return false;
+
+    SokobanLevel macro_level;
+    build_level_from_state(state, macro_level);
+
+    BombTask task = bomb_tasks[bomb_idx];
+    task.bomb_start = {state.bomb_x[bomb_idx], state.bomb_y[bomb_idx]};
+    task.box_pushes.clear();
+
+    if (!PlanningCommon::get_bomb_push_path(macro_level, state.player, task, out_path)) return false;
+    if (out_path.empty() || out_path.size() > SOKOBAN_BOMB_MACRO_MAX_PATH) return false;
+
+    point final_player = out_path.back();
+    return infer_final_bomb_push_dir(final_player, task.target_wall) < 4;
+}
+
+template <GameMode Mode>
+int Sokoban::generate_bomb_macros(
+    const GameState& state,
+    int h_before,
+    int active_entities,
+    MacroMove macros[MAX_NODE_MACROS]) const {
+    if constexpr (Mode == GameMode::PHASE1_ANY) {
+        (void)state;
+        (void)h_before;
+        (void)active_entities;
+        (void)macros;
+        return 0;
+    } else {
+#if !SOKOBAN_ENABLE_BOMB_MACRO
+        (void)state;
+        (void)h_before;
+        (void)active_entities;
+        (void)macros;
+        return 0;
+#else
+        int count = 0;
+        for (uint8_t b = 0; b < state.num_bombs && count < MAX_NODE_MACROS; ++b) {
+            if (state.blown_mask & (1 << b)) continue;
+            if (bomb_tasks[b].target_wall.x == -1) continue;
+
+            StaticArray<point, MAX_PATH_LENGTH> macro_path;
+            if (!build_bomb_macro_path(state, b, macro_path)) continue;
+
+            point final_player = macro_path.back();
+            uint8_t final_dir = infer_final_bomb_push_dir(final_player, bomb_tasks[b].target_wall);
+            if (final_dir >= 4) continue;
+
+            MacroMove& mv = macros[count];
+            mv.bomb_idx = b;
+            mv.entity_idx = static_cast<uint8_t>(state.num_boxes + b);
+            mv.final_push_dir = final_dir;
+            mv.path_cost = static_cast<uint16_t>(macro_path.size());
+            mv.next_state = state;
+            mv.next_state.player = final_player;
+            mv.next_state.blown_mask = static_cast<uint8_t>(state.blown_mask | (1 << b));
+
+            uint32_t new_hash = state.hash;
+            new_hash ^= ZOBRIST_PLAYER[state.player.y][state.player.x];
+            new_hash ^= ZOBRIST_PLAYER[final_player.y][final_player.x];
+            new_hash ^= ZOBRIST_BLOWN_MASK[state.blown_mask];
+            new_hash ^= ZOBRIST_BLOWN_MASK[mv.next_state.blown_mask];
+            new_hash ^= ZOBRIST_BOMB[b][state.bomb_y[b]][state.bomb_x[b]];
+            mv.next_state.hash = new_hash;
+
+            int h_after = get_heuristic<Mode>(mv.next_state);
+            if (h_after >= 9999) continue;
+
+            int benefit = h_before - h_after;
+            int sort_key = static_cast<int>(mv.path_cost) * 10 -
+                           benefit * heuristic_weight_num<Mode>(active_entities) - 120;
+            int direct_lb = b_dist[b][state.bomb_y[b]][state.bomb_x[b]];
+            if (direct_lb >= 0 && direct_lb <= 3) sort_key -= (4 - direct_lb) * 35;
+            if (bomb_tasks[b].is_essential) sort_key -= 50;
+            if (sort_key < -32000) sort_key = -32000;
+            if (sort_key > 32000) sort_key = 32000;
+            mv.sort_key = static_cast<int16_t>(sort_key);
+            ++count;
+        }
+        return count;
+#endif
+    }
 }
 
 

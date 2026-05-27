@@ -50,6 +50,10 @@ Strategy 是规划链路里的“炸弹战略层”。它不负责输出最终�
 
 using namespace SystemConfig;
 
+#ifndef STRATEGY_ENABLE_PROFILE
+#define STRATEGY_ENABLE_PROFILE 1
+#endif
+
 // ============================================================================
 // 策略层内部数据结构
 // ============================================================================
@@ -68,16 +72,68 @@ struct DFSResult {
     StaticArray<BombTask, MAX_BOMBS> tasks;
     int deadlocks_remaining;  // 执行 tasks 后仍未解除的死锁数量，越少越好
     int net_profit;           // 综合收益分数，越高越好
+    int unreachable_pairs_remaining = 9999; // Phase1：仍不可达的箱子-目标对数量
+    int bomb_supply_score = 0;              // Phase1：当前炸弹对关键缺陷墙的可执行供给
 };
 
 // ============================================================================
 // 炸弹战略规划器
 // ============================================================================
+static constexpr int STRATEGY_PROFILE_EVAL_LIMIT = 8;
+static constexpr int STRATEGY_PROFILE_TOP_CANDIDATES = 3;
+
+struct StrategyCandidateProfile {
+    int8_t bomb_x = -1;
+    int8_t bomb_y = -1;
+    int8_t wall_x = -1;
+    int8_t wall_y = -1;
+    int16_t score = 0;
+};
+
+struct StrategyPassProfile {
+    int16_t result_deadlocks = 9999;
+    int32_t result_profit = -999999;
+    uint8_t result_tasks = 0;
+    uint16_t root_candidates = 0;
+    uint8_t root_branch_limit = 0;
+    uint16_t dfs_nodes = 0;
+    uint16_t fast_bfs_calls = 0;
+    uint16_t candidate_evals = 0;
+    uint16_t candidate_kept = 0;
+    uint16_t child_branches = 0;
+    uint8_t logic_builds = 0;
+    uint16_t post_refine_tests = 0;
+    uint8_t top_count = 0;
+    StrategyCandidateProfile top[STRATEGY_PROFILE_TOP_CANDIDATES];
+    uint16_t local_clear_calls = 0;
+    uint16_t local_clear_successes = 0;
+    uint16_t materialize_calls = 0;
+    uint16_t materialize_successes = 0;
+};
+
+struct StrategyEvalProfile {
+    uint8_t mode = 0;
+    uint8_t force_dynamic = 0;
+    uint8_t selected_pass = 255;
+    int16_t selected_deadlocks = 9999;
+    int32_t selected_profit = -999999;
+    uint8_t selected_tasks = 0;
+    StrategyPassProfile passes[3];
+};
+
+struct StrategyProfile {
+    uint8_t eval_count = 0;
+    uint16_t dropped_evals = 0;
+    StrategyEvalProfile evals[STRATEGY_PROFILE_EVAL_LIMIT];
+};
+
 class StrategicPlanner {
 public:
     StrategicPlanner() = default;
 
     void set_phase2_dynamic_fallback(bool enabled) { force_phase2_dynamic = enabled; }
+    void reset_profile();
+    const StrategyProfile& get_profile() const { return profile; }
 
     template <GameMode Mode>
     StaticArray<BombTask, MAX_BOMBS> evaluate_and_assign_bombs(const SokobanLevel& level);
@@ -115,6 +171,30 @@ private:
         SokobanLevel& out_lvl,
         int& out_cost,
         StaticArray<BoxPushTask, 8>& out_box_pushes);
+
+    void begin_profile_eval(uint8_t mode);
+    void set_profile_pass(uint8_t pass);
+    void record_profile_result(uint8_t pass, const DFSResult& result);
+    void record_profile_selected(uint8_t pass, const DFSResult& result);
+    void record_profile_root_candidates(
+        const SokobanLevel& level,
+        const StaticArray<BombCandidate, 256>& candidates,
+        int branch_limit);
+    void record_profile_dfs_node();
+    void record_profile_fast_bfs_call();
+    void record_profile_candidate_eval();
+    void record_profile_candidate_kept();
+    void record_profile_child_branch();
+    void record_profile_logic_build();
+    void record_profile_post_refine_test();
+    void record_profile_local_clear_call();
+    void record_profile_local_clear_success();
+    void record_profile_materialize_call();
+    void record_profile_materialize_success();
+
+    StrategyProfile profile;
+    StrategyEvalProfile* active_profile_eval = nullptr;
+    uint8_t active_profile_pass = 0;
 };
 
 extern StrategicPlanner strategic_planner;

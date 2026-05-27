@@ -11,7 +11,8 @@ __attribute__((section(".dtcm_data"))) Exploration patrol_planner;
 // ============================================================================
 static constexpr uint16_t MIN_GRID_TIME_LOWER_BOUND = 2;    // DFS 剪枝下界：单个未观测实体至少还要多少基础代价 [越大剪枝越激进]
 static constexpr int32_t  BONUS_FOR_BOMB = 8;               // 炸弹动作奖励
-static constexpr uint16_t BOMB_ROUTE_COST_DIVISOR = 100;    // 推必炸炸弹本体路径的摊销系数
+static constexpr uint16_t BOMB_ROUTE_COST_DIVISOR = 100;   // 推必炸炸弹本体路径的摊销系数
+static constexpr uint16_t FIRST_BOMB_LOCALITY_WEIGHT = 8;   // 巡图炸弹排序：优先处理当前附近的炸弹
 static constexpr uint16_t FINAL_NEAR_BOX_RADIUS = 4;        // 收尾位置靠近箱子的判定半径
 static constexpr uint16_t FINAL_NO_BOX_PENALTY = 10;        // 收尾位置远离箱子的时间惩罚
 static constexpr uint16_t COST_INFINITY = 65535;            // 不可达代价哨兵值
@@ -259,6 +260,7 @@ StaticArray<BombTask, MAX_BOMBS> Exploration::optimize_bomb_timeline(
     }
     StaticArray<BombTask, MAX_BOMBS> best_seq = raw_tasks;
     uint32_t best_cost = 0xFFFFFFFF; 
+    uint32_t best_first_step_cost = 0xFFFFFFFF;
     bool found_complete_sequence = false;
     bool used[MAX_BOMBS] = {false};
     StaticArray<BombTask, MAX_BOMBS> current_seq;
@@ -266,8 +268,17 @@ StaticArray<BombTask, MAX_BOMBS> Exploration::optimize_bomb_timeline(
     // 暴力枚举炸弹执行顺序；MAX_BOMBS 很小，直接 DFS 更稳
     auto dfs_perm = [&](auto& self, const SokobanLevel& lvl, point current_pos, uint32_t cost) -> void {
         if (current_seq.size() == raw_tasks.size()) {
-            if (cost < best_cost) {
+            StaticArray<point, MAX_PATH_LENGTH> first_path;
+            uint32_t first_step_cost = 0xFFFFFFFF;
+            if (PlanningCommon::get_bomb_push_path(initial_lvl, start_pos, current_seq[0], first_path)) {
+                first_step_cost = PlanningCommon::path_time_cost(start_pos, first_path);
+            }
+
+            uint32_t score = cost + first_step_cost * FIRST_BOMB_LOCALITY_WEIGHT;
+            uint32_t best_score = best_cost + best_first_step_cost * FIRST_BOMB_LOCALITY_WEIGHT;
+            if (score < best_score || (score == best_score && first_step_cost < best_first_step_cost)) {
                 best_cost = cost;
+                best_first_step_cost = first_step_cost;
                 best_seq = current_seq;
                 found_complete_sequence = true;
             }
@@ -453,6 +464,7 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
 
     // 先按可执行代价调整炸弹顺序，再构造每次爆破后的地图快照
     auto bomb_tasks = optimize_bomb_timeline(cached_level, start_pos, raw_bomb_tasks);
+    B = bomb_tasks.size();
     for (int k = 0; k < B; ++k) {
         multi_maps[k + 1] = multi_maps[k];
         apply_macro_bomb_effect(multi_maps[k + 1], bomb_tasks[k]);

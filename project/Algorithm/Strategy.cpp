@@ -1,7 +1,7 @@
 #include "Strategy.h"
 #include <cstring>
 #include <algorithm>
-#ifdef STRATEGY_DEBUG_PHASE2_RESULT
+#if defined(STRATEGY_DEBUG_PHASE2_RESULT) || defined(STRATEGY_DEBUG_PHASE1_REFINEMENT)
 #include <cstdio>
 #endif
 // ============================================================================
@@ -27,8 +27,8 @@
 // ============================================================================
 __attribute__((section(".dtcm_data"))) StrategicPlanner strategic_planner;
 
-// DFS 每层最多保留的高分候选数，限制分支数量比盲目遍历全图墙体更适合单片机
-constexpr uint8_t PHASE1_SELECTION_RESTRICTIONS = 4;
+// DFS 每层最多保留的高分候选数
+constexpr uint8_t PHASE1_SELECTION_RESTRICTIONS = 3;
 constexpr uint8_t PHASE2_SELECTION_RESTRICTIONS = 6;
 constexpr int16_t INF_DIST = 9999;
 constexpr int PHASE1_SOFT_REPLACE_PROFIT_MARGIN = 20;
@@ -54,6 +54,10 @@ static bool strategy_target_at(const SokobanLevel& lvl, point p) {
     return false;
 }
 
+static int strategy_bomb_count(const SokobanLevel& lvl) {
+    return lvl.bomb_count < MAX_BOMBS ? lvl.bomb_count : MAX_BOMBS;
+}
+
 static void mark_soft_deadlock_boxes(const SokobanLevel& lvl, bool out_hard[MAX_BOXES]) {
     std::memset(out_hard, 0, sizeof(bool) * MAX_BOXES);
 
@@ -62,9 +66,64 @@ static void mark_soft_deadlock_boxes(const SokobanLevel& lvl, bool out_hard[MAX_
         return lvl.map[p.y][p.x] == 1;
     };
 
+    auto strong_component_size = [&](point start) -> int {
+        if (is_wall(start)) return 0;
+
+        static bool fwd_vis[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+        static bool rev_vis[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+        static point q[MAP_CELL_COUNT];
+        std::memset(fwd_vis, 0, sizeof(fwd_vis));
+        std::memset(rev_vis, 0, sizeof(rev_vis));
+
+        int head = 0;
+        int tail = 0;
+        q[tail++] = start;
+        fwd_vis[start.y][start.x] = true;
+        while (head < tail) {
+            point curr = q[head++];
+            for (int d = 0; d < 4; ++d) {
+                point next = curr + MOVE[d];
+                point stand = curr - MOVE[d];
+                if (is_wall(next) || is_wall(stand)) continue;
+                if (fwd_vis[next.y][next.x]) continue;
+                fwd_vis[next.y][next.x] = true;
+                q[tail++] = next;
+            }
+        }
+
+        head = 0;
+        tail = 0;
+        q[tail++] = start;
+        rev_vis[start.y][start.x] = true;
+        while (head < tail) {
+            point curr = q[head++];
+            for (int d = 0; d < 4; ++d) {
+                point prev = curr - MOVE[d];
+                point stand = prev - MOVE[d];
+                if (is_wall(prev) || is_wall(stand)) continue;
+                if (rev_vis[prev.y][prev.x]) continue;
+                rev_vis[prev.y][prev.x] = true;
+                q[tail++] = prev;
+            }
+        }
+
+        int count = 0;
+        for (int y = 0; y < MAP_MAX_HEIGHT; ++y) {
+            for (int x = 0; x < MAP_MAX_WIDTH; ++x) {
+                if (fwd_vis[y][x] && rev_vis[y][x]) ++count;
+            }
+        }
+        return count;
+    };
+
     for (int b = 0; b < lvl.box_count; ++b) {
         point p = lvl.boxes[b];
         if (strategy_target_at(lvl, p)) continue;
+
+        if (strong_component_size(p) <= 1) {
+            out_hard[b] = true;
+            continue;
+        }
 
         bool up = is_wall(p + MOVE[0]);
         bool right = is_wall(p + MOVE[1]);
@@ -130,15 +189,696 @@ __attribute__((section(".dtcm_data"))) static int16_t dfs_dist_bomb[MAX_BOMBS + 
 // dfs_player_vis[depth][y][x]：当前 DFS 深度下玩家可达区域
 __attribute__((section(".dtcm_data"))) static bool dfs_player_vis[MAX_BOMBS + 1][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
 
+// Phase1 结构判定距离场：非死锁箱子视作可挪开的软障碍，避免把临时箱子阻塞误判为必炸墙体。
+__attribute__((section(".dtcm_data"))) static int16_t phase1_soft_dist_box[MAX_BOMBS + 1][MAX_BOXES][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+
+// Phase1 候选二次排序使用的临时距离场。只在少量候选上运行，避免污染递归层缓存。
+__attribute__((section(".dtcm_data"))) static int16_t phase1_candidate_dist[MAX_BOXES][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+__attribute__((section(".dtcm_data"))) static int16_t phase1_candidate_bomb_dist[MAX_BOMBS][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+
 // Phase1 任意匹配 DP 缓存，避免递归过程中频繁申请大数组
 __attribute__((section(".dtcm_bss"))) static int phase1_match_dp[PHASE1_MATCH_MASKS];
 __attribute__((section(".dtcm_bss"))) static int phase1_match_next[PHASE1_MATCH_MASKS];
 
 struct StrategyDfsScratch {
+    StaticArray<BombCandidate, 256> preliminary[MAX_BOMBS + 1];
     StaticArray<BombCandidate, 256> candidates[MAX_BOMBS + 1];
+    bool probe_valid[MAX_BOMBS + 1][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+    int probe_deadlocks[MAX_BOMBS + 1][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+    int probe_unreachable[MAX_BOMBS + 1][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+    int probe_distance[MAX_BOMBS + 1][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
 };
 
 static MCU_OCRAM_BSS StrategyDfsScratch strategy_dfs_ws;
+
+// ============================================================================
+// 缺陷驱动逻辑层：把“不可达/死锁”投影为可修复它的 3x3 爆破区域
+// ============================================================================
+
+struct LogicBlastScores {
+    int16_t score[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+    uint8_t l1_hits[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+    uint8_t l2_hits[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+    uint8_t l3_hits[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+    uint8_t bomb_unlock_hits[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+};
+
+static __attribute__((section(".dtcm_bss"))) LogicBlastScores logic_blast_scores;
+
+static bool strategy_in_bounds(point p) {
+    return p.x >= 0 && p.x < MAP_MAX_WIDTH && p.y >= 0 && p.y < MAP_MAX_HEIGHT;
+}
+
+static bool strategy_is_wall(const SokobanLevel& lvl, point p) {
+    if (!strategy_in_bounds(p)) return true;
+    return lvl.map[p.y][p.x] == 1;
+}
+
+static bool strategy_blast_covers(point center, point p) {
+    return std::abs(center.x - p.x) <= 1 && std::abs(center.y - p.y) <= 1;
+}
+
+static int strategy_dir_between(point from, point to) {
+    if (to.x > from.x && to.y == from.y) return 1;
+    if (to.x < from.x && to.y == from.y) return 3;
+    if (to.y > from.y && to.x == from.x) return 2;
+    if (to.y < from.y && to.x == from.x) return 0;
+    return -1;
+}
+
+static int strategy_path_turns(point start, const StaticArray<point, MAX_PATH_LENGTH>& path) {
+    int turns = 0;
+    int prev_dir = -1;
+    point prev = start;
+    for (int i = 0; i < path.size(); ++i) {
+        int dir = strategy_dir_between(prev, path[i]);
+        if (dir >= 0 && prev_dir >= 0 && dir != prev_dir) ++turns;
+        if (dir >= 0) prev_dir = dir;
+        prev = path[i];
+    }
+    return turns;
+}
+
+static bool strategy_bomb_line_clear(const SokobanLevel& lvl, point from, point to) {
+    int dx = (to.x > from.x) - (to.x < from.x);
+    int dy = (to.y > from.y) - (to.y < from.y);
+    if (dx != 0 && dy != 0) return false;
+    if (dx == 0 && dy == 0) return true;
+
+    point p = {static_cast<int8_t>(from.x + dx), static_cast<int8_t>(from.y + dy)};
+    while (!(p == to)) {
+        if (strategy_is_wall(lvl, p)) return false;
+        if (strategy_box_at(lvl, p) >= 0) return false;
+        for (int b = 0; b < strategy_bomb_count(lvl); ++b) {
+            if (lvl.bombs[b].x != -1 && lvl.bombs[b] == p) return false;
+        }
+        p = {static_cast<int8_t>(p.x + dx), static_cast<int8_t>(p.y + dy)};
+    }
+    return true;
+}
+
+static int strategy_task_shape_cost(
+    const SokobanLevel& lvl,
+    point player,
+    const BombTask& task,
+    const StaticArray<point, MAX_PATH_LENGTH>& path)
+{
+    int dx = std::abs(task.target_wall.x - task.bomb_start.x);
+    int dy = std::abs(task.target_wall.y - task.bomb_start.y);
+    int cost = strategy_path_turns(player, path) * 90;
+
+    if (dx == 0 || dy == 0) {
+        if (!strategy_bomb_line_clear(lvl, task.bomb_start, task.target_wall)) cost += 140;
+    } else {
+        cost += 360 + std::min(dx, dy) * 120;
+    }
+
+    int manhattan = dx + dy;
+    int detour = path.size() - manhattan;
+    if (detour > 0) cost += detour * 8;
+    return cost;
+}
+
+static int strategy_wall_rank(point wall) {
+    return wall.x * 2 + wall.y;
+}
+
+static void logic_clear_scores(LogicBlastScores& scores) {
+    std::memset(&scores, 0, sizeof(scores));
+}
+
+static void logic_add_score(LogicBlastScores& scores, point center, int add, uint8_t layer) {
+    if (!strategy_in_bounds(center)) return;
+    int v = scores.score[center.y][center.x] + add;
+    if (v > 30000) v = 30000;
+    if (v < -30000) v = -30000;
+    scores.score[center.y][center.x] = static_cast<int16_t>(v);
+    if (layer == 1 && scores.l1_hits[center.y][center.x] < 255) ++scores.l1_hits[center.y][center.x];
+    if (layer == 2 && scores.l2_hits[center.y][center.x] < 255) ++scores.l2_hits[center.y][center.x];
+    if (layer == 3 && scores.l3_hits[center.y][center.x] < 255) ++scores.l3_hits[center.y][center.x];
+    if (layer == 4 && scores.bomb_unlock_hits[center.y][center.x] < 255) ++scores.bomb_unlock_hits[center.y][center.x];
+}
+
+static void logic_add_wall_requirement(
+    const SokobanLevel& lvl,
+    LogicBlastScores& scores,
+    const point* required_walls,
+    int required_count,
+    int add,
+    uint8_t layer) {
+    if (required_count <= 0) return;
+    point anchor = required_walls[0];
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            int cx = anchor.x + dx;
+            int cy = anchor.y + dy;
+            if (cx <= 0 || cx >= MAP_MAX_WIDTH - 1 || cy <= 0 || cy >= MAP_MAX_HEIGHT - 1) continue;
+            point center = {static_cast<int8_t>(cx), static_cast<int8_t>(cy)};
+            if (lvl.map[cy][cx] != 1) continue;
+            bool covers_all = true;
+            for (int i = 0; i < required_count; ++i) {
+                if (!strategy_blast_covers(center, required_walls[i])) {
+                    covers_all = false;
+                    break;
+                }
+            }
+            if (!covers_all) continue;
+            logic_add_score(scores, center, add, layer);
+        }
+    }
+}
+
+static bool logic_edge_missing_walls(const SokobanLevel& lvl, point box_pos, int dir, point* out_walls, int& out_count) {
+    out_count = 0;
+    point box_to = box_pos + MOVE[dir];
+    point push_from = box_pos - MOVE[dir];
+    if (!strategy_in_bounds(box_to) || !strategy_in_bounds(push_from)) return false;
+    if (strategy_is_wall(lvl, box_to)) out_walls[out_count++] = box_to;
+    if (strategy_is_wall(lvl, push_from)) out_walls[out_count++] = push_from;
+    return out_count > 0;
+}
+
+static void logic_build_reverse_push_reach(
+    const SokobanLevel& lvl,
+    point target,
+    int16_t out_dist[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]) {
+    for (int y = 0; y < MAP_MAX_HEIGHT; ++y) {
+        for (int x = 0; x < MAP_MAX_WIDTH; ++x) out_dist[y][x] = INF_DIST;
+    }
+    if (!strategy_in_bounds(target) || strategy_is_wall(lvl, target)) return;
+
+    static __attribute__((section(".dtcm_bss"))) point q[MAP_CELL_COUNT];
+    int head = 0, tail = 0;
+    out_dist[target.y][target.x] = 0;
+    q[tail++] = target;
+
+    while (head < tail) {
+        point curr = q[head++];
+        int16_t curr_dist = out_dist[curr.y][curr.x];
+        for (int dir = 0; dir < 4; ++dir) {
+            point box_prev = curr - MOVE[dir];
+            point player_prev = curr - MOVE[dir] - MOVE[dir];
+            if (!strategy_in_bounds(box_prev) || !strategy_in_bounds(player_prev)) continue;
+            if (strategy_is_wall(lvl, box_prev) || strategy_is_wall(lvl, player_prev)) continue;
+            if (out_dist[box_prev.y][box_prev.x] != INF_DIST) continue;
+            out_dist[box_prev.y][box_prev.x] = curr_dist + 1;
+            q[tail++] = box_prev;
+        }
+    }
+}
+
+template <GameMode Mode>
+static void build_logic_blast_scores(
+    const SokobanLevel& lvl,
+    bool player_vis[MAP_MAX_HEIGHT][MAP_MAX_WIDTH],
+    int16_t box_dist[MAX_BOXES][MAP_MAX_HEIGHT][MAP_MAX_WIDTH],
+    LogicBlastScores& scores) {
+    logic_clear_scores(scores);
+
+    bool hard_box_deadlock[MAX_BOXES] = {false};
+    mark_soft_deadlock_boxes(lvl, hard_box_deadlock);
+
+    // L1: 箱子静态死锁/无首推方向。直接从箱子周围被墙堵住的推边生成修复爆破区域。
+    for (int b = 0; b < lvl.box_count; ++b) {
+        point box = lvl.boxes[b];
+        bool on_target = false;
+        if constexpr (Mode == GameMode::PHASE2_SPECIFIC) {
+            int tid = lvl.box_ids[b];
+            on_target = tid >= 0 && tid < lvl.target_count && lvl.targets[tid] == box;
+        } else {
+            on_target = strategy_target_at(lvl, box);
+        }
+
+        int static_legal_push_dirs = 0;
+        for (int d = 0; d < 4; ++d) {
+            point box_to = box + MOVE[d];
+            point push_from = box - MOVE[d];
+            if (!strategy_in_bounds(box_to) || !strategy_in_bounds(push_from)) continue;
+            if (strategy_is_wall(lvl, box_to) || strategy_is_wall(lvl, push_from)) continue;
+            ++static_legal_push_dirs;
+        }
+
+        bool wall_up = strategy_is_wall(lvl, box + MOVE[0]);
+        bool wall_right = strategy_is_wall(lvl, box + MOVE[1]);
+        bool wall_down = strategy_is_wall(lvl, box + MOVE[2]);
+        bool wall_left = strategy_is_wall(lvl, box + MOVE[3]);
+        bool static_corner = (wall_up && wall_right) || (wall_right && wall_down) ||
+                            (wall_down && wall_left) || (wall_left && wall_up);
+        bool hard_deadlock = hard_box_deadlock[b];
+        if (on_target || (!hard_deadlock && !static_corner && static_legal_push_dirs > 0)) continue;
+
+        for (int d = 0; d < 4; ++d) {
+            point required[2];
+            int required_count = 0;
+            if (!logic_edge_missing_walls(lvl, box, d, required, required_count)) continue;
+            logic_add_wall_requirement(lvl, scores, required, required_count,
+                                    hard_deadlock ? 7200 : (static_corner ? 5200 : 3600), 1);
+        }
+    }
+
+    // L1b: 2x2 双箱/多箱贴墙死锁。把长边墙本身投影出来，避免只看单箱首推时漏掉。
+    for (int y = 0; y < MAP_MAX_HEIGHT - 1; ++y) {
+        for (int x = 0; x < MAP_MAX_WIDTH - 1; ++x) {
+            int box_id[2][2];
+            bool wall[2][2];
+            int box_count = 0;
+            int wall_count = 0;
+            point wall_cells[4];
+
+            for (int dy = 0; dy < 2; ++dy) {
+                for (int dx = 0; dx < 2; ++dx) {
+                    point p = {static_cast<int8_t>(x + dx), static_cast<int8_t>(y + dy)};
+                    box_id[dy][dx] = strategy_box_at(lvl, p);
+                    wall[dy][dx] = strategy_is_wall(lvl, p);
+                    if (box_id[dy][dx] >= 0) ++box_count;
+                    if (wall[dy][dx]) wall_cells[wall_count++] = p;
+                }
+            }
+
+            bool boxes_top = box_id[0][0] >= 0 && box_id[0][1] >= 0;
+            bool boxes_bottom = box_id[1][0] >= 0 && box_id[1][1] >= 0;
+            bool boxes_left = box_id[0][0] >= 0 && box_id[1][0] >= 0;
+            bool boxes_right = box_id[0][1] >= 0 && box_id[1][1] >= 0;
+            bool walls_top = wall[0][0] && wall[0][1];
+            bool walls_bottom = wall[1][0] && wall[1][1];
+            bool walls_left = wall[0][0] && wall[1][0];
+            bool walls_right = wall[0][1] && wall[1][1];
+
+            bool long_edge_lock =
+                (box_count >= 3 && wall_count >= 1) ||
+                (boxes_top && walls_bottom) ||
+                (boxes_bottom && walls_top) ||
+                (boxes_left && walls_right) ||
+                (boxes_right && walls_left);
+            if (!long_edge_lock) continue;
+
+            for (int i = 0; i < wall_count; ++i) {
+                logic_add_wall_requirement(lvl, scores, &wall_cells[i], 1, 6800, 1);
+            }
+        }
+    }
+
+    // L2: 小车弱连通。寻找“可达地面 | 墙 | 不可达地面”的边界墙，并对靠近重要实体的区域加权。
+    for (int y = 1; y < MAP_MAX_HEIGHT - 1; ++y) {
+        for (int x = 1; x < MAP_MAX_WIDTH - 1; ++x) {
+            if (lvl.map[y][x] != 1) continue;
+            point wall = {static_cast<int8_t>(x), static_cast<int8_t>(y)};
+            bool touches_reachable_floor = false;
+            bool touches_unreachable_floor = false;
+            for (int d = 0; d < 4; ++d) {
+                point np = wall + MOVE[d];
+                if (!strategy_in_bounds(np) || lvl.map[np.y][np.x] == 1) continue;
+                if (player_vis[np.y][np.x]) touches_reachable_floor = true;
+                else touches_unreachable_floor = true;
+            }
+            if (!touches_reachable_floor || !touches_unreachable_floor) continue;
+
+            int entity_bonus = 0;
+            bool unlocks_bomb = false;
+            for (int b = 0; b < lvl.box_count; ++b) {
+                int dist = std::max(std::abs(lvl.boxes[b].x - x), std::abs(lvl.boxes[b].y - y));
+                if (dist <= 3) entity_bonus += (4 - dist) * 180;
+            }
+            for (int t = 0; t < lvl.target_count; ++t) {
+                int dist = std::max(std::abs(lvl.targets[t].x - x), std::abs(lvl.targets[t].y - y));
+                if (dist <= 3) entity_bonus += (4 - dist) * 160;
+            }
+            for (int b = 0; b < strategy_bomb_count(lvl); ++b) {
+                if (lvl.bombs[b].x == -1) continue;
+                int dist = std::max(std::abs(lvl.bombs[b].x - x), std::abs(lvl.bombs[b].y - y));
+                if (dist <= 3) {
+                    entity_bonus += (4 - dist) * 220;
+                    unlocks_bomb = true;
+                }
+            }
+
+            point required[1] = {wall};
+            logic_add_wall_requirement(lvl, scores, required, 1, 1300 + entity_bonus, 2);
+            if (unlocks_bomb) logic_add_wall_requirement(lvl, scores, required, 1, 900, 4);
+        }
+    }
+
+    // L3: box-target 推图桥接。F 是箱子当前可推到的区域，R 是能反向推入目标的区域；
+    // 如果一条 F -> R 的推边只差墙体，就把这些墙体投影为候选爆破区域。
+    static __attribute__((section(".dtcm_bss"))) int16_t reverse_dist[MAX_BOXES][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+    bool target_needed[MAX_BOXES] = {false};
+    for (int b = 0; b < lvl.box_count; ++b) {
+        for (int t = 0; t < lvl.target_count; ++t) {
+            if constexpr (Mode == GameMode::PHASE2_SPECIFIC) {
+                if (lvl.box_ids[b] != t) continue;
+            }
+            point target = lvl.targets[t];
+            if (box_dist[b][target.y][target.x] == INF_DIST) target_needed[t] = true;
+        }
+    }
+    for (int t = 0; t < lvl.target_count; ++t) {
+        if (!target_needed[t]) continue;
+        logic_build_reverse_push_reach(lvl, lvl.targets[t], reverse_dist[t]);
+    }
+
+    // L3a: 强封闭目标域。如果目标的反向可推入域 R 与任何箱子的正向可推达域 F
+    // 都没有交集，只靠“一步桥”找不到墙；这时直接把 R 的边界墙打成候选。
+    for (int t = 0; t < lvl.target_count; ++t) {
+        if (!target_needed[t]) continue;
+
+        bool target_has_box_contact = false;
+        for (int b = 0; b < lvl.box_count && !target_has_box_contact; ++b) {
+            if constexpr (Mode == GameMode::PHASE2_SPECIFIC) {
+                if (lvl.box_ids[b] != t) continue;
+            }
+            for (int y = 1; y < MAP_MAX_HEIGHT - 1 && !target_has_box_contact; ++y) {
+                for (int x = 1; x < MAP_MAX_WIDTH - 1; ++x) {
+                    if (box_dist[b][y][x] != INF_DIST && reverse_dist[t][y][x] != INF_DIST) {
+                        target_has_box_contact = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (target_has_box_contact) continue;
+
+        int emitted = 0;
+        point target = lvl.targets[t];
+        for (int y = 1; y < MAP_MAX_HEIGHT - 1 && emitted < 16; ++y) {
+            for (int x = 1; x < MAP_MAX_WIDTH - 1 && emitted < 16; ++x) {
+                if (reverse_dist[t][y][x] == INF_DIST) continue;
+                point cell = {static_cast<int8_t>(x), static_cast<int8_t>(y)};
+
+                for (int d = 0; d < 4 && emitted < 16; ++d) {
+                    point wall = cell + MOVE[d];
+                    point outside = wall + MOVE[d];
+                    if (!strategy_in_bounds(wall) || !strategy_in_bounds(outside)) continue;
+                    if (!strategy_is_wall(lvl, wall) || strategy_is_wall(lvl, outside)) continue;
+
+                    int dist = std::max(std::abs(target.x - wall.x), std::abs(target.y - wall.y));
+                    int add = 6200;
+                    if (dist <= 4) add += (5 - dist) * 420;
+                    logic_add_wall_requirement(lvl, scores, &wall, 1, add, 3);
+                    ++emitted;
+                }
+            }
+        }
+    }
+
+    // L3b: 强封闭箱子域。箱子正向可推达域 F 与所有目标反向域都无交集时，
+    // 优先打开 F 的边界墙，给后续 F/R 桥接制造入口。
+    for (int b = 0; b < lvl.box_count; ++b) {
+        bool box_has_reachable_target = false;
+        bool box_has_applicable_target = false;
+        for (int t = 0; t < lvl.target_count; ++t) {
+            if constexpr (Mode == GameMode::PHASE2_SPECIFIC) {
+                if (lvl.box_ids[b] != t) continue;
+            }
+            box_has_applicable_target = true;
+            point target = lvl.targets[t];
+            if (box_dist[b][target.y][target.x] != INF_DIST) {
+                box_has_reachable_target = true;
+                break;
+            }
+        }
+        if (!box_has_applicable_target || box_has_reachable_target) continue;
+
+        bool box_has_target_contact = false;
+        for (int t = 0; t < lvl.target_count && !box_has_target_contact; ++t) {
+            if constexpr (Mode == GameMode::PHASE2_SPECIFIC) {
+                if (lvl.box_ids[b] != t) continue;
+            }
+            if (!target_needed[t]) continue;
+            for (int y = 1; y < MAP_MAX_HEIGHT - 1 && !box_has_target_contact; ++y) {
+                for (int x = 1; x < MAP_MAX_WIDTH - 1; ++x) {
+                    if (box_dist[b][y][x] != INF_DIST && reverse_dist[t][y][x] != INF_DIST) {
+                        box_has_target_contact = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (box_has_target_contact) continue;
+
+        int emitted = 0;
+        point box = lvl.boxes[b];
+        for (int y = 1; y < MAP_MAX_HEIGHT - 1 && emitted < 16; ++y) {
+            for (int x = 1; x < MAP_MAX_WIDTH - 1 && emitted < 16; ++x) {
+                if (box_dist[b][y][x] == INF_DIST) continue;
+                point cell = {static_cast<int8_t>(x), static_cast<int8_t>(y)};
+
+                for (int d = 0; d < 4 && emitted < 16; ++d) {
+                    point wall = cell + MOVE[d];
+                    point outside = wall + MOVE[d];
+                    if (!strategy_in_bounds(wall) || !strategy_in_bounds(outside)) continue;
+                    if (!strategy_is_wall(lvl, wall) || strategy_is_wall(lvl, outside)) continue;
+
+                    int dist = std::max(std::abs(box.x - wall.x), std::abs(box.y - wall.y));
+                    int add = 5600;
+                    if (dist <= 4) add += (5 - dist) * 360;
+                    logic_add_wall_requirement(lvl, scores, &wall, 1, add, 3);
+                    ++emitted;
+                }
+            }
+        }
+    }
+
+    for (int b = 0; b < lvl.box_count; ++b) {
+        for (int t = 0; t < lvl.target_count; ++t) {
+            if constexpr (Mode == GameMode::PHASE2_SPECIFIC) {
+                if (lvl.box_ids[b] != t) continue;
+            }
+            if (!target_needed[t]) continue;
+            point target = lvl.targets[t];
+            if (box_dist[b][target.y][target.x] != INF_DIST) continue;
+
+            int emitted_for_pair = 0;
+            for (int y = 1; y < MAP_MAX_HEIGHT - 1 && emitted_for_pair < 8; ++y) {
+                for (int x = 1; x < MAP_MAX_WIDTH - 1 && emitted_for_pair < 8; ++x) {
+                    if (box_dist[b][y][x] == INF_DIST) continue;
+                    point from = {static_cast<int8_t>(x), static_cast<int8_t>(y)};
+
+                    for (int d = 0; d < 4 && emitted_for_pair < 8; ++d) {
+                        point to = from + MOVE[d];
+                        point push_from = from - MOVE[d];
+                        if (!strategy_in_bounds(to) || !strategy_in_bounds(push_from)) continue;
+                        if (reverse_dist[t][to.y][to.x] == INF_DIST) continue;
+
+                        point required[2];
+                        int required_count = 0;
+                        if (strategy_is_wall(lvl, to)) required[required_count++] = to;
+                        if (strategy_is_wall(lvl, push_from)) required[required_count++] = push_from;
+                        if (required_count == 0) continue;
+
+                        int bridge_bonus = 4200;
+                        int target_dist = std::max(std::abs(target.x - to.x), std::abs(target.y - to.y));
+                        if (target_dist <= 5) bridge_bonus += (6 - target_dist) * 260;
+                        logic_add_wall_requirement(lvl, scores, required, required_count, bridge_bonus, 3);
+                        ++emitted_for_pair;
+                    }
+                }
+            }
+        }
+    }
+}
+
+static int phase1_key_bomb_supply_score(
+    const SokobanLevel& lvl,
+    int16_t bomb_dist[MAX_BOMBS][MAP_MAX_HEIGHT][MAP_MAX_WIDTH],
+    const LogicBlastScores& scores)
+{
+    int supply = 0;
+    for (int y = 1; y < MAP_MAX_HEIGHT - 1; ++y) {
+        for (int x = 1; x < MAP_MAX_WIDTH - 1; ++x) {
+            if (lvl.map[y][x] != 1) continue;
+            int logic = scores.score[y][x];
+            if (logic <= 0) continue;
+
+            int best_dist = INF_DIST;
+            for (int b = 0; b < strategy_bomb_count(lvl); ++b) {
+                if (lvl.bombs[b].x == -1) continue;
+                int d = bomb_dist[b][y][x];
+                if (d < best_dist) best_dist = d;
+            }
+            if (best_dist == INF_DIST) continue;
+
+            int capped_logic = logic > 12000 ? 12000 : logic;
+            int layer_bonus =
+                scores.l1_hits[y][x] * 1800 +
+                scores.l2_hits[y][x] * 700 +
+                scores.l3_hits[y][x] * 1100 +
+                scores.bomb_unlock_hits[y][x] * 900;
+            int dist_penalty = best_dist * 20;
+            int cell_supply = capped_logic + layer_bonus - dist_penalty;
+            if (cell_supply > 0) supply += cell_supply;
+        }
+    }
+    return supply;
+}
+
+void StrategicPlanner::reset_profile() {
+    profile = StrategyProfile{};
+    active_profile_eval = nullptr;
+    active_profile_pass = 0;
+}
+
+void StrategicPlanner::begin_profile_eval(uint8_t mode) {
+    if constexpr (!STRATEGY_ENABLE_PROFILE) {
+        (void)mode;
+        active_profile_eval = nullptr;
+        active_profile_pass = 0;
+        return;
+    }
+    if (profile.eval_count >= STRATEGY_PROFILE_EVAL_LIMIT) {
+        ++profile.dropped_evals;
+        active_profile_eval = nullptr;
+        active_profile_pass = 0;
+        return;
+    }
+
+    StrategyEvalProfile& eval = profile.evals[profile.eval_count++];
+    eval = StrategyEvalProfile{};
+    eval.mode = mode;
+    eval.force_dynamic = force_phase2_dynamic ? 1 : 0;
+    active_profile_eval = &eval;
+    active_profile_pass = 0;
+}
+
+void StrategicPlanner::set_profile_pass(uint8_t pass) {
+    if constexpr (!STRATEGY_ENABLE_PROFILE) {
+        (void)pass;
+        return;
+    }
+    active_profile_pass = pass < 3 ? pass : 0;
+}
+
+void StrategicPlanner::record_profile_result(uint8_t pass, const DFSResult& result) {
+    if constexpr (!STRATEGY_ENABLE_PROFILE) {
+        (void)pass;
+        (void)result;
+        return;
+    }
+    if (!active_profile_eval || pass >= 3) return;
+    StrategyPassProfile& p = active_profile_eval->passes[pass];
+    p.result_deadlocks = static_cast<int16_t>(result.deadlocks_remaining);
+    p.result_profit = result.net_profit;
+    p.result_tasks = static_cast<uint8_t>(result.tasks.size());
+}
+
+void StrategicPlanner::record_profile_selected(uint8_t pass, const DFSResult& result) {
+    if constexpr (!STRATEGY_ENABLE_PROFILE) {
+        (void)pass;
+        (void)result;
+        return;
+    }
+    if (!active_profile_eval) return;
+    active_profile_eval->selected_pass = pass;
+    active_profile_eval->selected_deadlocks = static_cast<int16_t>(result.deadlocks_remaining);
+    active_profile_eval->selected_profit = result.net_profit;
+    active_profile_eval->selected_tasks = static_cast<uint8_t>(result.tasks.size());
+}
+
+void StrategicPlanner::record_profile_root_candidates(
+    const SokobanLevel& level,
+    const StaticArray<BombCandidate, 256>& candidates,
+    int branch_limit) {
+    if constexpr (!STRATEGY_ENABLE_PROFILE) {
+        (void)level;
+        (void)candidates;
+        (void)branch_limit;
+        return;
+    }
+    if (!active_profile_eval || active_profile_pass >= 3) return;
+    StrategyPassProfile& p = active_profile_eval->passes[active_profile_pass];
+    p.root_candidates = static_cast<uint16_t>(candidates.size());
+    p.root_branch_limit = static_cast<uint8_t>(branch_limit);
+    p.top_count = static_cast<uint8_t>(
+        candidates.size() < STRATEGY_PROFILE_TOP_CANDIDATES ?
+        candidates.size() : STRATEGY_PROFILE_TOP_CANDIDATES);
+
+    for (int i = 0; i < p.top_count; ++i) {
+        const BombCandidate& c = candidates[i];
+        StrategyCandidateProfile& top = p.top[i];
+        if (c.bomb_idx < strategy_bomb_count(level)) {
+            top.bomb_x = level.bombs[c.bomb_idx].x;
+            top.bomb_y = level.bombs[c.bomb_idx].y;
+        }
+        top.wall_x = c.x;
+        top.wall_y = c.y;
+        int score = c.score;
+        if (score > 32767) score = 32767;
+        if (score < -32768) score = -32768;
+        top.score = static_cast<int16_t>(score);
+    }
+}
+
+void StrategicPlanner::record_profile_dfs_node() {
+    if constexpr (!STRATEGY_ENABLE_PROFILE) return;
+    if (!active_profile_eval || active_profile_pass >= 3) return;
+    StrategyPassProfile& p = active_profile_eval->passes[active_profile_pass];
+    if (p.dfs_nodes < 65535) ++p.dfs_nodes;
+}
+
+void StrategicPlanner::record_profile_fast_bfs_call() {
+    if constexpr (!STRATEGY_ENABLE_PROFILE) return;
+    if (!active_profile_eval || active_profile_pass >= 3) return;
+    StrategyPassProfile& p = active_profile_eval->passes[active_profile_pass];
+    if (p.fast_bfs_calls < 65535) ++p.fast_bfs_calls;
+}
+
+void StrategicPlanner::record_profile_candidate_eval() {
+    if constexpr (!STRATEGY_ENABLE_PROFILE) return;
+    if (!active_profile_eval || active_profile_pass >= 3) return;
+    StrategyPassProfile& p = active_profile_eval->passes[active_profile_pass];
+    if (p.candidate_evals < 65535) ++p.candidate_evals;
+}
+
+void StrategicPlanner::record_profile_candidate_kept() {
+    if constexpr (!STRATEGY_ENABLE_PROFILE) return;
+    if (!active_profile_eval || active_profile_pass >= 3) return;
+    StrategyPassProfile& p = active_profile_eval->passes[active_profile_pass];
+    if (p.candidate_kept < 65535) ++p.candidate_kept;
+}
+
+void StrategicPlanner::record_profile_child_branch() {
+    if constexpr (!STRATEGY_ENABLE_PROFILE) return;
+    if (!active_profile_eval || active_profile_pass >= 3) return;
+    StrategyPassProfile& p = active_profile_eval->passes[active_profile_pass];
+    if (p.child_branches < 65535) ++p.child_branches;
+}
+
+void StrategicPlanner::record_profile_logic_build() {
+    if constexpr (!STRATEGY_ENABLE_PROFILE) return;
+    if (!active_profile_eval || active_profile_pass >= 3) return;
+    StrategyPassProfile& p = active_profile_eval->passes[active_profile_pass];
+    if (p.logic_builds < 255) ++p.logic_builds;
+}
+
+void StrategicPlanner::record_profile_post_refine_test() {
+    if constexpr (!STRATEGY_ENABLE_PROFILE) return;
+    if (!active_profile_eval || active_profile_pass >= 3) return;
+    StrategyPassProfile& p = active_profile_eval->passes[active_profile_pass];
+    if (p.post_refine_tests < 65535) ++p.post_refine_tests;
+}
+
+void StrategicPlanner::record_profile_local_clear_call() {
+    if constexpr (!STRATEGY_ENABLE_PROFILE) return;
+    if (!active_profile_eval || active_profile_pass >= 3) return;
+    ++active_profile_eval->passes[active_profile_pass].local_clear_calls;
+}
+
+void StrategicPlanner::record_profile_local_clear_success() {
+    if constexpr (!STRATEGY_ENABLE_PROFILE) return;
+    if (!active_profile_eval || active_profile_pass >= 3) return;
+    ++active_profile_eval->passes[active_profile_pass].local_clear_successes;
+}
+
+void StrategicPlanner::record_profile_materialize_call() {
+    if constexpr (!STRATEGY_ENABLE_PROFILE) return;
+    if (!active_profile_eval || active_profile_pass >= 3) return;
+    ++active_profile_eval->passes[active_profile_pass].materialize_calls;
+}
+
+void StrategicPlanner::record_profile_materialize_success() {
+    if constexpr (!STRATEGY_ENABLE_PROFILE) return;
+    if (!active_profile_eval || active_profile_pass >= 3) return;
+    ++active_profile_eval->passes[active_profile_pass].materialize_successes;
+}
 
 // ============================================================================
 // 2. Phase1 任意箱-任意目标匹配评估辅助函数
@@ -253,6 +993,48 @@ static void evaluate_phase1_any_matching(
     out_distance = best_distance + all_pair_distance / pair_divisor + unreachable_pairs * unreachable_penalty + out_deadlocks * 1000;
 }
 
+static int count_phase1_unreachable_pairs(
+    const SokobanLevel& lvl,
+    int16_t box_dist[MAX_BOXES][MAP_MAX_HEIGHT][MAP_MAX_WIDTH])
+{
+    int unreachable = 0;
+    for (int b = 0; b < lvl.box_count; ++b) {
+        for (int t = 0; t < lvl.target_count; ++t) {
+            point target = lvl.targets[t];
+            if (box_dist[b][target.y][target.x] == INF_DIST) ++unreachable;
+        }
+    }
+    return unreachable;
+}
+
+static bool phase1_result_has_structural_defect(const DFSResult& result) {
+    return result.deadlocks_remaining > 0 || result.unreachable_pairs_remaining > 0;
+}
+
+static bool phase1_result_better_than(
+    const DFSResult& candidate,
+    const DFSResult& baseline,
+    int profit_margin = 0)
+{
+    if (candidate.deadlocks_remaining != baseline.deadlocks_remaining) {
+        return candidate.deadlocks_remaining < baseline.deadlocks_remaining;
+    }
+
+    bool structural_phase =
+        phase1_result_has_structural_defect(candidate) ||
+        phase1_result_has_structural_defect(baseline);
+    if (structural_phase) {
+        if (candidate.unreachable_pairs_remaining != baseline.unreachable_pairs_remaining) {
+            return candidate.unreachable_pairs_remaining < baseline.unreachable_pairs_remaining;
+        }
+        if (candidate.bomb_supply_score != baseline.bomb_supply_score) {
+            return candidate.bomb_supply_score > baseline.bomb_supply_score;
+        }
+    }
+
+    return candidate.net_profit > baseline.net_profit + profit_margin;
+}
+
 
 // ============================================================================
 // 3. 对外入口：评估并生成炸弹任务序列
@@ -268,23 +1050,25 @@ template <GameMode Mode>
 StaticArray<BombTask, MAX_BOMBS> StrategicPlanner::evaluate_and_assign_bombs(const SokobanLevel& level) {
     if (level.bomb_count == 0) return StaticArray<BombTask, MAX_BOMBS>(); 
 
+    this->begin_profile_eval(Mode == GameMode::PHASE1_ANY ? 0 : 1);
     this->cached_level = level;
     DFSResult best_res; 
     best_res.deadlocks_remaining = 9999; 
     best_res.net_profit = -999999;
+    uint8_t selected_profile_pass = 0;
 
     StaticArray<BombTask, MAX_BOMBS> empty_seq;
 #ifdef STRATEGY_DEBUG_PHASE2_RESULT
     auto debug_phase2_result = [](const char* label, const DFSResult& res) {
         if constexpr (Mode == GameMode::PHASE2_SPECIFIC) {
             std::fprintf(stderr, "%s dead=%d profit=%d tasks=%d\n",
-                         label, res.deadlocks_remaining, res.net_profit, res.tasks.size());
+                        label, res.deadlocks_remaining, res.net_profit, res.tasks.size());
             for (int i = 0; i < res.tasks.size(); ++i) {
                 std::fprintf(stderr, "  #%d bomb=(%d,%d) wall=(%d,%d) pushes=%d\n",
-                             i,
-                             res.tasks[i].bomb_start.x, res.tasks[i].bomb_start.y,
-                             res.tasks[i].target_wall.x, res.tasks[i].target_wall.y,
-                             res.tasks[i].box_pushes.size());
+                            i,
+                            res.tasks[i].bomb_start.x, res.tasks[i].bomb_start.y,
+                            res.tasks[i].target_wall.x, res.tasks[i].target_wall.y,
+                            res.tasks[i].box_pushes.size());
             }
         }
     };
@@ -298,7 +1082,9 @@ StaticArray<BombTask, MAX_BOMBS> StrategicPlanner::evaluate_and_assign_bombs(con
     // =========================================================================
     // 阶段 1：极速静态推演（假定无需推箱子即可破局）
     // =========================================================================
+    this->set_profile_pass(0);
     this->dfs_bomb_sequence<Mode, false>(level, level.player_start, empty_seq, 0, 0, best_res);
+    this->record_profile_result(0, best_res);
 
     // =========================================================================
     // 阶段 2：重型动态回退（如果极速推演宣告破产）
@@ -311,19 +1097,28 @@ StaticArray<BombTask, MAX_BOMBS> StrategicPlanner::evaluate_and_assign_bombs(con
         DFSResult soft_res;
         soft_res.deadlocks_remaining = 9999;
         soft_res.net_profit = -999999;
-        this->phase1_soft_bomb_eval = true;
-        this->dfs_bomb_sequence<Mode, false>(level, level.player_start, empty_seq, 0, 0, soft_res);
-        this->phase1_soft_bomb_eval = false;
+        bool hard_direct_or_empty =
+            hard_res.tasks.size() == 0 ||
+            this->are_fast_bomb_tasks_directly_executable(level, hard_res.tasks);
+        bool run_soft_pass = hard_res.deadlocks_remaining > 0 || !hard_direct_or_empty;
+        if (run_soft_pass) {
+            this->phase1_soft_bomb_eval = true;
+            this->set_profile_pass(1);
+            this->dfs_bomb_sequence<Mode, false>(level, level.player_start, empty_seq, 0, 0, soft_res);
+            this->phase1_soft_bomb_eval = false;
+            this->record_profile_result(1, soft_res);
+        }
 
         bool soft_better =
-            soft_res.deadlocks_remaining < hard_res.deadlocks_remaining ||
-            (soft_res.deadlocks_remaining == hard_res.deadlocks_remaining &&
-             soft_res.net_profit > hard_res.net_profit + PHASE1_SOFT_REPLACE_PROFIT_MARGIN);
+            run_soft_pass &&
+            phase1_result_better_than(soft_res, hard_res, PHASE1_SOFT_REPLACE_PROFIT_MARGIN);
         if (soft_better) {
             best_res = soft_res;
             selected_soft_res = true;
+            selected_profile_pass = 1;
         } else {
             best_res = hard_res;
+            selected_profile_pass = 0;
         }
 
         if (best_res.tasks.size() > 0 &&
@@ -636,19 +1431,26 @@ StaticArray<BombTask, MAX_BOMBS> StrategicPlanner::evaluate_and_assign_bombs(con
                     best_res.tasks = best_partial_tasks;
                     best_res.deadlocks_remaining = best_partial_deadlocks;
                     best_res.net_profit = -best_partial_distance;
+                    selected_profile_pass = 1;
                 } else {
-                    if (selected_soft_res) best_res = hard_res;
+                    if (selected_soft_res) {
+                        best_res = hard_res;
+                        selected_profile_pass = 0;
+                    }
                     bool need_dynamic_after_failed_materialize =
                         !selected_soft_res || hard_res.tasks.size() == 0;
                     if (need_dynamic_after_failed_materialize) {
                     DFSResult dynamic_res;
                     dynamic_res.deadlocks_remaining = 9999;
                     dynamic_res.net_profit = -999999;
+                    this->set_profile_pass(2);
                     this->dfs_bomb_sequence<Mode, true>(level, level.player_start, empty_seq, 0, 0, dynamic_res);
+                    this->record_profile_result(2, dynamic_res);
 
                     if (dynamic_res.tasks.size() > 0 &&
-                        dynamic_res.deadlocks_remaining <= best_res.deadlocks_remaining) {
+                        phase1_result_better_than(dynamic_res, best_res)) {
                         best_res = dynamic_res;
+                        selected_profile_pass = 2;
                     }
                     }
                 }
@@ -725,6 +1527,7 @@ StaticArray<BombTask, MAX_BOMBS> StrategicPlanner::evaluate_and_assign_bombs(con
         }
     } else if constexpr (Mode == GameMode::PHASE2_SPECIFIC) {
         DFSResult hard_res = best_res;
+        selected_profile_pass = 0;
 #ifdef STRATEGY_DEBUG_PHASE2_RESULT
         debug_phase2_result(force_phase2_dynamic ? "phase2 hard retry" : "phase2 hard", hard_res);
 #endif
@@ -732,17 +1535,23 @@ StaticArray<BombTask, MAX_BOMBS> StrategicPlanner::evaluate_and_assign_bombs(con
         DFSResult soft_res;
         soft_res.deadlocks_remaining = 9999;
         soft_res.net_profit = -999999;
-        this->phase2_soft_bomb_eval = true;
-        this->dfs_bomb_sequence<Mode, false>(level, level.player_start, empty_seq, 0, 0, soft_res);
-        this->phase2_soft_bomb_eval = false;
+        bool run_soft_pass = hard_res.deadlocks_remaining > 0;
+        if (run_soft_pass) {
+            this->phase2_soft_bomb_eval = true;
+            this->set_profile_pass(1);
+            this->dfs_bomb_sequence<Mode, false>(level, level.player_start, empty_seq, 0, 0, soft_res);
+            this->phase2_soft_bomb_eval = false;
+            this->record_profile_result(1, soft_res);
+        }
 #ifdef STRATEGY_DEBUG_PHASE2_RESULT
         debug_phase2_result(force_phase2_dynamic ? "phase2 soft retry" : "phase2 soft", soft_res);
 #endif
 
         bool soft_better =
-            soft_res.deadlocks_remaining < hard_res.deadlocks_remaining ||
-            (soft_res.deadlocks_remaining == hard_res.deadlocks_remaining &&
-             soft_res.net_profit > hard_res.net_profit);
+            run_soft_pass &&
+            (soft_res.deadlocks_remaining < hard_res.deadlocks_remaining ||
+             (soft_res.deadlocks_remaining == hard_res.deadlocks_remaining &&
+              soft_res.net_profit > hard_res.net_profit));
 
         if (soft_better && soft_res.tasks.size() > 0) {
             auto materialize_phase2_sequence = [&](StaticArray<BombTask, MAX_BOMBS>& seq) -> bool {
@@ -778,27 +1587,46 @@ StaticArray<BombTask, MAX_BOMBS> StrategicPlanner::evaluate_and_assign_bombs(con
             if (materialize_phase2_sequence(materialized_tasks)) {
                 best_res = soft_res;
                 best_res.tasks = materialized_tasks;
+                selected_profile_pass = 1;
             } else {
                 best_res = hard_res;
+                selected_profile_pass = 0;
             }
         } else {
-            best_res = hard_res;
+            if (soft_better && soft_res.deadlocks_remaining < hard_res.deadlocks_remaining) {
+                best_res = soft_res;
+                selected_profile_pass = 1;
+            } else {
+                best_res = hard_res;
+                selected_profile_pass = 0;
+            }
         }
-        force_dynamic = force_phase2_dynamic || best_res.deadlocks_remaining > 0;
+        // Phase2 的动态清障 DFS 非常重，不能仅因静态评估仍有 deadlock 就自动触发。
+        // 主流程会先尝试 Phase2 轻量结果和 Phase1 剩余开路任务；只有这些都失败时，
+        // 才通过 force_phase2_dynamic 显式进入最后兜底。
+        force_dynamic = force_phase2_dynamic;
     }
     if (force_dynamic) {
         // 重置最优记录
         best_res.deadlocks_remaining = 9999; 
         best_res.net_profit = -999999;
         // 启动重型推演引擎
+        this->set_profile_pass(2);
         this->dfs_bomb_sequence<Mode, true>(level, level.player_start, empty_seq, 0, 0, best_res);
+        this->record_profile_result(2, best_res);
+        selected_profile_pass = 2;
 #ifdef STRATEGY_DEBUG_PHASE2_RESULT
         if constexpr (Mode == GameMode::PHASE2_SPECIFIC) debug_phase2_result("phase2 dynamic", best_res);
 #endif
     }
 
+    bool selected_structurally_solved = (best_res.deadlocks_remaining == 0);
+    if constexpr (Mode == GameMode::PHASE1_ANY) {
+        selected_structurally_solved =
+            selected_structurally_solved && best_res.unreachable_pairs_remaining == 0;
+    }
     for (int i = 0; i < best_res.tasks.size(); ++i) {
-        best_res.tasks[i].is_essential = (best_res.deadlocks_remaining == 0);
+        best_res.tasks[i].is_essential = selected_structurally_solved;
         best_res.tasks[i].net_profit = best_res.net_profit;
     }
     if constexpr (Mode == GameMode::PHASE1_ANY) {
@@ -849,37 +1677,6 @@ StaticArray<BombTask, MAX_BOMBS> StrategicPlanner::evaluate_and_assign_bombs(con
             int origin_deadlocks = 0, origin_distance = 0;
             eval_phase1_pairs(work, player, task_idx, before_pair_dist, before_deadlocks, before_distance);
 
-            uint8_t before_box_degree[MAX_BOXES] = {0};
-            uint8_t before_target_degree[MAX_BOXES] = {0};
-            for (int b = 0; b < work.box_count; ++b) {
-                for (int t = 0; t < work.target_count; ++t) {
-                    point target = work.targets[t];
-                    if (before_pair_dist[b][target.y][target.x] != INF_DIST) {
-                        ++before_box_degree[b];
-                        ++before_target_degree[t];
-                    }
-                }
-            }
-            auto unresolved_entity_pressure = [&](point wall) {
-                int pressure = 0;
-                for (int t = 0; t < work.target_count; ++t) {
-                    int missing_boxes = work.box_count - before_target_degree[t];
-                    if (missing_boxes <= 0) continue;
-                    int dist = std::max(std::abs(work.targets[t].x - wall.x),
-                                        std::abs(work.targets[t].y - wall.y));
-                    pressure += (20 - dist) * missing_boxes * 3;
-                }
-                for (int b = 0; b < work.box_count; ++b) {
-                    int missing_targets = work.target_count - before_box_degree[b];
-                    if (missing_targets <= 0) continue;
-                    int dist = std::max(std::abs(work.boxes[b].x - wall.x),
-                                        std::abs(work.boxes[b].y - wall.y));
-                    pressure += (20 - dist) * missing_targets;
-                }
-                return pressure;
-            };
-            int origin_pressure = unresolved_entity_pressure(origin_task.target_wall);
-
             SokobanLevel origin_after = work;
             PlanningCommon::apply_bomb_task_effect(origin_after, origin_task);
             point origin_player = origin_path.empty() ? player : origin_path.back();
@@ -887,93 +1684,223 @@ StaticArray<BombTask, MAX_BOMBS> StrategicPlanner::evaluate_and_assign_bombs(con
 
             BombTask best_task = origin_task;
             StaticArray<point, MAX_PATH_LENGTH> best_path = origin_path;
+            int best_deadlocks = origin_deadlocks;
             int best_distance = origin_distance;
+            int best_execution_score =
+                PlanningCommon::path_time_cost(player, origin_path) +
+                strategy_task_shape_cost(work, player, origin_task, origin_path);
 
-            int origin_wall_count = 0;
-            for (int oy = origin_task.target_wall.y - 1; oy <= origin_task.target_wall.y + 1; ++oy) {
-                for (int ox = origin_task.target_wall.x - 1; ox <= origin_task.target_wall.x + 1; ++ox) {
-                    if (oy > 0 && oy < MAP_MAX_HEIGHT - 1 &&
-                        ox > 0 && ox < MAP_MAX_WIDTH - 1 &&
-                        work.map[oy][ox] == 1) {
-                        ++origin_wall_count;
+            auto eval_full_suffix = [&](const BombTask& first_task,
+                                        int& out_deadlocks,
+                                        int& out_unreachable,
+                                        int& out_distance) -> bool {
+                SokobanLevel suffix_work = work;
+                point suffix_player = player;
+
+                StaticArray<point, MAX_PATH_LENGTH> path;
+                if (!PlanningCommon::get_bomb_push_path(suffix_work, suffix_player, first_task, path)) {
+                    return false;
+                }
+                if (!path.empty()) suffix_player = path.back();
+                PlanningCommon::apply_bomb_task_effect(suffix_work, first_task);
+
+                for (int next = task_idx + 1; next < best_res.tasks.size(); ++next) {
+                    path.clear();
+                    if (!PlanningCommon::get_bomb_push_path(suffix_work, suffix_player, best_res.tasks[next], path)) {
+                        return false;
+                    }
+                    if (!path.empty()) suffix_player = path.back();
+                    PlanningCommon::apply_bomb_task_effect(suffix_work, best_res.tasks[next]);
+                }
+
+                for (int b = 0; b < suffix_work.box_count; ++b) {
+                    this->fast_push_bfs(suffix_work, suffix_work.boxes[b], suffix_player, false,
+                                        candidate_pair_dist[b], true);
+                }
+                evaluate_phase1_any_matching(
+                    suffix_work,
+                    candidate_pair_dist,
+                    best_res.tasks.size(),
+                    out_deadlocks,
+                    out_distance
+                );
+                out_unreachable = count_phase1_unreachable_pairs(suffix_work, candidate_pair_dist);
+                return true;
+            };
+
+            int origin_final_deadlocks = 9999;
+            int origin_final_unreachable = 9999;
+            int origin_final_distance = 999999;
+            bool origin_final_ok = eval_full_suffix(
+                origin_task,
+                origin_final_deadlocks,
+                origin_final_unreachable,
+                origin_final_distance
+            );
+            int best_final_deadlocks = origin_final_deadlocks;
+            int best_final_unreachable = origin_final_unreachable;
+            int best_final_distance = origin_final_distance;
+
+            const bool origin_structurally_solved =
+                origin_final_ok &&
+                origin_final_deadlocks == 0 &&
+                origin_final_unreachable == 0;
+            int best_route_score = PlanningCommon::path_time_cost(player, origin_path);
+#ifdef STRATEGY_DEBUG_PHASE1_REFINEMENT
+            std::fprintf(stderr,
+                        "P1_REFINE task=%d origin bomb=(%d,%d) wall=(%d,%d) exec=%d immediate=(%d,%d) final_ok=%d final=(%d,%d,%d)\n",
+                        task_idx,
+                        origin_task.bomb_start.x, origin_task.bomb_start.y,
+                        origin_task.target_wall.x, origin_task.target_wall.y,
+                        best_execution_score,
+                        origin_deadlocks, origin_distance,
+                        origin_final_ok ? 1 : 0,
+                        origin_final_deadlocks, origin_final_unreachable, origin_final_distance);
+#endif
+
+            auto try_refine_wall = [&](point wall) {
+                if (wall.x <= 0 || wall.x >= MAP_MAX_WIDTH - 1 ||
+                    wall.y <= 0 || wall.y >= MAP_MAX_HEIGHT - 1) {
+                    return;
+                }
+                if (work.map[wall.y][wall.x] != 1) return;
+                if (wall == best_task.target_wall) return;
+
+                this->record_profile_post_refine_test();
+
+                BombTask candidate = origin_task;
+                candidate.target_wall = wall;
+                candidate.box_pushes.clear();
+
+                StaticArray<point, MAX_PATH_LENGTH> candidate_path;
+                if (!PlanningCommon::get_bomb_push_path(work, player, candidate, candidate_path)) return;
+
+                SokobanLevel candidate_after = work;
+                PlanningCommon::apply_bomb_task_effect(candidate_after, candidate);
+                point candidate_player = candidate_path.empty() ? player : candidate_path.back();
+                int candidate_deadlocks = 0, candidate_distance = 0;
+                eval_phase1_pairs(candidate_after, candidate_player, task_idx + 1,
+                                candidate_pair_dist, candidate_deadlocks, candidate_distance);
+
+                int final_deadlocks = 9999;
+                int final_unreachable = 9999;
+                int final_distance = 999999;
+                int candidate_route_score = PlanningCommon::path_time_cost(player, candidate_path);
+                int candidate_execution_score =
+                    candidate_route_score +
+                    strategy_task_shape_cost(work, player, candidate, candidate_path);
+
+                bool choose_candidate = false;
+                if (origin_structurally_solved) {
+                    if (!eval_full_suffix(candidate, final_deadlocks, final_unreachable, final_distance)) return;
+                    bool same_solved_effect =
+                        final_deadlocks == 0 &&
+                        final_unreachable == 0 &&
+                        std::abs(final_distance - best_final_distance) <= 3 &&
+                        candidate_deadlocks <= best_deadlocks &&
+                        candidate_distance <= best_distance + 3;
+
+                    // If the structure is already solved, only allow a local
+                    // same-effect retarget.  This keeps the map3_3 fix intact:
+                    // a far cheaper but semantically different blast center
+                    // should not replace the defect wall just because driving
+                    // the bomb there is shorter.
+                    if (same_solved_effect &&
+                        std::abs(candidate_route_score - best_route_score) <= 8) {
+                        int current_wall_rank = strategy_wall_rank(best_task.target_wall);
+                        int candidate_wall_rank = strategy_wall_rank(wall);
+                        choose_candidate =
+                            candidate_route_score < best_route_score ||
+                            (candidate_route_score <= best_route_score + 8 &&
+                            candidate_wall_rank < current_wall_rank);
+                    }
+                } else if (origin_final_ok) {
+                    if (!eval_full_suffix(candidate, final_deadlocks, final_unreachable, final_distance)) return;
+
+                    bool better_structure =
+                        final_deadlocks < best_final_deadlocks ||
+                        (final_deadlocks == best_final_deadlocks &&
+                        final_unreachable < best_final_unreachable);
+                    bool worse_structure =
+                        final_deadlocks > best_final_deadlocks ||
+                        (final_deadlocks == best_final_deadlocks &&
+                        final_unreachable > best_final_unreachable);
+                    if (better_structure) {
+                        choose_candidate = true;
+                    } else if (!worse_structure) {
+                        bool same_effect =
+                            std::abs(final_distance - best_final_distance) <= 8;
+                        bool easier_same_effect =
+                            same_effect && candidate_execution_score + 10 < best_execution_score;
+                        bool useful_distance_without_route_regression =
+                            best_final_deadlocks == 0 &&
+                            best_final_unreachable == 0 &&
+                            final_distance + 20 < best_final_distance &&
+                            candidate_execution_score <= best_execution_score + 10;
+                        choose_candidate =
+                            easier_same_effect || useful_distance_without_route_regression;
+                    }
+                } else {
+                    bool better_structure =
+                        candidate_deadlocks < best_deadlocks;
+                    bool worse_structure =
+                        candidate_deadlocks > best_deadlocks;
+                    if (better_structure) {
+                        choose_candidate = true;
+                    } else if (!worse_structure) {
+                        bool same_effect =
+                            std::abs(candidate_distance - best_distance) <= 8;
+                        choose_candidate =
+                            same_effect && candidate_execution_score + 10 < best_execution_score;
                     }
                 }
-            }
 
-            for (int dy = -2; dy <= 2; ++dy) {
-                for (int dx = -2; dx <= 2; ++dx) {
+#ifdef STRATEGY_DEBUG_PHASE1_REFINEMENT
+                std::fprintf(stderr,
+                            "  cand wall=(%d,%d) exec=%d immediate=(%d,%d) final=(%d,%d,%d) choose=%d best_exec=%d best_final=(%d,%d,%d)\n",
+                            wall.x, wall.y,
+                            candidate_execution_score,
+                            candidate_deadlocks, candidate_distance,
+                            final_deadlocks, final_unreachable, final_distance,
+                            choose_candidate ? 1 : 0,
+                            best_execution_score,
+                            best_final_deadlocks, best_final_unreachable, best_final_distance);
+#endif
+
+                if (choose_candidate) {
+                    best_task = candidate;
+                    best_path = candidate_path;
+                    best_deadlocks = candidate_deadlocks;
+                    best_distance = candidate_distance;
+                    best_execution_score = candidate_execution_score;
+                    best_route_score = candidate_route_score;
+                    if (origin_final_ok) {
+                        best_final_deadlocks = final_deadlocks;
+                        best_final_unreachable = final_unreachable;
+                        best_final_distance = final_distance;
+                    }
+                }
+            };
+
+            for (int dy = -3; dy <= 3; ++dy) {
+                for (int dx = -3; dx <= 3; ++dx) {
                     if (dx == 0 && dy == 0) continue;
                     point wall = {
                         static_cast<int8_t>(origin_task.target_wall.x + dx),
                         static_cast<int8_t>(origin_task.target_wall.y + dy)
                     };
-                    if (wall.x <= 0 || wall.x >= MAP_MAX_WIDTH - 1 ||
-                        wall.y <= 0 || wall.y >= MAP_MAX_HEIGHT - 1) {
-                        continue;
-                    }
-                    if (work.map[wall.y][wall.x] != 1) continue;
-
-                    BombTask candidate = origin_task;
-                    candidate.target_wall = wall;
-                    candidate.box_pushes.clear();
-
-                    StaticArray<point, MAX_PATH_LENGTH> candidate_path;
-                    if (!PlanningCommon::get_bomb_push_path(work, player, candidate, candidate_path)) continue;
-
-                    SokobanLevel candidate_after = work;
-                    PlanningCommon::apply_bomb_task_effect(candidate_after, candidate);
-                    point candidate_player = candidate_path.empty() ? player : candidate_path.back();
-                    int candidate_deadlocks = 0, candidate_distance = 0;
-                    eval_phase1_pairs(candidate_after, candidate_player, task_idx + 1,
-                                    candidate_pair_dist, candidate_deadlocks, candidate_distance);
-
-                    bool preserves_opened_pairs = true;
-                    int opened_pair_count = 0;
-                    for (int b = 0; b < work.box_count; ++b) {
-                        for (int t = 0; t < work.target_count; ++t) {
-                            point target = work.targets[t];
-                            bool was_blocked = before_pair_dist[b][target.y][target.x] == INF_DIST;
-                            bool origin_opened = origin_pair_dist[b][target.y][target.x] != INF_DIST;
-                            if (was_blocked && origin_opened) {
-                                ++opened_pair_count;
-                                if (candidate_pair_dist[b][target.y][target.x] == INF_DIST) {
-                                    preserves_opened_pairs = false;
-                                    break;
-                                }
-                            }
-                        }
-                        if (!preserves_opened_pairs) break;
-                    }
-                    if (!preserves_opened_pairs) continue;
-                    if (unresolved_entity_pressure(wall) < origin_pressure) continue;
-                    int shared_cleared_walls = 0;
-                    for (int oy = origin_task.target_wall.y - 1; oy <= origin_task.target_wall.y + 1; ++oy) {
-                        for (int ox = origin_task.target_wall.x - 1; ox <= origin_task.target_wall.x + 1; ++ox) {
-                            if (oy <= 0 || oy >= MAP_MAX_HEIGHT - 1 ||
-                                ox <= 0 || ox >= MAP_MAX_WIDTH - 1 ||
-                                work.map[oy][ox] != 1) {
-                                continue;
-                            }
-                            if (std::abs(oy - wall.y) <= 1 && std::abs(ox - wall.x) <= 1) {
-                                ++shared_cleared_walls;
-                            }
-                        }
-                    }
-                    if (origin_wall_count > 0 && shared_cleared_walls * 2 < origin_wall_count) continue;
-                    if (opened_pair_count == 0 && candidate_distance > origin_distance) continue;
-                    if (candidate_deadlocks > origin_deadlocks) continue;
-                    if (candidate_distance > origin_distance + 20) continue;
-
-                    bool shorter_path = candidate_path.size() + 2 < best_path.size();
-                    bool better_phase1_effect =
-                        candidate_deadlocks < origin_deadlocks ||
-                        (candidate_deadlocks == origin_deadlocks && candidate_distance + 20 < best_distance);
-                    if (shorter_path || better_phase1_effect) {
-                        best_task = candidate;
-                        best_path = candidate_path;
-                        best_distance = candidate_distance;
-                    }
+                    try_refine_wall(wall);
                 }
+            }
+
+            for (int dir = 0; dir < 4; ++dir) {
+                point wall = origin_task.bomb_start + MOVE[dir];
+                while (wall.x > 0 && wall.x < MAP_MAX_WIDTH - 1 &&
+                        wall.y > 0 && wall.y < MAP_MAX_HEIGHT - 1 &&
+                        work.map[wall.y][wall.x] != 1) {
+                    wall = wall + MOVE[dir];
+                }
+                try_refine_wall(wall);
             }
 
             best_task.is_essential = origin_task.is_essential;
@@ -982,7 +1909,145 @@ StaticArray<BombTask, MAX_BOMBS> StrategicPlanner::evaluate_and_assign_bombs(con
             if (!best_path.empty()) player = best_path.back();
             PlanningCommon::apply_bomb_task_effect(work, best_task);
         }
+
+        int task_count = best_res.tasks.size();
+        if (task_count > 1 && task_count <= MAX_BOMBS) {
+            point live_bombs[MAX_BOMBS];
+            int live_count = 0;
+            for (int b = 0; b < strategy_bomb_count(level); ++b) {
+                if (level.bombs[b].x != -1 && live_count < MAX_BOMBS) {
+                    live_bombs[live_count++] = level.bombs[b];
+                }
+            }
+
+            if (live_count >= task_count) {
+                BombTask original_tasks[MAX_BOMBS];
+                for (int i = 0; i < task_count; ++i) original_tasks[i] = best_res.tasks[i];
+
+                BombTask best_tasks[MAX_BOMBS];
+                BombTask trial_tasks[MAX_BOMBS];
+                int assignment[MAX_BOMBS] = {-1, -1, -1};
+                bool used_bomb[MAX_BOMBS] = {false, false, false};
+                bool have_best_assignment = false;
+                int best_assignment_score = 2147483647;
+                int original_assignment_score = 2147483647;
+
+                auto segment_cross_penalty = [](point a, point b, point c, point d) {
+                    auto orient = [](point p, point q, point r) {
+                        int v = (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+                        if (v > 0) return 1;
+                        if (v < 0) return -1;
+                        return 0;
+                    };
+                    auto between = [](int a0, int b0, int c0) {
+                        return (a0 <= b0 && b0 <= c0) || (c0 <= b0 && b0 <= a0);
+                    };
+                    auto on_segment = [&](point p, point q, point r) {
+                        return orient(p, q, r) == 0 &&
+                               between(p.x, q.x, r.x) &&
+                               between(p.y, q.y, r.y);
+                    };
+
+                    if (a == c || a == d || b == c || b == d) return 0;
+                    int o1 = orient(a, b, c);
+                    int o2 = orient(a, b, d);
+                    int o3 = orient(c, d, a);
+                    int o4 = orient(c, d, b);
+                    bool crosses = (o1 != o2 && o3 != o4) ||
+                                   on_segment(a, c, b) ||
+                                   on_segment(a, d, b) ||
+                                   on_segment(c, a, d) ||
+                                   on_segment(c, b, d);
+                    return crosses ? 2000 : 0;
+                };
+
+                auto evaluate_assignment = [&](BombTask out_tasks[MAX_BOMBS], int& out_score) -> bool {
+                    SokobanLevel eval_work = level;
+                    point eval_player = level.player_start;
+                    int score = 0;
+
+                    for (int i = 0; i < task_count; ++i) {
+                        BombTask task = original_tasks[i];
+                        task.bomb_start = live_bombs[assignment[i]];
+                        task.box_pushes.clear();
+
+                        if (eval_work.map[task.target_wall.y][task.target_wall.x] != 1) return false;
+
+                        StaticArray<point, MAX_PATH_LENGTH> path;
+                        if (!PlanningCommon::get_bomb_push_path(eval_work, eval_player, task, path)) {
+                            return false;
+                        }
+
+                        score += PlanningCommon::path_time_cost(eval_player, path);
+                        score += strategy_task_shape_cost(eval_work, eval_player, task, path);
+                        score += std::abs(task.bomb_start.x - task.target_wall.x) +
+                                 std::abs(task.bomb_start.y - task.target_wall.y);
+                        if (!path.empty()) eval_player = path.back();
+                        PlanningCommon::apply_bomb_task_effect(eval_work, task);
+                        out_tasks[i] = task;
+                    }
+
+                    for (int i = 0; i < task_count; ++i) {
+                        for (int j = i + 1; j < task_count; ++j) {
+                            score += segment_cross_penalty(
+                                out_tasks[i].bomb_start, out_tasks[i].target_wall,
+                                out_tasks[j].bomb_start, out_tasks[j].target_wall
+                            );
+                        }
+                    }
+
+                    out_score = score;
+                    return true;
+                };
+
+                auto enumerate_assignments = [&](auto&& self, int idx) -> void {
+                    if (idx == task_count) {
+                        int score = 0;
+                        if (!evaluate_assignment(trial_tasks, score)) return;
+
+                        bool is_original = true;
+                        for (int i = 0; i < task_count; ++i) {
+                            if (!(trial_tasks[i].bomb_start == original_tasks[i].bomb_start)) {
+                                is_original = false;
+                                break;
+                            }
+                        }
+                        if (is_original) original_assignment_score = score;
+
+                        if (score < best_assignment_score) {
+                            best_assignment_score = score;
+                            have_best_assignment = true;
+                            for (int i = 0; i < task_count; ++i) best_tasks[i] = trial_tasks[i];
+                        }
+                        return;
+                    }
+
+                    for (int b = 0; b < live_count; ++b) {
+                        if (used_bomb[b]) continue;
+                        used_bomb[b] = true;
+                        assignment[idx] = b;
+                        self(self, idx + 1);
+                        assignment[idx] = -1;
+                        used_bomb[b] = false;
+                    }
+                };
+
+                enumerate_assignments(enumerate_assignments, 0);
+
+                if (have_best_assignment &&
+                    (original_assignment_score == 2147483647 ||
+                     best_assignment_score + 4 < original_assignment_score)) {
+                    for (int i = 0; i < task_count; ++i) {
+                        best_tasks[i].is_essential = original_tasks[i].is_essential;
+                        best_tasks[i].net_profit = original_tasks[i].net_profit;
+                        best_res.tasks[i] = best_tasks[i];
+                    }
+                }
+            }
+        }
+
     }
+    this->record_profile_selected(selected_profile_pass, best_res);
     return best_res.tasks;
 }
 
@@ -1016,6 +2081,8 @@ void StrategicPlanner::dfs_bomb_sequence(
     StaticArray<BombTask, MAX_BOMBS> current_seq, int cost_so_far, 
     int depth, DFSResult& best_res) 
 {
+    this->record_profile_dfs_node();
+    const int current_bomb_count = strategy_bomb_count(current_lvl);
     // =====================================================================
     // 1. 评估当前状态并更新全局最优结果
     // =====================================================================
@@ -1024,12 +2091,14 @@ void StrategicPlanner::dfs_bomb_sequence(
 
     PlanningCommon::calc_player_reach(current_lvl, player_start, {-1,-1}, {-1,-1}, dfs_player_vis[depth]);
 
-    // 计算每个箱子到目标的距离Phase1 后续按任意匹配评估，Phase2 仍按固定对应关系评估
+    // 计算每个箱子到目标的距离。Phase1 保留未使用炸弹作为当前障碍，
+    // 但候选爆破评估不会因“选中哪颗炸弹”而把该炸弹原地删除刷收益。
     for (int b = 0; b < current_lvl.box_count; ++b) {
         if constexpr (Mode == GameMode::PHASE1_ANY) {
-            this->fast_push_bfs(current_lvl, current_lvl.boxes[b], player_start, false, dfs_dist_box[depth][b], this->phase1_soft_bomb_eval);
+            this->fast_push_bfs(current_lvl, current_lvl.boxes[b], player_start, false, dfs_dist_box[depth][b], false);
+            this->fast_push_bfs(current_lvl, current_lvl.boxes[b], player_start, false, phase1_soft_dist_box[depth][b], true);
         } else {
-            this->fast_push_bfs(current_lvl, current_lvl.boxes[b], player_start, false, dfs_dist_box[depth][b], true);
+            this->fast_push_bfs(current_lvl, current_lvl.boxes[b], player_start, false, dfs_dist_box[depth][b], this->phase2_soft_bomb_eval);
         }
 
         if constexpr (Mode == GameMode::PHASE2_SPECIFIC) {
@@ -1044,11 +2113,16 @@ void StrategicPlanner::dfs_bomb_sequence(
         }
     }
     if constexpr (Mode == GameMode::PHASE1_ANY) {
-        evaluate_phase1_any_matching(current_lvl, dfs_dist_box[depth], current_seq.size(), current_deadlocks, current_distance);
+        evaluate_phase1_any_matching(current_lvl, phase1_soft_dist_box[depth], current_seq.size(), current_deadlocks, current_distance);
+    }
+    int current_unreachable_pairs = 9999;
+    if constexpr (Mode == GameMode::PHASE1_ANY) {
+        current_unreachable_pairs = count_phase1_unreachable_pairs(current_lvl, phase1_soft_dist_box[depth]);
     }
 
-    if (current_seq.size() == current_lvl.bomb_count || depth >= MAX_BOMBS) {
-        if (current_deadlocks > 0) return;
+    bool terminal_node = current_seq.size() == current_bomb_count || depth >= MAX_BOMBS;
+    if constexpr (Mode == GameMode::PHASE2_SPECIFIC) {
+        if (terminal_node && current_deadlocks > 0) return;
     }
 
     // 净收益评估：距离越短越好，已选炸弹越多（成本越高）越差
@@ -1058,84 +2132,27 @@ void StrategicPlanner::dfs_bomb_sequence(
         profit = -current_distance - cost_so_far;
     }
     // 更新全局最优结果 [优先级：死锁数量（越少越好）> 净收益（越高越好）]
-    bool allow_update = true;
     if constexpr (Mode == GameMode::PHASE2_SPECIFIC) {
-        allow_update = !(force_phase2_dynamic && current_seq.size() == 0 && current_lvl.bomb_count > 0);
-    }
-    if (allow_update &&
-    (current_deadlocks < best_res.deadlocks_remaining || 
-    (current_deadlocks == best_res.deadlocks_remaining && profit > best_res.net_profit))) {
-        best_res.deadlocks_remaining = current_deadlocks;
-        best_res.net_profit = profit;
-        best_res.tasks = current_seq;
+        bool allow_update = !(force_phase2_dynamic && current_seq.size() == 0 && current_bomb_count > 0);
+        if (allow_update &&
+        (current_deadlocks < best_res.deadlocks_remaining ||
+        (current_deadlocks == best_res.deadlocks_remaining && profit > best_res.net_profit))) {
+            best_res.deadlocks_remaining = current_deadlocks;
+            best_res.net_profit = profit;
+            best_res.tasks = current_seq;
+        }
     }
 
     // 递归边界：如果已选炸弹数量达到上限或没有更多炸弹可选，则返回
-    if (current_seq.size() == current_lvl.bomb_count || depth >= MAX_BOMBS) return;             
-
-
-    // =====================================================================
-    // 2. 识别 “孤岛” 实体
-    // =====================================================================
-    bool target_isolated[MAX_BOXES] = {false};
-    bool box_isolated[MAX_BOXES] = {false};
-    uint8_t phase1_box_target_degree[MAX_BOXES] = {0};
-    uint8_t phase1_target_box_degree[MAX_BOXES] = {0};
-    bool phase2_pair_dead[MAX_BOXES] = {false};
-    int16_t phase2_pair_dist[MAX_BOXES] = {0};
-
-    if constexpr (Mode == GameMode::PHASE1_ANY) {
-        for (int b = 0; b < current_lvl.box_count; ++b) {
-            for (int t = 0; t < current_lvl.target_count; ++t) {
-                point target = current_lvl.targets[t];
-                if (dfs_dist_box[depth][b][target.y][target.x] != INF_DIST) {
-                    ++phase1_box_target_degree[b];
-                    ++phase1_target_box_degree[t];
-                }
-            }
-        }
-    }
-
-    // 抓出无解目标点
     if constexpr (Mode == GameMode::PHASE2_SPECIFIC) {
-        for (int b = 0; b < current_lvl.box_count; ++b) {
-            int t_id = current_lvl.box_ids[b];
-            point target = current_lvl.targets[t_id];
-            phase2_pair_dist[b] = dfs_dist_box[depth][b][target.y][target.x];
-            phase2_pair_dead[b] = (phase2_pair_dist[b] == INF_DIST);
-        }
-    }
-
-    for (int t = 0; t < current_lvl.target_count; ++t) {
-        bool can_be_reached = false;
-        for (int b = 0; b < current_lvl.box_count; ++b) {
-            if constexpr (Mode == GameMode::PHASE1_ANY) {
-                if (dfs_dist_box[depth][b][current_lvl.targets[t].y][current_lvl.targets[t].x] != INF_DIST) { can_be_reached = true; break; }
-            } else {
-                if (current_lvl.box_ids[b] == t && dfs_dist_box[depth][b][current_lvl.targets[t].y][current_lvl.targets[t].x] != INF_DIST) { can_be_reached = true; break; }
-            }
-        }
-        if (!can_be_reached) target_isolated[t] = true;
-    }
-
-    // 抓出无解箱子
-    for (int b = 0; b < current_lvl.box_count; ++b) {
-        bool can_reach_any = false;
-        for (int t = 0; t < current_lvl.target_count; ++t) {
-            if constexpr (Mode == GameMode::PHASE1_ANY) {
-                if (dfs_dist_box[depth][b][current_lvl.targets[t].y][current_lvl.targets[t].x] != INF_DIST) { can_reach_any = true; break; }
-            } else {
-                if (current_lvl.box_ids[b] == t && dfs_dist_box[depth][b][current_lvl.targets[t].y][current_lvl.targets[t].x] != INF_DIST) { can_reach_any = true; break; }
-            }
-        }
-        if (!can_reach_any) box_isolated[b] = true;
+        if (terminal_node) return;
     }
 
 
     // =====================================================================
-    // 3. 计算存活炸弹可达爆破点
+    // 2. 计算存活炸弹可达爆破点
     // =====================================================================
-    for (int m = 0; m < current_lvl.bomb_count; ++m) {
+    for (int m = 0; m < current_bomb_count; ++m) {
         if (current_lvl.bombs[m].x != -1) {  
             if constexpr (!Dynamic) {
                 // 【极速静态模式】：严格把箱子当死墙算距离
@@ -1151,362 +2168,455 @@ void StrategicPlanner::dfs_bomb_sequence(
         }
     }
 
+    // 前三层启用缺陷驱动逻辑层。死锁未清时，后续炸弹是否有价值
+    // 主要取决于它是否继续打开关键结构，而不是普通距离缩短。
+    const bool use_logic_scores = (depth <= 2);
+    if (use_logic_scores) {
+        this->record_profile_logic_build();
+        build_logic_blast_scores<Mode>(
+            current_lvl,
+            dfs_player_vis[depth],
+            Mode == GameMode::PHASE1_ANY ? phase1_soft_dist_box[depth] : dfs_dist_box[depth],
+            logic_blast_scores
+        );
+    }
+    int phase1_current_supply_score = 0;
+    bool phase1_structural_defect_active = false;
+    if constexpr (Mode == GameMode::PHASE1_ANY) {
+        phase1_structural_defect_active = current_deadlocks > 0 || current_unreachable_pairs > 0;
+        phase1_current_supply_score =
+            (phase1_structural_defect_active && use_logic_scores)
+                ? phase1_key_bomb_supply_score(current_lvl, dfs_dist_bomb[depth], logic_blast_scores)
+                : 0;
+
+        bool better = false;
+        if (current_deadlocks < best_res.deadlocks_remaining) {
+            better = true;
+        } else if (current_deadlocks == best_res.deadlocks_remaining) {
+            if (phase1_structural_defect_active) {
+                if (current_unreachable_pairs < best_res.unreachable_pairs_remaining) {
+                    better = true;
+                } else if (current_unreachable_pairs == best_res.unreachable_pairs_remaining &&
+                           phase1_current_supply_score > best_res.bomb_supply_score) {
+                    better = true;
+                }
+            } else if (profit > best_res.net_profit) {
+                better = true;
+            }
+        }
+
+        if (better) {
+            best_res.deadlocks_remaining = current_deadlocks;
+            best_res.net_profit = profit;
+            best_res.unreachable_pairs_remaining = current_unreachable_pairs;
+            best_res.bomb_supply_score = phase1_current_supply_score;
+            best_res.tasks = current_seq;
+        }
+
+        if (terminal_node) return;
+    }
     // 建立候选动作队列，避免无脑展开过多分支
     StaticArray<BombCandidate, 256>& candidates = strategy_dfs_ws.candidates[depth];
+    StaticArray<BombCandidate, 256>& preliminary = strategy_dfs_ws.preliminary[depth];
     candidates.clear();
+    preliminary.clear();
+    std::memset(strategy_dfs_ws.probe_valid[depth], 0, sizeof(strategy_dfs_ws.probe_valid[depth]));
 
-    // =====================================================================
-    // 4. 枚举可爆破墙体并评估打分
-    // =====================================================================
-    for (int m = 0; m < current_lvl.bomb_count; ++m) {
-        if (current_lvl.bombs[m].x == -1) continue;
-
-        // 扫描地图寻找当前炸弹可爆破的墙体
-        // 备注：这些评估较为粗糙，主要是筛选可能有价值的墙壁，价值评估主要依靠上面对死锁和距离的综合评估函数
-        for (int y = 1; y < MAP_MAX_HEIGHT - 1; ++y) {
-            for (int x = 1; x < MAP_MAX_WIDTH - 1; ++x) {
-                if (current_lvl.map[y][x] == 1 && dfs_dist_bomb[depth][m][y][x] != INF_DIST) {
-                    
-                    bool opens_new = false;  // 爆炸是否打通了玩家原本不可达的区域
-                    bool touches_entity = false;  // 爆炸是否覆盖了箱子/目标/其他炸弹等实体
-                    bool touches_box_or_target = false;
-                    int min_shortcut = INF_DIST, max_shortcut = -1;  // 爆炸后玩家到箱子的距离变化范围（评估是否产生有价值的捷径）
-
-                    // 扫描爆炸范围 3x3，评估 (A) 是否覆盖实体、(B) 是否打通新区域、(C) 是否产生明显捷径
-                    int phase1_pair_pressure = 0;
-                    int phase2_pair_pressure = 0;
-                    int structural_score = 0;
-                    int wall_cells_3x3 = 0;
-                    bool left_open = false, right_open = false, up_open = false, down_open = false;
-
-                    for (int dy = -2; dy <= 2; ++dy) {
-                        for (int dx = -2; dx <= 2; ++dx) {
-                            int ny = y + dy, nx = x + dx;
-                            if (ny >= 0 && ny < MAP_MAX_HEIGHT && nx >= 0 && nx < MAP_MAX_WIDTH) {
-                                if (std::abs(dy) <= 1 && std::abs(dx) <= 1 && current_lvl.map[ny][nx] == 1) ++wall_cells_3x3;
-                                if (current_lvl.map[ny][nx] == 0 && std::abs(dy) <= 1 && std::abs(dx) == 2) {
-                                    if (dx < 0) left_open = true;
-                                    else right_open = true;
-                                }
-                                if (current_lvl.map[ny][nx] == 0 && std::abs(dx) <= 1 && std::abs(dy) == 2) {
-                                    if (dy < 0) down_open = true;
-                                    else up_open = true;
-                                }
-                                
-                                // (A) 爆炸区是否覆盖实体
-                                if (std::abs(dy) <= 1 && std::abs(dx) <= 1) {
-                                    for (int b = 0; b < current_lvl.box_count; ++b) {
-                                        if (current_lvl.boxes[b].x == nx && current_lvl.boxes[b].y == ny) touches_box_or_target = true;
-                                    }
-                                    for (int t = 0; t < current_lvl.target_count; ++t) {
-                                        if (current_lvl.targets[t].x == nx && current_lvl.targets[t].y == ny) touches_box_or_target = true;
-                                    }
-                                    if (PlanningCommon::has_entity(current_lvl, nx, ny, m)) touches_entity = true;
-                                }
-                                // (B) 是否打通玩家原不可达区域
-                                if (current_lvl.map[ny][nx] == 0 && !dfs_player_vis[depth][ny][nx]) {
-                                    if (std::abs(dy) <= 1 && std::abs(dx) <= 1) opens_new = true;
-                                    else if ((std::abs(dy) <= 1 && std::abs(dx) == 2) || (std::abs(dx) <= 1 && std::abs(dy) == 2)) opens_new = true;
-                                }
-                                // (C) 统计局部捷径差异
-                                if (std::abs(dy) <= 1 && std::abs(dx) <= 1) {
-                                    for (int b = 0; b < current_lvl.box_count; ++b) {
-                                        int d = dfs_dist_box[depth][b][ny][nx];
-                                        if (d != INF_DIST) {
-                                            if (d < min_shortcut) min_shortcut = d;
-                                            if (d > max_shortcut) max_shortcut = d;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // 找出这堵墙到最近“孤岛目标点”和“孤岛箱子”的切比雪夫距离 (因为炸弹是方形爆炸区)
-                    int min_iso_target_dist = 999;
-                    for (int t = 0; t < current_lvl.target_count; ++t) {
-                        if (target_isolated[t]) {
-                            int dist = std::max(std::abs(current_lvl.targets[t].x - x), std::abs(current_lvl.targets[t].y - y));
-                            if (dist < min_iso_target_dist) min_iso_target_dist = dist;
-                        }
-                    }
-                    int min_iso_box_dist = 999;
-                    for (int b = 0; b < current_lvl.box_count; ++b) {
-                        if (box_isolated[b]) {
-                            int dist = std::max(std::abs(current_lvl.boxes[b].x - x), std::abs(current_lvl.boxes[b].y - y));
-                            if (dist < min_iso_box_dist) min_iso_box_dist = dist;
-                        }
-                    }
-
-                    int shortcut_span = 0;
-                    if (min_shortcut != INF_DIST && max_shortcut >= 0) {
-                        shortcut_span = max_shortcut - min_shortcut;
-                    }
-
-                    // 剪枝：无连通收益、无实体收益、无明显捷径收益
-                    if constexpr (Mode == GameMode::PHASE1_ANY) {
-                        structural_score += wall_cells_3x3 * 35;
-                        if ((left_open && right_open) || (up_open && down_open)) structural_score += 220;
-                        if ((left_open || right_open) && (up_open || down_open)) structural_score += 80;
-
-                        int phase1_mobility_gate_score = 0;
-                        auto in_blast = [&](int px, int py) {
-                            return px > 0 && px < MAP_MAX_WIDTH - 1 &&
-                                py > 0 && py < MAP_MAX_HEIGHT - 1 &&
-                                std::abs(px - x) <= 1 && std::abs(py - y) <= 1;
-                        };
-                        auto floor_before = [&](point p) {
-                            return p.x >= 0 && p.x < MAP_MAX_WIDTH &&
-                                p.y >= 0 && p.y < MAP_MAX_HEIGHT &&
-                                current_lvl.map[p.y][p.x] == 0;
-                        };
-                        auto floor_after = [&](point p) {
-                            return floor_before(p) || in_blast(p.x, p.y);
-                        };
-
-                        // Phase1 is an any-box/any-target matching problem. A good wall often
-                        // creates a new push lane or target entry, even before a full push BFS
-                        // can prove the exact final pairing.
-                        for (int b = 0; b < current_lvl.box_count; ++b) {
-                            int missing_targets = current_lvl.target_count - phase1_box_target_degree[b];
-                            if (missing_targets <= 0) continue;
-
-                            int best_lane_score = 0;
-                            for (int d = 0; d < 4; ++d) {
-                                point push_from = current_lvl.boxes[b] - MOVE[d];
-                                point push_to = current_lvl.boxes[b] + MOVE[d];
-                                if (!floor_after(push_from) || !floor_after(push_to)) continue;
-                                if (floor_before(push_from) && floor_before(push_to)) continue;
-
-                                int lane_score = 240 + missing_targets * 80;
-                                if (phase1_box_target_degree[b] == 0) lane_score += 520;
-                                else if (phase1_box_target_degree[b] == 1) lane_score += 220;
-
-                                int bdist = std::max(std::abs(current_lvl.boxes[b].x - x), std::abs(current_lvl.boxes[b].y - y));
-                                if (bdist <= 2) lane_score += (3 - bdist) * 90;
-                                if (lane_score > best_lane_score) best_lane_score = lane_score;
-                            }
-                            phase1_mobility_gate_score += best_lane_score;
-                        }
-
-                        for (int t = 0; t < current_lvl.target_count; ++t) {
-                            int missing_boxes = current_lvl.box_count - phase1_target_box_degree[t];
-                            if (missing_boxes <= 0) continue;
-
-                            int best_entry_score = 0;
-                            for (int d = 0; d < 4; ++d) {
-                                point box_prev = current_lvl.targets[t] - MOVE[d];
-                                point player_prev = current_lvl.targets[t] - MOVE[d] - MOVE[d];
-                                if (!floor_after(box_prev) || !floor_after(player_prev)) continue;
-                                if (floor_before(box_prev) && floor_before(player_prev)) continue;
-
-                                int entry_score = 240 + missing_boxes * 80;
-                                if (phase1_target_box_degree[t] == 0) entry_score += 560;
-                                else if (phase1_target_box_degree[t] == 1) entry_score += 240;
-
-                                int tdist = std::max(std::abs(current_lvl.targets[t].x - x), std::abs(current_lvl.targets[t].y - y));
-                                if (tdist <= 2) entry_score += (3 - tdist) * 90;
-                                if (entry_score > best_entry_score) best_entry_score = entry_score;
-                            }
-                            phase1_mobility_gate_score += best_entry_score;
-                        }
-                        phase1_pair_pressure += phase1_mobility_gate_score;
-
-                        int phase1_entity_direction_score = 0;
-                        point bomb_pos = current_lvl.bombs[m];
-                        for (int b = 0; b < current_lvl.box_count; ++b) {
-                            int missing_targets = current_lvl.target_count - phase1_box_target_degree[b];
-                            if (missing_targets <= 0) continue;
-                            int old_dist = std::abs(bomb_pos.x - current_lvl.boxes[b].x) +
-                                        std::abs(bomb_pos.y - current_lvl.boxes[b].y);
-                            int new_dist = std::abs(x - current_lvl.boxes[b].x) +
-                                        std::abs(y - current_lvl.boxes[b].y);
-                            int delta = old_dist - new_dist;
-                            if (delta > 0) phase1_entity_direction_score += delta * missing_targets * 45;
-                            else if (delta < 0) phase1_entity_direction_score += delta * 12;
-                        }
-                        for (int t = 0; t < current_lvl.target_count; ++t) {
-                            int missing_boxes = current_lvl.box_count - phase1_target_box_degree[t];
-                            if (missing_boxes <= 0) continue;
-                            int old_dist = std::abs(bomb_pos.x - current_lvl.targets[t].x) +
-                                        std::abs(bomb_pos.y - current_lvl.targets[t].y);
-                            int new_dist = std::abs(x - current_lvl.targets[t].x) +
-                                        std::abs(y - current_lvl.targets[t].y);
-                            int delta = old_dist - new_dist;
-                            if (delta > 0) phase1_entity_direction_score += delta * missing_boxes * 35;
-                            else if (delta < 0) phase1_entity_direction_score += delta * 10;
-                        }
-                        phase1_pair_pressure += phase1_entity_direction_score / 6;
-
-                        for (int t = 0; t < current_lvl.target_count; ++t) {
-                            int missing_boxes = current_lvl.box_count - phase1_target_box_degree[t];
-                            if (missing_boxes <= 0) continue;
-                            int tdist = std::max(std::abs(current_lvl.targets[t].x - x), std::abs(current_lvl.targets[t].y - y));
-                            if (tdist <= 5) {
-                                phase1_pair_pressure += (6 - tdist) * missing_boxes * 45;
-                                if (phase1_target_box_degree[t] == 0) phase1_pair_pressure += 260;
-                                else if (phase1_target_box_degree[t] == 1) phase1_pair_pressure += 130;
-                            }
-                        }
-
-                        for (int b = 0; b < current_lvl.box_count; ++b) {
-                            int missing_targets = current_lvl.target_count - phase1_box_target_degree[b];
-                            if (missing_targets <= 0) continue;
-
-                            int min_blast_push = INF_DIST;
-                            for (int by = y - 1; by <= y + 1; ++by) {
-                                for (int bx = x - 1; bx <= x + 1; ++bx) {
-                                    if (by < 0 || by >= MAP_MAX_HEIGHT || bx < 0 || bx >= MAP_MAX_WIDTH) continue;
-                                    int d = dfs_dist_box[depth][b][by][bx];
-                                    if (d < min_blast_push) min_blast_push = d;
-                                }
-                            }
-
-                            int bdist = std::max(std::abs(current_lvl.boxes[b].x - x), std::abs(current_lvl.boxes[b].y - y));
-                            if (min_blast_push != INF_DIST) phase1_pair_pressure += 80 + missing_targets * 45;
-                            if (bdist <= 4) {
-                                phase1_pair_pressure += (5 - bdist) * missing_targets * 35;
-                                if (phase1_box_target_degree[b] == 0) phase1_pair_pressure += 260;
-                                else if (phase1_box_target_degree[b] == 1) phase1_pair_pressure += 130;
-                            }
-
-                            if (min_blast_push == INF_DIST) continue;
-                            for (int t = 0; t < current_lvl.target_count; ++t) {
-                                point target = current_lvl.targets[t];
-                                if (dfs_dist_box[depth][b][target.y][target.x] != INF_DIST) continue;
-                                int tdist = std::max(std::abs(target.x - x), std::abs(target.y - y));
-                                if (tdist <= 5) phase1_pair_pressure += (6 - tdist) * 90;
-                            }
-                        }
-                    }
-                    if constexpr (Mode == GameMode::PHASE2_SPECIFIC) {
-                        structural_score += wall_cells_3x3 * 25;
-                        if ((left_open && right_open) || (up_open && down_open)) structural_score += 160;
-
-                        for (int b = 0; b < current_lvl.box_count; ++b) {
-                            int t_id = current_lvl.box_ids[b];
-                            point target = current_lvl.targets[t_id];
-                            int tdist = std::max(std::abs(target.x - x), std::abs(target.y - y));
-                            int bdist = std::max(std::abs(current_lvl.boxes[b].x - x), std::abs(current_lvl.boxes[b].y - y));
-
-                            int min_blast_push = INF_DIST;
-                            for (int by = y - 1; by <= y + 1; ++by) {
-                                for (int bx = x - 1; bx <= x + 1; ++bx) {
-                                    if (by < 0 || by >= MAP_MAX_HEIGHT || bx < 0 || bx >= MAP_MAX_WIDTH) continue;
-                                    int d = dfs_dist_box[depth][b][by][bx];
-                                    if (d < min_blast_push) min_blast_push = d;
-                                }
-                            }
-
-                            int pair_score = 0;
-                            if (phase2_pair_dead[b]) {
-                                if (tdist <= 5) pair_score += 420 + (6 - tdist) * 130;
-                                if (bdist <= 4) pair_score += 260 + (5 - bdist) * 80;
-                                if (min_blast_push != INF_DIST) pair_score += 260;
-                                if (min_blast_push != INF_DIST && tdist <= 5) pair_score += 650 + (6 - tdist) * 160;
-                                if (target_isolated[t_id] && tdist <= 5) pair_score += 350;
-                                if (box_isolated[b] && bdist <= 4) pair_score += 300;
-                            } else {
-                                int approx = (min_blast_push == INF_DIST) ? INF_DIST : min_blast_push + tdist;
-                                if (approx + 2 < phase2_pair_dist[b]) {
-                                    pair_score += (phase2_pair_dist[b] - approx) * 45;
-                                }
-                                if (tdist <= 3 && min_blast_push != INF_DIST) pair_score += 140;
-                            }
-
-                            bool between_x = (x >= std::min(current_lvl.boxes[b].x, target.x) - 1 &&
-                                            x <= std::max(current_lvl.boxes[b].x, target.x) + 1);
-                            bool between_y = (y >= std::min(current_lvl.boxes[b].y, target.y) - 1 &&
-                                            y <= std::max(current_lvl.boxes[b].y, target.y) + 1);
-                            if (between_x && between_y && (tdist <= 6 || bdist <= 6)) pair_score += phase2_pair_dead[b] ? 220 : 80;
-
-                            phase2_pair_pressure += pair_score;
-                        }
-                    }
-
-                    bool phase1_promising = false;
-                    if constexpr (Mode == GameMode::PHASE1_ANY) {
-                        phase1_promising = (phase1_pair_pressure > 0 || structural_score >= 220);
-                    }
-                    bool phase2_promising = false;
-                    if constexpr (Mode == GameMode::PHASE2_SPECIFIC) {
-                        phase2_promising = (phase2_pair_pressure > 0 || structural_score >= 160);
-                    }
-                    if (!opens_new && !touches_entity && !phase1_promising && !phase2_promising && shortcut_span <= 4 && min_iso_target_dist > 5 && min_iso_box_dist > 5) continue;
-
-                    // 综合评估打分：优先级 = 实体覆盖 > 新区域 > 捷径提升 - 距离惩罚
-                    int score = shortcut_span * 10;
-                    if constexpr (Mode == GameMode::PHASE1_ANY) {
-                        if (touches_box_or_target) score += 500;
-                        else if (touches_entity) score += 80;
-                    } else {
-                        if (touches_entity) score += 500;
-                    }
-                    if (opens_new) score += 300;
-                    if constexpr (Mode == GameMode::PHASE1_ANY) {
-                        score += phase1_pair_pressure + structural_score;
-                    }
-                    if constexpr (Mode == GameMode::PHASE2_SPECIFIC) {
-                        score += phase2_pair_pressure + structural_score;
-                    }
-                    score -= dfs_dist_bomb[depth][m][y][x] * 15; // 严厉惩罚远距离推行
-
-                    // 孤岛解救加分：切比雪夫距离 <= 2 意味着爆炸(半径1)将直接接触该实体，或者贴在它脸上！
-                    if (min_iso_target_dist <= 2) score += 600;
-                    else if (min_iso_target_dist <= 4) score += 300;
-                    else if (min_iso_target_dist <= 5) score += 100;
-                    if (min_iso_target_dist <= 6) score += (6 - min_iso_target_dist) * 80;
-
-                    if (min_iso_box_dist <= 2) score += 600; 
-                    else if (min_iso_box_dist <= 4) score += 300;    
-                    else if (min_iso_box_dist <= 5) score += 100;
-                    if (min_iso_box_dist <= 6) score += (6 - min_iso_box_dist) * 60;
-
-                    if constexpr (Mode == GameMode::PHASE1_ANY) {
-                        int best_other_bomb_dist = INF_DIST;
-                        for (int om = 0; om < current_lvl.bomb_count; ++om) {
-                            if (om == m || current_lvl.bombs[om].x == -1) continue;
-                            int od = dfs_dist_bomb[depth][om][y][x];
-                            if (od < best_other_bomb_dist) best_other_bomb_dist = od;
-                        }
-                        int self_bomb_dist = dfs_dist_bomb[depth][m][y][x];
-                        if (best_other_bomb_dist != INF_DIST && self_bomb_dist > best_other_bomb_dist + 1) {
-                            score -= (self_bomb_dist - best_other_bomb_dist) * 220;
-                        }
-                    }
-
-                    // 【安全防御】：防止溢出
-                    if (candidates.size() < 255) {
-                        candidates.push_back({(uint8_t)m, (int8_t)x, (int8_t)y, score});
-                    }
-                }
-            }
-        }
-    }
-
-    // =====================================================================
-    // 5. 对候选动作进行排序并限制分支数量，进入下一层递归
-    // =====================================================================
-
-    // 对筛选出的候选墙壁进行排序
-    std::sort(candidates.begin(), candidates.end());
-    if constexpr (Mode == GameMode::PHASE1_ANY) {
-        for (int i = 0; i < candidates.size(); ++i) {
-            int redundancy_penalty = 0;
-            for (int j = 0; j < i; ++j) {
-                int dx = std::abs(candidates[i].x - candidates[j].x);
-                int dy = std::abs(candidates[i].y - candidates[j].y);
-                if (dx == 0 && dy == 0) redundancy_penalty += 900;
-                else if (dx <= 1 && dy <= 1) redundancy_penalty += 420;
-            }
-            candidates[i].score -= redundancy_penalty;
-        }
-        std::sort(candidates.begin(), candidates.end());
-    }
     int selection_limit = 10;
     if constexpr (Mode == GameMode::PHASE1_ANY) selection_limit = PHASE1_SELECTION_RESTRICTIONS;
     else if constexpr (Mode == GameMode::PHASE2_SPECIFIC) selection_limit = PHASE2_SELECTION_RESTRICTIONS;
+    int heavy_eval_limit = 255;
+    if (depth == 1) heavy_eval_limit = 12;
+    else if (depth > 1) heavy_eval_limit = selection_limit * 2;
+
+    // =====================================================================
+    // 3. 按缺陷类型生成候选，并用一次真实爆破评估过滤
+    // =====================================================================
+    bool structural_defect_active = current_deadlocks > 0;
+    if constexpr (Mode == GameMode::PHASE1_ANY) {
+        structural_defect_active = phase1_structural_defect_active;
+    }
+
+    auto apply_probe_blast = [](SokobanLevel& lvl, point wall) {
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                int ny = wall.y + dy;
+                int nx = wall.x + dx;
+                if (ny > 0 && ny < MAP_MAX_HEIGHT - 1 &&
+                    nx > 0 && nx < MAP_MAX_WIDTH - 1) {
+                    lvl.map[ny][nx] = 0;
+                }
+            }
+        }
+    };
+
+    auto eval_probe_state = [&](const SokobanLevel& lvl,
+                                point eval_player,
+                                int selected_count,
+                                int& out_deadlocks,
+                                int& out_unreachable,
+                                int& out_distance) {
+        out_deadlocks = 0;
+        out_unreachable = 9999;
+        out_distance = 0;
+
+        if constexpr (Mode == GameMode::PHASE1_ANY) {
+            for (int b = 0; b < lvl.box_count; ++b) {
+                this->fast_push_bfs(lvl, lvl.boxes[b], eval_player, false,
+                                    phase1_candidate_dist[b], true);
+            }
+            evaluate_phase1_any_matching(
+                lvl,
+                phase1_candidate_dist,
+                selected_count,
+                out_deadlocks,
+                out_distance
+            );
+            out_unreachable = count_phase1_unreachable_pairs(lvl, phase1_candidate_dist);
+        } else {
+            for (int b = 0; b < lvl.box_count; ++b) {
+                this->fast_push_bfs(lvl, lvl.boxes[b], eval_player, false,
+                                    phase1_candidate_dist[b], this->phase2_soft_bomb_eval);
+                int t_id = lvl.box_ids[b];
+                if (t_id >= lvl.target_count) {
+                    out_deadlocks += 10;
+                    continue;
+                }
+                point target = lvl.targets[t_id];
+                int d = phase1_candidate_dist[b][target.y][target.x];
+                if (d == INF_DIST) out_deadlocks += 10;
+                else out_distance += d;
+            }
+        }
+    };
+
+    auto eval_probe_supply = [&](const SokobanLevel& lvl, point eval_player) -> int {
+        int supply = 0;
+        if constexpr (Mode == GameMode::PHASE1_ANY) {
+            if (!phase1_structural_defect_active || !use_logic_scores) return 0;
+            for (int b = 0; b < strategy_bomb_count(lvl); ++b) {
+                if (lvl.bombs[b].x == -1) continue;
+                this->fast_push_bfs(
+                    lvl,
+                    lvl.bombs[b],
+                    eval_player,
+                    true,
+                    phase1_candidate_bomb_dist[b],
+                    this->phase1_soft_bomb_eval
+                );
+            }
+            supply = phase1_key_bomb_supply_score(
+                lvl,
+                phase1_candidate_bomb_dist,
+                logic_blast_scores
+            );
+        }
+        return supply;
+    };
+
+    auto keep_candidate = [&](BombCandidate candidate) {
+        this->record_profile_candidate_kept();
+        if (candidates.size() < 255) {
+            candidates.push_back(candidate);
+            return;
+        }
+
+        int worst = 0;
+        for (int i = 1; i < candidates.size(); ++i) {
+            if (candidates[i].score < candidates[worst].score) worst = i;
+        }
+        if (candidate.score > candidates[worst].score) {
+            candidates[worst] = candidate;
+        }
+    };
+
+    auto keep_preliminary_candidate = [&](BombCandidate candidate) {
+        if (preliminary.size() < 255) {
+            preliminary.push_back(candidate);
+            return;
+        }
+
+        int worst = 0;
+        for (int i = 1; i < preliminary.size(); ++i) {
+            if (preliminary[i].score < preliminary[worst].score) worst = i;
+        }
+        if (candidate.score > preliminary[worst].score) {
+            preliminary[worst] = candidate;
+        }
+    };
+
+    auto heavy_evaluate_candidate = [&](const BombCandidate& pre) {
+        int m = pre.bomb_idx;
+        int x = pre.x;
+        int y = pre.y;
+        if (m < 0 || m >= current_bomb_count || current_lvl.bombs[m].x == -1) return;
+        if (x <= 0 || x >= MAP_MAX_WIDTH - 1 || y <= 0 || y >= MAP_MAX_HEIGHT - 1) return;
+        if (current_lvl.map[y][x] != 1 || dfs_dist_bomb[depth][m][y][x] == INF_DIST) return;
+
+        this->record_profile_candidate_eval();
+
+        int logic_score = use_logic_scores ? logic_blast_scores.score[y][x] : 0;
+        int l1_hits = use_logic_scores ? logic_blast_scores.l1_hits[y][x] : 0;
+        int l2_hits = use_logic_scores ? logic_blast_scores.l2_hits[y][x] : 0;
+        int l3_hits = use_logic_scores ? logic_blast_scores.l3_hits[y][x] : 0;
+        int supply_hits = use_logic_scores ? logic_blast_scores.bomb_unlock_hits[y][x] : 0;
+        bool key_defect_wall = logic_score > 0 || l1_hits > 0 || l2_hits > 0 ||
+                               l3_hits > 0 || supply_hits > 0;
+
+        int weak_open_score = 0;
+        int wall_mass = 0;
+        int entity_touch_score = 0;
+        bool opens_unreachable_floor = false;
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                int ny = y + dy;
+                int nx = x + dx;
+                if (ny <= 0 || ny >= MAP_MAX_HEIGHT - 1 ||
+                    nx <= 0 || nx >= MAP_MAX_WIDTH - 1) {
+                    continue;
+                }
+                if (current_lvl.map[ny][nx] == 1) ++wall_mass;
+                if (current_lvl.map[ny][nx] == 0 && !dfs_player_vis[depth][ny][nx]) {
+                    opens_unreachable_floor = true;
+                    weak_open_score += 700;
+                }
+                for (int b = 0; b < current_lvl.box_count; ++b) {
+                    if (current_lvl.boxes[b].x == nx && current_lvl.boxes[b].y == ny) {
+                        entity_touch_score += 900;
+                    }
+                }
+                for (int t = 0; t < current_lvl.target_count; ++t) {
+                    if (current_lvl.targets[t].x == nx && current_lvl.targets[t].y == ny) {
+                        entity_touch_score += 700;
+                    }
+                }
+                if (PlanningCommon::has_entity(current_lvl, nx, ny, m)) {
+                    entity_touch_score += 200;
+                }
+            }
+        }
+
+        int after_deadlocks = 0;
+        int after_unreachable = 9999;
+        int after_distance = 0;
+        if (strategy_dfs_ws.probe_valid[depth][y][x]) {
+            after_deadlocks = strategy_dfs_ws.probe_deadlocks[depth][y][x];
+            after_unreachable = strategy_dfs_ws.probe_unreachable[depth][y][x];
+            after_distance = strategy_dfs_ws.probe_distance[depth][y][x];
+        } else {
+            SokobanLevel probe_lvl = current_lvl;
+            point wall = {static_cast<int8_t>(x), static_cast<int8_t>(y)};
+            apply_probe_blast(probe_lvl, wall);
+            eval_probe_state(
+                probe_lvl,
+                wall,
+                current_seq.size() + 1,
+                after_deadlocks,
+                after_unreachable,
+                after_distance
+            );
+            strategy_dfs_ws.probe_valid[depth][y][x] = true;
+            strategy_dfs_ws.probe_deadlocks[depth][y][x] = after_deadlocks;
+            strategy_dfs_ws.probe_unreachable[depth][y][x] = after_unreachable;
+            strategy_dfs_ws.probe_distance[depth][y][x] = after_distance;
+        }
+
+        int deadlock_gain = current_deadlocks - after_deadlocks;
+        int unreachable_gain = 0;
+        if constexpr (Mode == GameMode::PHASE1_ANY) {
+            unreachable_gain = current_unreachable_pairs - after_unreachable;
+        }
+        int distance_gain = current_distance - after_distance;
+
+        int supply_gain = 0;
+        if constexpr (Mode == GameMode::PHASE1_ANY) {
+            if (current_seq.size() + 1 < current_bomb_count) {
+                SokobanLevel probe_lvl = current_lvl;
+                point wall = {static_cast<int8_t>(x), static_cast<int8_t>(y)};
+                apply_probe_blast(probe_lvl, wall);
+                SokobanLevel supply_lvl = probe_lvl;
+                if (m < strategy_bomb_count(supply_lvl)) supply_lvl.bombs[m] = {-1, -1};
+                supply_gain = eval_probe_supply(supply_lvl, wall) - phase1_current_supply_score;
+            }
+        }
+
+        bool direct_fix = deadlock_gain > 0;
+        if constexpr (Mode == GameMode::PHASE1_ANY) {
+            direct_fix = direct_fix || unreachable_gain > 0;
+        }
+        bool supply_fix = supply_gain > 120;
+        bool non_regressing_key_defect = key_defect_wall && deadlock_gain >= 0;
+        if constexpr (Mode == GameMode::PHASE1_ANY) {
+            non_regressing_key_defect = non_regressing_key_defect && unreachable_gain >= 0;
+        }
+
+        bool keep = direct_fix || supply_fix || non_regressing_key_defect;
+        if (!structural_defect_active) {
+            keep = keep || distance_gain > 0 || opens_unreachable_floor || entity_touch_score > 0;
+        }
+        if (!keep) return;
+
+        int score = 0;
+        score += deadlock_gain * 900000;
+        if constexpr (Mode == GameMode::PHASE1_ANY) {
+            score += unreachable_gain * 70000;
+        }
+        score += l1_hits * 50000;
+        score += l3_hits * 36000;
+        score += l2_hits * 24000;
+        score += supply_hits * 18000;
+        score += logic_score;
+
+        if (opens_unreachable_floor) score += 9000 + weak_open_score;
+        if (supply_gain > 0) score += 22000 + std::min(supply_gain, 8000) * 5;
+        else if (supply_gain < 0 && structural_defect_active) score += supply_gain * 2;
+
+        if (distance_gain > 0) score += distance_gain * (structural_defect_active ? 14 : 32);
+        else score += distance_gain * (structural_defect_active ? 6 : 18);
+
+        score += wall_mass * 260 + entity_touch_score;
+        score -= dfs_dist_bomb[depth][m][y][x] * (structural_defect_active ? 12 : 18);
+
+        if (structural_defect_active && !direct_fix && !supply_fix && logic_score <= 0) {
+            score -= 60000;
+        }
+
+        keep_candidate({static_cast<uint8_t>(m),
+                        static_cast<int8_t>(x),
+                        static_cast<int8_t>(y),
+                        score});
+    };
+
+    for (int m = 0; m < current_bomb_count; ++m) {
+        if (current_lvl.bombs[m].x == -1) continue;
+
+        for (int y = 1; y < MAP_MAX_HEIGHT - 1; ++y) {
+            for (int x = 1; x < MAP_MAX_WIDTH - 1; ++x) {
+                if (current_lvl.map[y][x] != 1 || dfs_dist_bomb[depth][m][y][x] == INF_DIST) {
+                    continue;
+                }
+                int logic_score = use_logic_scores ? logic_blast_scores.score[y][x] : 0;
+                int l1_hits = use_logic_scores ? logic_blast_scores.l1_hits[y][x] : 0;
+                int l2_hits = use_logic_scores ? logic_blast_scores.l2_hits[y][x] : 0;
+                int l3_hits = use_logic_scores ? logic_blast_scores.l3_hits[y][x] : 0;
+                int supply_hits = use_logic_scores ? logic_blast_scores.bomb_unlock_hits[y][x] : 0;
+                bool key_defect_wall = logic_score > 0 || l1_hits > 0 || l2_hits > 0 ||
+                                       l3_hits > 0 || supply_hits > 0;
+
+                int weak_open_score = 0;
+                int wall_mass = 0;
+                int entity_touch_score = 0;
+                bool opens_unreachable_floor = false;
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        int ny = y + dy;
+                        int nx = x + dx;
+                        if (ny <= 0 || ny >= MAP_MAX_HEIGHT - 1 ||
+                            nx <= 0 || nx >= MAP_MAX_WIDTH - 1) {
+                            continue;
+                        }
+                        if (current_lvl.map[ny][nx] == 1) ++wall_mass;
+                        if (current_lvl.map[ny][nx] == 0 && !dfs_player_vis[depth][ny][nx]) {
+                            opens_unreachable_floor = true;
+                            weak_open_score += 700;
+                        }
+                        for (int b = 0; b < current_lvl.box_count; ++b) {
+                            if (current_lvl.boxes[b].x == nx && current_lvl.boxes[b].y == ny) {
+                                entity_touch_score += 900;
+                            }
+                        }
+                        for (int t = 0; t < current_lvl.target_count; ++t) {
+                            if (current_lvl.targets[t].x == nx && current_lvl.targets[t].y == ny) {
+                                entity_touch_score += 700;
+                            }
+                        }
+                        if (PlanningCommon::has_entity(current_lvl, nx, ny, m)) {
+                            entity_touch_score += 200;
+                        }
+                    }
+                }
+
+                if (structural_defect_active && !key_defect_wall && !opens_unreachable_floor) {
+                    continue;
+                }
+                if (!structural_defect_active && !key_defect_wall &&
+                    !opens_unreachable_floor && entity_touch_score == 0 && wall_mass < 3) {
+                    continue;
+                }
+
+                int cheap_score = 0;
+                cheap_score += l1_hits * 50000;
+                cheap_score += l3_hits * 36000;
+                cheap_score += l2_hits * 24000;
+                cheap_score += supply_hits * 18000;
+                cheap_score += logic_score;
+                if (opens_unreachable_floor) cheap_score += 9000 + weak_open_score;
+                cheap_score += wall_mass * 260 + entity_touch_score;
+                cheap_score -= dfs_dist_bomb[depth][m][y][x] * (structural_defect_active ? 12 : 18);
+                if (structural_defect_active && !key_defect_wall) cheap_score -= 60000;
+
+                keep_preliminary_candidate({
+                    static_cast<uint8_t>(m),
+                    static_cast<int8_t>(x),
+                    static_cast<int8_t>(y),
+                    cheap_score
+                });
+            }
+        }
+    }
+
+    std::sort(preliminary.begin(), preliminary.end());
+    int heavy_count = preliminary.size() < heavy_eval_limit ? preliminary.size() : heavy_eval_limit;
+    for (int i = 0; i < heavy_count; ++i) {
+        heavy_evaluate_candidate(preliminary[i]);
+    }
+
+    // =====================================================================
+    // 4. 对候选动作进行排序并限制分支数量，进入下一层递归
+    // =====================================================================
+
+    std::sort(candidates.begin(), candidates.end());
+    int selected_wall_index[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+    for (int y = 0; y < MAP_MAX_HEIGHT; ++y) {
+        for (int x = 0; x < MAP_MAX_WIDTH; ++x) selected_wall_index[y][x] = -1;
+    }
+    int write_idx = 0;
+    for (int i = 0; i < candidates.size(); ++i) {
+        int x = candidates[i].x;
+        int y = candidates[i].y;
+        if (x < 0 || x >= MAP_MAX_WIDTH || y < 0 || y >= MAP_MAX_HEIGHT) continue;
+        int existing_idx = selected_wall_index[y][x];
+        if (existing_idx >= 0) {
+            BombCandidate& existing = candidates[existing_idx];
+            int existing_dist = INF_DIST;
+            int candidate_dist = INF_DIST;
+            if (existing.bomb_idx < current_bomb_count) {
+                existing_dist = dfs_dist_bomb[depth][existing.bomb_idx][y][x];
+            }
+            if (candidates[i].bomb_idx < current_bomb_count) {
+                candidate_dist = dfs_dist_bomb[depth][candidates[i].bomb_idx][y][x];
+            }
+
+            const int same_wall_assignment_margin = 500000;
+            if (candidate_dist + 1 < existing_dist &&
+                candidates[i].score + same_wall_assignment_margin >= existing.score) {
+                int wall_score = existing.score;
+                existing = candidates[i];
+                existing.score = wall_score;
+            }
+            continue;
+        }
+        selected_wall_index[y][x] = write_idx;
+        if (write_idx != i) {
+            candidates[write_idx] = candidates[i];
+        }
+        ++write_idx;
+    }
+    candidates.length = write_idx;
     int branch_limit = candidates.size() < selection_limit ? candidates.size() : selection_limit;
+    if (depth == 0) {
+        this->record_profile_root_candidates(current_lvl, candidates, branch_limit);
+    }
 
     if constexpr (!Dynamic) {
         // -----------------------------------------------------
@@ -1515,6 +2625,7 @@ void StrategicPlanner::dfs_bomb_sequence(
         for (int i = 0; i < branch_limit; ++i) {
             BombCandidate c = candidates[i];
             int m = c.bomb_idx;
+            if (m < 0 || m >= current_bomb_count || current_lvl.bombs[m].x == -1) continue;
             
             SokobanLevel next_lvl = current_lvl;
             next_lvl.bombs[m] = {-1, -1}; 
@@ -1530,7 +2641,13 @@ void StrategicPlanner::dfs_bomb_sequence(
             }
 
             StaticArray<BombTask, MAX_BOMBS> next_seq = current_seq;
-            next_seq.push_back({current_lvl.bombs[m], { (int8_t)c.x, (int8_t)c.y }, false, 0}); // 注意：此时 box_pushes 自动为空
+            BombTask next_task;
+            next_task.bomb_start = current_lvl.bombs[m];
+            next_task.target_wall = {static_cast<int8_t>(c.x), static_cast<int8_t>(c.y)};
+            next_task.is_essential = false;
+            next_task.net_profit = 0;
+            next_task.box_pushes.clear();
+            next_seq.push_back(next_task);
             
             int execution_cost = dfs_dist_bomb[depth][m][c.y][c.x] * 1.5f; 
             if constexpr (Mode == GameMode::PHASE1_ANY) {
@@ -1538,8 +2655,9 @@ void StrategicPlanner::dfs_bomb_sequence(
                     execution_cost = 10 + (execution_cost - 10) / 4;
                 }
             }
-            
+
             // 下一层递归
+            this->record_profile_child_branch();
             this->dfs_bomb_sequence<Mode, false>(next_lvl, { (int8_t)c.x, (int8_t)c.y }, next_seq, cost_so_far + execution_cost, depth + 1, best_res);
         }
     } 
@@ -1550,6 +2668,7 @@ void StrategicPlanner::dfs_bomb_sequence(
         int valid_branches = 0;
         for (int i = 0; i < candidates.size() && valid_branches < branch_limit; ++i) {
             BombCandidate c = candidates[i];
+            if (c.bomb_idx >= current_bomb_count || current_lvl.bombs[c.bomb_idx].x == -1) continue;
             
             SokobanLevel next_lvl;
             int real_execution_cost = 0;
@@ -1583,8 +2702,9 @@ void StrategicPlanner::dfs_bomb_sequence(
                 current_lvl.bombs[c.bomb_idx], {(int8_t)c.x, (int8_t)c.y}, 
                 false, 0, extracted_pushes // 将提取到的避让序列挂载到任务上
             });
-            
+
             // 完美将残局带入下一层递归
+            this->record_profile_child_branch();
             this->dfs_bomb_sequence<Mode, true>(next_lvl, next_lvl.player_start, next_seq, cost_so_far + real_execution_cost, depth + 1, best_res);
         }
     }
@@ -1621,6 +2741,7 @@ void StrategicPlanner::dfs_bomb_sequence(
 /// 搜索状态为“物体坐标 + 玩家相对物体的发力方向”
 /// 函数会检查直推、转向和掉头空间，并用玩家可达性剪掉无法绕后的状态
 void StrategicPlanner::fast_push_bfs(const SokobanLevel& lvl, point start_obj, point player_start, bool is_bomb, int16_t out_dist[MAP_MAX_HEIGHT][MAP_MAX_WIDTH], bool soft_boxes) {
+    this->record_profile_fast_bfs_call();
     
     struct QNode { int8_t x, y, dir; int16_t cost; };
     static QNode q[1024];
@@ -1634,39 +2755,55 @@ void StrategicPlanner::fast_push_bfs(const SokobanLevel& lvl, point start_obj, p
     cur_state_gen++;
     if (cur_state_gen == 0) { std::memset(state_gen, 0, sizeof(state_gen)); cur_state_gen = 1; }
 
-    for(int y = 0; y < MAP_MAX_HEIGHT; y++) {
-        for(int x = 0; x < MAP_MAX_WIDTH; x++) {
+    for (int y = 0; y < MAP_MAX_HEIGHT; y++) {
+        for (int x = 0; x < MAP_MAX_WIDTH; x++) {
             out_dist[y][x] = INF_DIST;
-            for(int d = 0; d < 4; d++) state_cost[y][x][d] = INF_DIST;
         }
     }
 
     bool soft_hard_box[MAX_BOXES] = {false};
     if (soft_boxes) mark_soft_deadlock_boxes(lvl, soft_hard_box);
 
+    static int8_t box_at[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+    static uint8_t bomb_at[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+    for (int y = 0; y < MAP_MAX_HEIGHT; ++y) {
+        for (int x = 0; x < MAP_MAX_WIDTH; ++x) {
+            box_at[y][x] = -1;
+            bomb_at[y][x] = 0;
+        }
+    }
+    for (int i = 0; i < lvl.box_count; ++i) {
+        point p = lvl.boxes[i];
+        if (p.x >= 0 && p.x < MAP_MAX_WIDTH && p.y >= 0 && p.y < MAP_MAX_HEIGHT) {
+            box_at[p.y][p.x] = static_cast<int8_t>(i);
+        }
+    }
+    for (int i = 0; i < lvl.bomb_count; ++i) {
+        point p = lvl.bombs[i];
+        if (p.x >= 0 && p.x < MAP_MAX_WIDTH && p.y >= 0 && p.y < MAP_MAX_HEIGHT) {
+            bomb_at[p.y][p.x] = 1;
+        }
+    }
+
     // 预先计算玩家可达性，剪枝不可达状态
     auto is_blocked = [&](point p, point ignored_obj) -> bool {
         if (p.x < 0 || p.x >= MAP_MAX_WIDTH || p.y < 0 || p.y >= MAP_MAX_HEIGHT) return true;
         if (lvl.map[p.y][p.x] == 1) return true;
-        for (int i = 0; i < lvl.box_count; ++i) {
-            if (lvl.boxes[i] == p) {
-                if (p == ignored_obj) return false;
-                if (soft_boxes && !(p == start_obj) && !soft_hard_box[i]) return false;
-                return true;
-            }
+        int box_id = box_at[p.y][p.x];
+        if (box_id >= 0) {
+            if (p == ignored_obj) return false;
+            if (soft_boxes && !(p == start_obj) && !soft_hard_box[box_id]) return false;
+            return true;
         }
-        for (int i = 0; i < lvl.bomb_count; ++i) {
-            if (lvl.bombs[i].x != -1 && lvl.bombs[i] == p && !(p == ignored_obj)) return true;
-        }
+        if (bomb_at[p.y][p.x] && !(p == ignored_obj)) return true;
         return false;
     };
 
     auto soft_penalty = [&](point p, point ignored_obj) -> int16_t {
         if (!soft_boxes || p == ignored_obj || p == start_obj) return 0;
-        for (int i = 0; i < lvl.box_count; ++i) {
-            if (lvl.boxes[i] == p && !soft_hard_box[i]) {
-                return 10;
-            }
+        int box_id = box_at[p.y][p.x];
+        if (box_id >= 0 && !soft_hard_box[box_id]) {
+            return 10;
         }
         return 0;
     };
@@ -1724,6 +2861,7 @@ void StrategicPlanner::fast_push_bfs(const SokobanLevel& lvl, point start_obj, p
         point push_stand = start_obj - MOVE[d];
         if (push_stand.x >= 0 && push_stand.x < MAP_MAX_WIDTH && push_stand.y >= 0 && push_stand.y < MAP_MAX_HEIGHT) {
             if (player_vis[push_stand.y][push_stand.x]) {
+                state_gen[start_obj.y][start_obj.x][d] = cur_state_gen;
                 state_cost[start_obj.y][start_obj.x][d] = 0;
                 q[tail++] = {start_obj.x, start_obj.y, (int8_t)d, 0};
                 out_dist[start_obj.y][start_obj.x] = 0;
@@ -1927,6 +3065,7 @@ bool StrategicPlanner::local_clear_bomb_route(
     int& out_cost,
     StaticArray<BoxPushTask, 8>& out_box_pushes)
 {
+    this->record_profile_local_clear_call();
     if (bomb_idx < 0 || bomb_idx >= start_lvl.bomb_count) return false;
     if (start_lvl.bombs[bomb_idx].x == -1) return false;
     if (target_wall.x < 0 || target_wall.x >= MAP_MAX_WIDTH ||
@@ -2300,6 +3439,7 @@ bool StrategicPlanner::local_clear_bomb_route(
             if (!direct_path.empty()) out_lvl.player_start = direct_path.back();
             else out_lvl.player_start = player;
             out_cost += direct_path.size();
+            this->record_profile_local_clear_success();
             return true;
         }
 
@@ -2561,6 +3701,7 @@ bool StrategicPlanner::local_clear_bomb_route(
     {
         StaticArray<BoxPushTask, 8> pushes;
         if (real_clear_search(real_clear_search, start_lvl, start_lvl.player_start, pushes, 0, 0)) {
+            this->record_profile_local_clear_success();
             return true;
         }
     }
@@ -2580,6 +3721,7 @@ bool StrategicPlanner::local_clear_bomb_route(
 /// \param out_task 输出补全后的任务，可能包含 box_pushes
 /// \return 成功生成真实可执行任务时返回 true
 bool StrategicPlanner::materialize_bomb_task(const SokobanLevel& level, point player_start, const BombTask& task, BombTask& out_task, bool phase2_specific) {
+    this->record_profile_materialize_call();
     SokobanLevel temp = level;
     temp.player_start = player_start;
 
@@ -2603,6 +3745,7 @@ bool StrategicPlanner::materialize_bomb_task(const SokobanLevel& level, point pl
 
     out_task = task;
     out_task.box_pushes = pushes;
+    this->record_profile_materialize_success();
     return true;
 }
 

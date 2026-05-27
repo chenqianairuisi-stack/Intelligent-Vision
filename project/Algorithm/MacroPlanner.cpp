@@ -12,7 +12,7 @@ namespace MacroConfig {
     // ------------------------------------------------------------------------
     // 槽位功能开关
     // ------------------------------------------------------------------------
-    inline constexpr bool ENABLE_COMPLETION_PUSH_SLOT = true;       // 是否启用完成式推箱候选位
+    inline constexpr bool ENABLE_COMPLETION_PUSH_SLOT = false;       // 是否启用完成式推箱候选位
     inline constexpr bool ENABLE_APPROACH_PUSH_SLOT = false;        // 是否启用接近式推箱候选位
     inline constexpr bool ENABLE_OPPORTUNISTIC_BOMB_SLOT = false;   // 是否启用机会性炸弹候选位
 
