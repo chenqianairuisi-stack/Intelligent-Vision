@@ -25,18 +25,29 @@ namespace { // 隐藏任务表实现
     constexpr uint8_t TASK_COUNT = sizeof(task_table) / sizeof(task_table[0]);
 }
 
-// 初始化一个全局 1ms 硬件定时器 (比如 GPT_TIM_1)
+/// \brief 初始化软件调度器的全局时基
+///
+/// \details
+/// GPT_TIM_1 被配置为 1ms 计数源，run 中所有任务周期都基于该绝对时间戳判断
+///
 void init() {
     timer_init(GPT_TIM_1, TIMER_MS);
     timer_start(GPT_TIM_1);
 }
 
-// 获取系统的全局 1ms 绝对时间戳
+/// \brief 获取系统 1ms 绝对时间戳
+/// \return GPT_TIM_1 当前计数值，单位 ms
+///
 uint32_t get_sys_tick_ms() {
     return timer_get(GPT_TIM_1); 
 }
 
-// 任务调度器核心：遍历任务表，检查每个任务是否到达执行时间，如果是则调用对应函数并更新时间戳
+/// \brief 软件任务调度器核心
+///
+/// \details
+/// 每次主循环调用时遍历任务表，达到周期的任务立即执行
+/// 本调度器不抢占，任务函数应保持短小，避免拖慢视觉串口和比赛状态机
+///
 __attribute__((section(".ramfunc")))
 void run() {
     uint32_t current_time = get_sys_tick_ms();

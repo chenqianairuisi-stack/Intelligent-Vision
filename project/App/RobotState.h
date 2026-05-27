@@ -33,6 +33,10 @@ struct RobotState {
 
         // ART1 定位推算
         Pose2D art1_pose = {0.0f, 0.0f, 0.0f};
+        Pose2D art1_pose_buffer[2] = {};        // ART1 位姿双缓冲，避免中断写入时读到半帧数据
+        uint8_t art1_pose_publish_idx = 0;      // 当前发布给业务层读取的缓冲下标
+        uint32_t art1_pose_seq = 0;             // 位姿帧序号，用于判断是否有新数据
+        uint32_t art1_pose_tick_ms = 0;         // 位姿帧接收时间，用于拒绝过期视觉数据
         
         // ART1 业务同步标志位
         bool art1_map_ready = false;
@@ -53,6 +57,8 @@ struct RobotState {
         uint16_t current_wp_idx = 0;                                          // 当前正在追的航点索引
 
         StaticArray<BombTask, SystemConfig::MAX_BOMBS> bomb_tasks;            // 炸弹任务列表
+        Point2D vision_segment_start = {0.0f, 0.0f};                          // 当前直线路径段起点，用于判断视觉校正轴向
+        bool vision_correction_done = false;                                  // 当前路径段是否已经做过一次视觉校正
     } planning;
 
     // 4. 控制层 (Tracker 写入，底盘 Chassis 读取)

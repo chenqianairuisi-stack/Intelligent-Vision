@@ -18,6 +18,10 @@ extern "C" {
 #include "Encoder.h"
 #include <cmath>
 
+// =============================================================================
+// 内部数据结构和状态变量
+// =============================================================================
+
 namespace Subsystem::PoseEstimator {
 namespace { 
     #define DTCM_DATA __attribute__((section(".dtcm_data")))
@@ -39,9 +43,17 @@ namespace {
     // 四元数相关变量，四元数初始化为绝对水平、Yaw为 90度 [cos(45deg) = 0.70710678f, sin(45deg) = 0.70710678f]
     DTCM_DATA float q0 = 0.70710678f, q1 = 0.0f, q2 = 0.0f, q3 = 0.70710678f;
 
+    // 视觉标定相关变量
+    DTCM_DATA VisionCalibrator vision_calibrator;                     // 视觉标定器实例
+    DTCM_DATA AsyncCalibState s_calib_state = AsyncCalibState::IDLE;  // 当前标定状态
+    DTCM_DATA uint32_t s_last_calib_vision_seq = 0;                   // 标定流程已消费的最后一帧视觉序号
+
+    // 常量定义
     constexpr float PLUSE_TO_CM = (2.0f * PI * SystemConfig::WHEEL_RADIUS) / SystemConfig::PULSES_PER_REV;  // 编码器计数转换为轮子移动的距离（cm）
     constexpr float SAMPLE_FREQ = 1.0f / SystemConfig::PIT_CH0_DT_S;  // 采样频率 (Hz)，根据系统定时器周期计算
+    constexpr uint32_t VISION_POSE_MAX_AGE_MS = 300;  // 视觉位姿数据的最大有效时间，超过这个时间就丢弃
 
+    // 快速逆平方根函数，供 Mahony 算法使用
     [[gnu::always_inline]] inline float fast_inv_sqrt(float x) {
         return 1.0f / __builtin_sqrtf(x);
     }
@@ -51,6 +63,7 @@ namespace {
 // =============================================================================
 // 模块 1: 初始化与坐标重置
 // =============================================================================
+
 void init() {
     gyro_z_offset = 0.0f; gyro_x_offset = 0.0f; gyro_y_offset = 0.0f;
     dynamic_deadband = 0.1f;
@@ -59,6 +72,14 @@ void init() {
     imu_icm42688.init();  // ICM42688 IMU 初始化 (spi)
 }
 
+/// \brief 强制设置当前物理位姿
+/// \param x 全局 X 坐标 cm
+/// \param y 全局 Y 坐标 cm
+/// \param yaw_deg 全局 yaw 角度，单位度
+///
+/// \details
+/// 会同时重置 yaw 四元数和全局位姿，常用于出库前初始定位或视觉标定成功后同步状态
+///
 void set_position(float x, float y, float yaw_deg) {
     // 1. 重置坐标
     App::g_state.physical.pose.x = x;
@@ -81,7 +102,12 @@ const DebugProbes& get_debug_probes() {
     return g_probes;
 }
 
-// IMU 开机静态标定，累计 600 次数据求平均，得到 gyro_z_offset
+/// \brief IMU 开机静态标定
+///
+/// \details
+/// 丢弃前 100 帧后累计 600 帧陀螺仪数据求零偏，并根据 Z 轴噪声标准差生成动态死区
+/// 函数是阻塞式启动流程，只应在开机静止时调用
+///
 void calibrate_gyro_step() {
     if (is_calibrated) return; 
     
@@ -128,7 +154,12 @@ void calibrate_gyro_step() {
     is_calibrated = true; 
 }
 
-// 自适应四元数解算
+/// \brief 自适应 Mahony 六轴姿态融合
+///
+/// \details
+/// 当加速度模长偏离 1G 时衰减加速度修正增益，减少急加减速对姿态的污染
+/// 输入角速度单位为 rad/s，加速度单位为 G
+///
 __attribute__((section(".ramfunc")))
 void adaptive_mahony_update(float gx, float gy, float gz, float ax, float ay, float az) {
     float norm;
@@ -189,7 +220,12 @@ void adaptive_mahony_update(float gx, float gy, float gz, float ax, float ay, fl
     q0 *= norm; q1 *= norm; q2 *= norm; q3 *= norm;
 }
 
-// 1ms 姿态解算定时器
+/// \brief 1ms 姿态解算周期
+///
+/// \details
+/// 从最新 IMU 数据扣除零偏和死区，执行 Mahony 融合并更新全局 yaw
+/// 该函数在 PIT_CH0 中断中调用，应保持固定耗时
+///
 __attribute__((section(".ramfunc")))
 void update_yaw_1ms_tick() {
     if (!is_calibrated) return; 
@@ -276,7 +312,14 @@ void update_yaw_1ms_tick() {
 // 模块 3: 编码器定位
 // =============================================================================
 
-// 20ms 位置更新定时器：基于当前的 Yaw 角度和编码器增量进行里程计计算
+/// \brief 20ms 里程计位置更新
+/// \param encoder_counts 四轮编码器周期增量
+/// \param current_yaw_deg 当前 yaw 角度，单位度
+///
+/// \details
+/// 先把四轮增量解算为车体系位移，再用当前 yaw 投影到全局坐标
+/// kinematic_gain_x/y 用于补偿底盘安装和滑移造成的比例误差
+///
 __attribute__((section(".ramfunc")))
 void update_position_20ms_tick(const int16_t* encoder_counts, float current_yaw_deg) {
 
@@ -311,13 +354,83 @@ void update_position_20ms_tick(const int16_t* encoder_counts, float current_yaw_
 // =============================================================================
 // 模块 4: 视觉标定与坐标修正
 // =============================================================================
-__attribute__((section(".dtcm_data"))) VisionCalibrator vision_calibrator;
-static AsyncCalibState s_calib_state = AsyncCalibState::IDLE;
+
+/// \brief 根据最新视觉位姿修正当前直线段的横向坐标
+/// \param segment_start 当前直线段起点
+/// \param segment_end 当前直线段终点
+/// \return 成功应用视觉修正时返回 true
+///
+/// \details
+/// 只修横向轴，不修前进轴，避免视觉抖动影响沿路径前进的里程计积分
+/// 函数会消费 art1_pose_updated 标志，同一路径段外层只应调用一次
+///
+bool apply_vision_axis_correction(const Point2D& segment_start, const Point2D& segment_end) {
+    float dx = segment_end.x - segment_start.x;
+    float dy = segment_end.y - segment_start.y;
+    if ((dx * dx + dy * dy) < 1.0f) {
+        // 段长过短时无法可靠判断主轴和横向轴
+        return false;
+    }
+
+    auto& vision_data = App::g_state.vision;
+    if (!vision_data.art1_pose_updated) {
+        return false;
+    }
+    // 本次校正消费掉这帧视觉位姿，下一段必须等新帧
+    vision_data.art1_pose_updated = false;
+
+    if (vision_data.art1_pose_seq == 0) {
+        return false;
+    }
+
+    // ART1 位姿可能比底盘周期慢，过期数据不参与闭环修正
+    uint32_t pose_age_ms = Core::Scheduler::get_sys_tick_ms() - vision_data.art1_pose_tick_ms;
+    if (pose_age_ms > VISION_POSE_MAX_AGE_MS) {
+        return false;
+    }
+
+    const Pose2D& vision_pose = vision_data.art1_pose;
+    if (!std::isfinite(vision_pose.x) || !std::isfinite(vision_pose.y) || !std::isfinite(vision_pose.yaw)) {
+        return false;
+    }
+
+    auto& pose = App::g_state.physical.pose;
+    float abs_dx = std::abs(dx);
+    float abs_dy = std::abs(dy);
+
+    // 水平段只修 Y，竖直段只修 X，前进轴继续交给编码器积分
+    if (abs_dx >= abs_dy && abs_dy <= 2.0f) {
+        if (std::abs(vision_pose.y - pose.y) > tune.tracker.vision_reject_dist) {
+            return false;
+        }
+        pose.y = vision_pose.y;
+        return true;
+    }
+
+    if (abs_dy > abs_dx && abs_dx <= 2.0f) {
+        if (std::abs(vision_pose.x - pose.x) > tune.tracker.vision_reject_dist) {
+            return false;
+        }
+        pose.x = vision_pose.x;
+        return true;
+    }
+
+    return false;
+}
 
 void reset_async_calibrate() {
     s_calib_state = AsyncCalibState::IDLE;
 }
 
+/// \brief 异步非阻塞视觉标定函数
+/// \param timeout_ms 标定最长等待时间 ms
+/// \param reject_threshold 视觉结果与当前位姿的最大允许偏差 cm
+/// \return 当前标定状态
+///
+/// \details
+/// 成功时会用收敛后的视觉坐标覆盖当前里程计位置，yaw 保持当前陀螺仪估计
+/// 标定过程按视觉帧序号消费新数据，不依赖 art1_pose_updated 标志
+///
 __attribute__((section(".ramfunc"))) 
 AsyncCalibState async_calibrate_vision(uint32_t timeout_ms, float reject_threshold) {
     auto& pos = App::g_state.physical.pose;
@@ -328,7 +441,8 @@ AsyncCalibState async_calibrate_vision(uint32_t timeout_ms, float reject_thresho
     if (s_calib_state == AsyncCalibState::IDLE) {
         ctrl.mode = ControlMode::POINT_TRACKING; // 锁死底盘
         vision_calibrator.reset();
-        vision_data.art1_pose_updated = false;
+        // 记录进入标定前的序号，只消费之后到达的新视觉帧
+        s_last_calib_vision_seq = vision_data.art1_pose_seq;
         s_calib_state = AsyncCalibState::BUSY;
         return AsyncCalibState::BUSY;
     }
@@ -349,9 +463,12 @@ AsyncCalibState async_calibrate_vision(uint32_t timeout_ms, float reject_thresho
     }
 
     // 喂入新数据
-    if (vision_data.art1_pose_updated) {
-        vision_data.art1_pose_updated = false;
-        vision_calibrator.push(vision_data.art1_pose.x, vision_data.art1_pose.y, vision_data.art1_pose.yaw);
+    uint32_t seq = vision_data.art1_pose_seq;
+    if (seq != s_last_calib_vision_seq) {
+        // 按序号取新帧，而不是靠 bool 标志，避免标志被其它校正流程清掉
+        s_last_calib_vision_seq = seq;
+        Pose2D vision_pose = vision_data.art1_pose_buffer[vision_data.art1_pose_publish_idx];
+        vision_calibrator.push(vision_pose.x, vision_pose.y, vision_pose.yaw);
     }
 
     // 检查收敛

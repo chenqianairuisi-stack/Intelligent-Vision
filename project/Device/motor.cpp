@@ -5,12 +5,19 @@
 Motor::Motor(int dir_pin, int pwm_channel, bool is_inverted)
     : dir_pin_(dir_pin), pwm_channel_(pwm_channel), is_inverted_(is_inverted) {}
 
+/// \brief 初始化单个电机的方向 GPIO 和 PWM 通道
 void Motor::init() {
     gpio_init((gpio_pin_enum)dir_pin_, GPO, GPIO_HIGH, GPO_PUSH_PULL);
     pwm_init((pwm_channel_enum)pwm_channel_, 17000, 0); 
 }
 
-// 设置电机占空比，范围 -100.0f ~ 100.0f
+/// \brief 设置单个电机占空比
+/// \param duty 目标占空比，正负表示方向
+/// \param max_duty 允许输出的最大绝对占空比
+///
+/// \details
+/// 函数内部处理限幅、安装方向反转和 PWM 正值输出，调用方不需要关心硬件接线极性
+///
 __attribute__((section(".ramfunc"))) void Motor::set_duty(float duty, float max_duty) {
     // 限制占空比在允许范围内，并根据反转标志调整符号
     if (duty > max_duty) duty = max_duty;

@@ -23,6 +23,11 @@ static constexpr EncoderHWConfig ENC_CONFIGS[4] = {
 __attribute__((section(".dtcm_data"))) EncoderArray encoders;
 
 
+/// \brief 初始化四路正交编码器
+///
+/// \details
+/// 初始化后立即记录当前硬件计数，避免第一次 20ms 更新时把历史残留当成真实增量
+///
 void EncoderArray::init() {
     for (int i = 0; i < 4; ++i) {
         encoder_quad_init(ENC_CONFIGS[i].module, ENC_CONFIGS[i].pin_A, ENC_CONFIGS[i].pin_B);
@@ -32,7 +37,12 @@ void EncoderArray::init() {
 }
 
 
-// 更新所有编码器的计数值
+/// \brief 20ms 周期更新四轮编码器增量和轮速
+///
+/// \details
+/// 使用 16 位补码差值处理计数器回绕，再按轮位极性修正方向
+/// 结果同时写入 counts 和全局 current_wheel_speed，供里程计与速度环使用
+///
 __attribute__((section(".ramfunc"))) 
 void EncoderArray::update_encoders_20ms_tick() {
     auto& wheel_speed = App::g_state.physical.current_wheel_speed;

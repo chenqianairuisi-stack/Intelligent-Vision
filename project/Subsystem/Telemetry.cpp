@@ -9,6 +9,7 @@
 #include "CoreScheduler.h"
 #include "Vision.h"
 #include "MotionControl.h"
+#include "Tracker.h"
 #include "PoseEstimate.h"
 
 #include "zf_common_headfile.h"
@@ -56,11 +57,20 @@ namespace {
 // 公共接口
 // ====================================================================
 
-// 初始化无线串口 (波特率默认115200)
+/// \brief 初始化无线遥测串口
 void init() {
     wireless_uart_init();  
 }
 
+/// \brief 输出一次视觉标定日志
+/// \param v_x 视觉 X
+/// \param v_y 视觉 Y
+/// \param v_yaw 视觉 yaw
+/// \param o_x 里程计 X
+/// \param o_y 里程计 Y
+/// \param o_yaw 里程计 yaw
+/// \param accepted 本次标定是否被接受
+///
 void log_vision_calibration(float v_x, float v_y, float v_yaw, 
                             float o_x, float o_y, float o_yaw, bool accepted) {
     char msg[128];
@@ -78,7 +88,11 @@ void log_vision_calibration(float v_x, float v_y, float v_yaw,
     wireless_uart_send_buffer((uint8_t*)msg, strlen(msg));
 }
 
-// 发送数据
+/// \brief 周期发送遥测数据
+///
+/// \details
+/// 根据 telemetry_mode 输出不同波形数据，同时在语义监测开启时增量发送语义缓存变化
+///
 void send_wave_data() {
 
     // 1. 常规高频波形推送
@@ -158,7 +172,12 @@ void send_wave_data() {
     
 }
 
-// 接收上位机指令
+/// \brief 接收并解析上位机指令
+///
+/// \details
+/// 无线串口按行拼装命令，收到换行后调用 execute_command
+/// 每次轮询末尾也会检查调试运动是否完成并回传耗时
+///
 void receive_and_parse_task() {
     uint8_t temp_buf[32]; 
     
@@ -195,7 +214,9 @@ void receive_and_parse_task() {
 // ====================================================================
 namespace {
 
-    // 触发测时器
+    /// \brief 启动一次运动耗时统计
+    /// \param mode 本次运动使用的控制模式
+    ///
     void start_movement_timing(ControlMode mode) {
         is_timing_movement = true;
         current_timing_mode = mode;
@@ -205,7 +226,11 @@ namespace {
         wireless_uart_send_buffer((uint8_t*)msg, strlen(msg));
     }
 
-    // 在后台循环中检查运动是否结束
+    /// \brief 检查当前运动是否完成并输出耗时
+    ///
+    /// \details
+    /// AUTO_TRACKING 直接使用 Tracker 状态，POINT_TRACKING 通过位置、角度和停稳状态综合判断
+    ///
     void check_movement_completion() {
         if (!is_timing_movement) return;
 
@@ -246,7 +271,11 @@ namespace {
         }
     }
 
-    // 语义缓存池内容发送给上位机
+    /// \brief 将当前语义缓存池发送给上位机
+    ///
+    /// \details
+    /// 字符串长度受 dump_buf 限制，追加时预留余量防止越界
+    ///
     void dump_semantic_cache() {
         static char dump_buf[256];
         const auto& labels = App::g_state.vision.semantic_labels;
@@ -270,7 +299,13 @@ namespace {
         wireless_uart_send_buffer(reinterpret_cast<uint8_t*>(dump_buf), offset);
     }
 
-    // 解析并执行上位机发来的字符串命令 (格式示例: "!S Q 1.5" 表示设置速度环 KP=1.5)
+    /// \brief 解析并执行上位机字符串命令
+    /// \param cmd 以 ! 开头的一行命令
+    ///
+    /// \details
+    /// 支持参数调节、视觉请求、路径调试和点位移动
+    /// 格式示例：!S Q 1.5 表示设置 yaw Kp，!M P x y yaw 表示移动到绝对位姿
+    ///
     void execute_command(const char* cmd) {
 
         if (cmd[0] != '!') return;     // 命令必须以 ! 开头
@@ -306,6 +341,11 @@ namespace {
 
                     case 'Z': tune.tracker.reach_radius = value; break;
                     case 'X': tune.tracker.reach_radius_min = value; break;
+                    // 过弯和视觉校正常用参数，便于现场用无线串口快速调试
+                    case 'B': tune.tracker.corner_pass_speed = value; break;
+                    case 'N': tune.tracker.corner_switch_window = value; break;
+                    case 'M': tune.tracker.corner_line_tolerance = value; break;
+                    case 'G': tune.tracker.vision_reject_dist = value; break;
                     case 'C': tune.tracker.ang_tolerance = value; break;
                     case 'V': tune.estimate.mahony_kp = value; break;
 
@@ -391,8 +431,8 @@ namespace {
                     default: return;
                 }
 
-                // 下发并重置定时器
-                App::g_state.control.current_target = target;
+                // 通过 Tracker 进入点跟踪，顺带清掉旧路径和视觉校正状态
+                Algorithm::Tracker::track_point(target);
                 start_movement_timing(ControlMode::POINT_TRACKING);
                 break;
             }

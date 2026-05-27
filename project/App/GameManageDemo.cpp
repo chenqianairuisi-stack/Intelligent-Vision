@@ -5,13 +5,21 @@
 
 namespace App::GameEngine {
 
-// 获取 Demo 观测动作的有效实体掩码
+/// \brief 获取 Demo 观测动作的有效实体掩码
+/// \param action 当前宏动作
+/// \return OBSERVE 动作返回 active_mask，其他动作返回 0
+///
 static uint32_t demo_observe_mask_of(const MacroAction& action) {
     if (action.kind != MacroActionKind::OBSERVE) return 0;
     return action.observe.active_mask;
 }
 
-// 多态拦截器
+/// \brief Demo 模式状态机拦截器
+///
+/// \details
+/// Demo 不驱动真实底盘，而是在逻辑地图上播放巡图、推炸和推箱动画
+/// 规划和语义绑定仍沿用正式流程，便于在屏幕上验证完整策略链路
+///
 __attribute__((section(".ramfunc"))) void DemoGameManager::update() {
     auto& game = App::g_state.game;
     auto& phase = game.phase;
@@ -386,7 +394,13 @@ __attribute__((section(".ramfunc"))) void DemoGameManager::update() {
     }
 }
 
-// 生成当前渲染上下文，供 Display 层读取
+/// \brief 生成当前渲染上下文
+/// \return Display 层渲染地图、路径、动作和耗时所需的只读上下文
+///
+/// \details
+/// Demo 模式优先返回动画地图，实车/Mock 模式则把 logical_level 压平成 UI 地图
+/// 函数内部会维护一份 flattened_render_map，调用方不要长期持有跨帧以外的假设
+///
 RenderContext DemoGameManager::get_render_context() const {
     RenderContext ctx = {0};
     auto& game = App::g_state.game;
@@ -400,11 +414,11 @@ RenderContext DemoGameManager::get_render_context() const {
 
     auto box_bindings_available = [&]() -> bool {
         return phase == GamePhase::PLAN_SOKOBAN ||
-               phase == GamePhase::EXEC_SOKOBAN ||
-               phase == GamePhase::PLAN_RETURN_HOME ||
-               phase == GamePhase::EXEC_RETURN_HOME ||
-               phase == GamePhase::FINISHED ||
-               phase == GamePhase::ANIMATE_DEMO;
+                phase == GamePhase::EXEC_SOKOBAN ||
+                phase == GamePhase::PLAN_RETURN_HOME ||
+                phase == GamePhase::EXEC_RETURN_HOME ||
+                phase == GamePhase::FINISHED ||
+                phase == GamePhase::ANIMATE_DEMO;
     };
 
     // Lambda 函数：将零散的数组强行压平到单层网格里
@@ -541,7 +555,12 @@ RenderContext DemoGameManager::get_render_context() const {
 }
 
 
-// 内部函数：从逻辑地图初始化 demo 地图，作为动画的基准状态
+/// \brief 从逻辑地图初始化 Demo 动画地图
+///
+/// \details
+/// 进入巡图或推箱动画前调用，把墙、箱、目标点、炸弹同步到 demo.map
+/// 第二阶段之后会根据 box_ids 隐藏已经推到绑定目标上的箱子
+///
 void DemoGameManager::init_demo_map_from_logical() {
     GamePhase phase = App::g_state.game.phase;
     bool use_box_bindings = phase == GamePhase::PLAN_SOKOBAN ||
@@ -556,7 +575,7 @@ void DemoGameManager::init_demo_map_from_logical() {
         if (logical_level.boxes[box_idx].x == -1) return true;
         uint8_t target_id = logical_level.box_ids[box_idx];
         return target_id < logical_level.target_count &&
-               logical_level.boxes[box_idx] == logical_level.targets[target_id];
+                logical_level.boxes[box_idx] == logical_level.targets[target_id];
     };
     auto target_completed_by_box = [&](int target_idx) -> bool {
         for (int b = 0; b < logical_level.box_count; ++b) {

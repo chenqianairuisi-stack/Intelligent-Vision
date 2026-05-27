@@ -1,6 +1,7 @@
 #include "Vision.h"
 #include "RobotState.h"
 #include "system_config.h"
+#include "CoreScheduler.h"
 
 #include <string.h> 
 #include <array>
@@ -43,7 +44,14 @@ namespace {
     constexpr uint8_t MSG_CAPTURE_ACK  = 0x40;  // ART2 发送的拍照确认ACK
     constexpr uint8_t MSG_ART2_RESULT  = 0x41;  // ART2 发送的语义识别结果
 
-    // 通用的状态机解析器 
+    /// \brief 通用串口协议状态机
+    /// \param uart 数据来源串口
+    /// \param parser 对应串口的解析状态
+    /// \return 成功解析出一帧完整且校验通过的数据时返回 true
+    ///
+    /// \details
+    /// 解析器支持被主循环反复调用，每次尽可能消费 FIFO 中已有字节
+    ///
     __attribute__((always_inline))
     inline bool step_parser(UartComm& uart, ProtocolParser& parser) {
         uint8_t byte;
@@ -86,7 +94,11 @@ namespace {
         return false; // 当前缓冲区已空，帧未完成
     }
 
-    // ART1 协议解包 (地图数据 + 定位数据) [包头 AA 55 + 类型 + 长度 + 负载 + 校验和]
+    /// \brief 处理 ART1 完整协议帧
+    ///
+    /// \details
+    /// ART1 负责地图和绝对位姿，地图只接收第一帧，位姿每帧通过双缓冲发布
+    ///
     __attribute__((section(".ramfunc")))
     void process_art1_packet() {
         auto& vis = App::g_state.vision;
@@ -108,15 +120,29 @@ namespace {
             
             vis.art1_map_ready = true;
         } 
-        else if (parser_art1.msg_type == MSG_POSE_DATA && parser_art1.payload_len == 12) {        
-            memcpy(&vis.art1_pose.x, &parser_art1.payload_buf[0], 4);
-            memcpy(&vis.art1_pose.y, &parser_art1.payload_buf[4], 4);
-            memcpy(&vis.art1_pose.yaw, &parser_art1.payload_buf[8], 4);
+        else if (parser_art1.msg_type == MSG_POSE_DATA && parser_art1.payload_len == 12) {
+            // 先写未发布缓冲，再切换发布下标，避免业务层读到半包位姿
+            uint8_t write_idx = vis.art1_pose_publish_idx ^ 1U;
+            Pose2D& next_pose = vis.art1_pose_buffer[write_idx];
+
+            memcpy(&next_pose.x, &parser_art1.payload_buf[0], 4);
+            memcpy(&next_pose.y, &parser_art1.payload_buf[4], 4);
+            memcpy(&next_pose.yaw, &parser_art1.payload_buf[8], 4);
+
+            // seq 和 tick 给标定/循迹校正判断新帧与时效性
+            vis.art1_pose = next_pose;
+            vis.art1_pose_publish_idx = write_idx;
+            vis.art1_pose_seq++;
+            vis.art1_pose_tick_ms = Core::Scheduler::get_sys_tick_ms();
             vis.art1_pose_updated = true;
         }
     }
 
-    // ART2 协议解包 (捕获确认 + 语义结果) [包头AA 55 + 类型 + 长度 + 负载 + 校验和]
+    /// \brief 处理 ART2 完整协议帧
+    ///
+    /// \details
+    /// ART2 负责拍照 ACK 和实体语义结果，语义结果按 entity_id 写入视觉黑板
+    ///
     __attribute__((section(".ramfunc"))) 
     void process_art2_packet() {
         auto& vis = App::g_state.vision;
@@ -139,36 +165,51 @@ namespace {
 // 对外公开接口实现
 // ====================================================================
 
-// 初始化函数：设置串口，清空状态
+/// \brief 初始化视觉通信模块
+///
+/// \details
+/// 初始化 ART1/ART2 两路串口，并清空语义标签缓存
+///
 void init() {
     uart_cam1.Init();uart_cam2.Init();
     reset_semantic_labels();
 }
 
-// 寻图前清空基于 entity_id 的语义缓存池
+/// \brief 清空基于 entity_id 的语义缓存池
+///
+/// \details
+/// 每次开始新地图或新一轮巡图前调用，-1 表示该实体语义未知
+///
 void reset_semantic_labels() {
     for(int i=0; i < SystemConfig::MAX_ENTITIES; ++i) 
         App::g_state.vision.semantic_labels[i] = -1;
 }
 
-// 请求地图 (MCU -> ART1)
+/// \brief 请求 ART1 返回地图数据
 void request_map_ART1() {
     uart_cam1.send_packet(CMD_REQ_MAP, nullptr, 0);
 }
 
-// 请求定位 (MCU -> ART1)
+/// \brief 请求 ART1 返回绝对位姿
 void request_pose_ART1() {
     uart_cam1.send_packet(CMD_REQ_POSE, nullptr, 0);
 }
 
-// 请求捕获照片 (MCU -> ART2)
+/// \brief 请求 ART2 捕获并识别一个实体
+/// \param entity_id 实体编号
+/// \param is_box true 表示箱子，false 表示目标点
+///
 void request_capture_ART2(uint8_t entity_id, bool is_box) {
     App::g_state.vision.capture_ack_received = false;
     uint8_t payload[2] = {entity_id, static_cast<uint8_t>(is_box ? 1 : 0)};
     uart_cam2.send_packet(CMD_TRIG_CAPTURE, payload, 2);
 }
 
-// 主更新函数：轮询解析器，处理完整帧
+/// \brief 视觉模块主循环轮询入口
+///
+/// \details
+/// 从两路相机串口 FIFO 中解析完整帧，并将结果写入全局视觉黑板
+///
 __attribute__((section(".ramfunc"))) void update() {
     if (step_parser(uart_cam1, parser_art1)) {
         process_art1_packet();
@@ -178,7 +219,7 @@ __attribute__((section(".ramfunc"))) void update() {
     }
 }
 
-// 调试专用：向自己发送 ART2 的 ACK 帧 (用于短接 TX/RX 环回测试)
+// 调试专用 ART2 ACK 环回测试
 void test_loopback_art2_ack() {
     // 构造一帧完美的 ART2 ACK 数据包
     uint8_t dummy_payload[1] = {0x01}; 

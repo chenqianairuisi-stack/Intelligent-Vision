@@ -12,7 +12,12 @@ extern "C" {
 __attribute__((section(".dtcm_data"))) Icm42688 imu_icm42688;
 
 
-// 芯片初始化
+/// \brief 初始化 ICM42688
+/// \return WHO_AM_I 校验和配置成功时返回 true
+///
+/// \details
+/// 使用 SPI 手动片选，开启 Gyro/Accel Low Noise 模式，并配置 1kHz 数据输出
+///
 bool Icm42688::init() {
     uint8_t val = 0;
     system_delay_ms(10);
@@ -52,7 +57,12 @@ bool Icm42688::init() {
     return true; 
 }
 
-// 14字节连读
+/// \brief 读取温度、加速度和陀螺仪完整数据
+///
+/// \details
+/// 通过 burst read 一次取 14 字节，减少 SPI 片选开销
+/// 解码后会转换到项目统一的车体系符号约定
+///
 __attribute__((section(".ramfunc"))) void Icm42688::update_all() {
     uint8_t buf[14];
     
@@ -81,7 +91,11 @@ __attribute__((section(".ramfunc"))) void Icm42688::update_all() {
 }
 
 
-// 读取陀螺仪三轴 (6 字节)
+/// \brief 只读取陀螺仪三轴数据
+///
+/// \details
+/// 主要用于开机静态零偏标定，减少不必要的 SPI 读取量
+///
 __attribute__((section(".ramfunc"))) void Icm42688::update_gyro_only() {
     uint8_t buf[6];
     
@@ -102,7 +116,11 @@ __attribute__((section(".ramfunc"))) void Icm42688::update_gyro_only() {
 }
 
 
-// 读取加速度计三轴 (6 字节)
+/// \brief 只读取加速度计三轴数据
+///
+/// \details
+/// 主要用于初始化调试探针或单独检查姿态参考
+///
 __attribute__((section(".ramfunc"))) void Icm42688::update_accel_only() {
     uint8_t buf[6];
     

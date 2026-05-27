@@ -9,6 +9,7 @@ namespace App::GameEngine {
 // =========================================================
 // 本地地图库 (位于 Flash ROM，供 MockGameManager 加载使用)
 // =========================================================
+
 struct MockMapDef {
     std::string_view name;
     std::array<std::string_view, SystemConfig::MAP_MAX_HEIGHT> layout;
@@ -605,15 +606,26 @@ constexpr std::array<MockMapDef, 28> mock_map_library = {{
     }
 }};
 
+/// \brief 获取内置 Mock 地图数量
 uint8_t get_mock_map_count() { 
     return mock_map_library.size(); 
 }
 
+/// \brief 获取内置 Mock 地图名称
+/// \param idx 地图下标
+/// \return 有效下标返回地图名，越界返回 Unknown
+///
 const char* get_mock_map_name(uint8_t idx) { 
     if (idx >= mock_map_library.size()) return "Unknown";
     return mock_map_library[idx].name.data(); 
 }
 
+/// \brief 加载内置 Mock 地图到视觉黑板
+/// \param map_idx 地图下标
+///
+/// \details
+/// 地图字符会被转换为 ART1 视觉结果格式，随后正式流程会像处理真实地图一样转储到 logical_level
+///
 void load_mock_map(uint8_t map_idx) {
     if (map_idx >= mock_map_library.size()) return;
     
@@ -648,6 +660,11 @@ void load_mock_map(uint8_t map_idx) {
     vision_data.art1_map_ready = true; 
 }
 
+/// \brief 生成 Mock 语义标签
+///
+/// \details
+/// 箱子和目标点写入相同的 1 基标签，模拟 ART2 已经识别出可配对语义
+///
 void MockGameManager::inject_mock_semantics() {
     std::memset(mock_truth_labels, -1, sizeof(mock_truth_labels));
 
@@ -660,6 +677,12 @@ void MockGameManager::inject_mock_semantics() {
     }
 }
 
+/// \brief Mock 模式状态机拦截器
+///
+/// \details
+/// Mock 使用真实底盘移动，但地图和语义来自本地预设
+/// 只有视觉相关阶段被本类截流，其余阶段继续复用正式 GameManager
+///
 __attribute__((section(".ramfunc"))) void MockGameManager::update() {
     auto& game = App::g_state.game;
     auto& pos = App::g_state.physical.pose;

@@ -4,7 +4,7 @@
 
 #include "Tracker.h"
 #include "MotionControl.h"
-#include "math.h"
+#include <cmath>
 
 #include "zf_common_headfile.h"
 #include "Motor.h"
@@ -48,6 +48,30 @@ namespace {
         return val / (std::abs(val) + 0.5f); 
     }
 
+    // 检查位姿是否明显跑出地图边界（允许有一定容错，防止里程计轻微抖动误触发）
+    __attribute__((always_inline)) inline bool is_pose_outside_field(const Pose2D& pose) {
+        // 自动循迹时若里程计明显跑出地图，立即进入错误态防止继续冲出场地
+        constexpr float FIELD_MARGIN_CM = 5.0f;
+        constexpr float FIELD_MAX_X_CM = SystemConfig::MAP_MAX_WIDTH * SystemConfig::GRID_SIZE_CM;
+        constexpr float FIELD_MAX_Y_CM = SystemConfig::MAP_MAX_HEIGHT * SystemConfig::GRID_SIZE_CM;
+
+        return pose.x < -FIELD_MARGIN_CM || pose.x > FIELD_MAX_X_CM + FIELD_MARGIN_CM ||
+                pose.y < -FIELD_MARGIN_CM || pose.y > FIELD_MAX_Y_CM + FIELD_MARGIN_CM;
+    }
+
+    // 当检测到明显的边界错误时，立即停止底盘并切换到 POINT_TRACKING 模式锁死当前位置，同时通知 GameManager 进入错误状态
+    __attribute__((always_inline)) inline void stop_on_boundary_error(const Pose2D& pose) {
+        auto& ctrl = App::g_state.control;
+        // 目标锁在当前位置，先让底盘停止，再把错误交给 GameManage 处理
+        ctrl.current_target.x = pose.x;
+        ctrl.current_target.y = pose.y;
+        ctrl.current_target.yaw = pose.yaw;
+        ctrl.mode = ControlMode::POINT_TRACKING;
+        ctrl.tracker_state = TrackerState::FINISHED;
+        App::g_state.game.error_stage = 9;
+        App::g_state.game.phase = GamePhase::ERROR_OCCURRED;
+    }
+
     // 速度内环控制：输入四个轮子的目标转速，执行 PID 计算并驱动电机
     __attribute__((always_inline)) inline void run_speed_loop(const WheelSpeed4& targets) {
         const auto& current_speeds = App::g_state.physical.current_wheel_speed;
@@ -82,10 +106,20 @@ void init() {
     encoders.init();                   // 编码器初始化 (encoder)
 }
 
+/// \brief 20ms 底盘控制周期
+///
+/// \details
+/// 根据当前控制模式选择 Tracker 目标或上位机目标，完成速度规划、坐标转换、Yaw 控制和四轮速度闭环
+/// 自动循迹时会检查地图边界，并在非终点航点向速度规划器传入过弯末速度
+///
 __attribute__((section(".ramfunc"))) void update_20ms_tick() {
     auto& posi = App::g_state.physical.pose;
     auto& yaw = App::g_state.physical.pose.yaw;
     auto& ctrl = App::g_state.control;
+
+    if (ctrl.mode == ControlMode::AUTO_TRACKING && is_pose_outside_field(posi)) {
+        stop_on_boundary_error(posi);
+    }
 
     // 根据模式决定是否听 Tracker 的话
     // 如果是 POINT_TRACKING，我们就不调用 update_target，直接用上位机写入 ctrl.current_target 的值
@@ -98,8 +132,21 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick() {
     float err_global_y = ctrl.current_target.y - posi.y;
     float err_yaw = normalize_angle(ctrl.current_target.yaw - yaw);
 
+    // 如果当前正在自动循迹追一个非最后的航点，允许速度规划器保留一定的过弯速度，否则默认在每个航点都完全停下来（end_speed=0）
+    float target_end_speed = 0.0f;
+    if (ctrl.mode == ControlMode::AUTO_TRACKING && ctrl.tracker_state == TrackerState::TRACKING) {
+        const auto& plan = App::g_state.planning;
+        int path_size = plan.physical_path.size();
+        int current_wp = static_cast<int>(plan.current_wp_idx);
+        if (path_size > 0 && current_wp < path_size - 1) {
+            // 非最后一个航点不刹停，保留过弯速度给速度规划器
+            target_end_speed = tune.tracker.corner_pass_speed;
+        }
+    }
+
     // 平移速度规划
-    Speed2D expected_global_vel = velocity_planner.velocity_planning_1d(err_global_x, err_global_y, SystemConfig::PIT_CH1_DT_S);
+    Speed2D expected_global_vel = velocity_planner.velocity_planning_1d(
+        err_global_x, err_global_y, SystemConfig::PIT_CH1_DT_S, target_end_speed);
 
     // 将全局期望速度投影到小车自身的局部坐标系
     float current_yaw_rad = yaw * SystemConfig::DEG_TO_RAD;  // 转换为弧度
@@ -122,14 +169,19 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick() {
 }
 
 
+/// \brief 更新底盘静止状态
+///
+/// \details
+/// 只根据四轮反馈速度判断是否停稳，供 Tracker 终点完成判定和遥测运动计时使用
+///
 __attribute__((section(".ramfunc"))) void check_is_stopped() {
 
     const auto& cur_spd = App::g_state.physical.current_wheel_speed;
         
     // 判定条件：上一帧的控制目标几乎为0，且当前四个轮子的真实反馈速度极小
     App::g_state.physical.is_stopped = 
-        (std::abs(cur_spd.lf) < 0.2f && std::abs(cur_spd.lb) < 0.2f &&
-         std::abs(cur_spd.rf) < 0.2f && std::abs(cur_spd.rb) < 0.2f);
+        (std::abs(cur_spd.lf) < 0.2f && std::abs(cur_spd.lb) < 0.2f
+        && std::abs(cur_spd.rf) < 0.2f && std::abs(cur_spd.rb) < 0.2f);
 }
 
 }

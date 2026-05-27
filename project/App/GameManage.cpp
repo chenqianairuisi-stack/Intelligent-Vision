@@ -22,7 +22,12 @@ constexpr float INV_GRID_SIZE_CM = 1.0f / SystemConfig::GRID_SIZE_CM;
 // GameEngine 模块对外接口实现
 // ==================================================================
 
-// 初始化拨码开关并读取运行模式：赛段模式 + 演示模式
+/// \brief 初始化比赛管理器入口状态
+///
+/// \details
+/// 读取两路拨码开关，确定赛段模式和 Debug 模式
+/// Debug 模式会停在 NONE，等待屏幕选图后再启动流程
+///
 void init() {
     gpio_init(C27, GPI, GPIO_HIGH, GPI_PULL_UP);
     gpio_init(C26, GPI, GPIO_HIGH, GPI_PULL_UP);
@@ -41,7 +46,12 @@ void init() {
     App::g_state.debug.need_bg_redraw = true;
 }
 
-// 全局入口：基于状态机的静态多态派发
+/// \brief GameEngine 全局周期入口
+///
+/// \details
+/// 根据运行模式把 update 分发给正式流程、Mock 流程或 Demo 动画流程
+/// Debug 选图前保持挂起，避免真实控制流提前启动
+///
 __attribute__((section(".ramfunc"))) void update() {
     auto& game = App::g_state.game;
 
@@ -59,7 +69,7 @@ __attribute__((section(".ramfunc"))) void update() {
     }
 }
 
-// 获取当前渲染上下文
+// 获取当前渲染上下文 [Display 层只读取这个接口，不直接访问全局状态]
 RenderContext get_render_context() { 
     return core_engine.get_render_context();
 }
@@ -69,7 +79,12 @@ RenderContext get_render_context() {
 // GameManager 基类实现
 //===================================================================
 
-// 全局业务状态机更新函数：根据当前阶段执行对应逻辑
+/// \brief 正式比赛业务状态机
+///
+/// \details
+/// 主状态机串起出库建图、巡图观测、语义绑定、推箱求解和返航
+/// 底层移动由 RobotTask 队列拆分后交给 Tracker 和 Chassis 执行
+///
 __attribute__((section(".ramfunc"))) void GameManager::update() {
     auto& pos = App::g_state.physical.pose;
     auto& ctrl = App::g_state.control;       
@@ -200,7 +215,8 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     StaticArray<point, MAX_PATH_LENGTH> segment;
                     BombTask bomb = make_bomb_task(task.param.bomb_push);
                     if (PlanningCommon::get_bomb_push_path(logical_level, logical_level.player_start, bomb, segment)) {
-                        Algorithm::Tracker::load_path(segment);
+                        // 传入真实逻辑起点，避免路径首点缺失时 Tracker 误判第一段方向
+                        Algorithm::Tracker::load_path(segment, logical_level.player_start);
                         task_done = true;
                     } else {
                         game.error_stage = 2; game.phase = GamePhase::ERROR_OCCURRED;
@@ -212,8 +228,10 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     SokobanLevel probe = logical_level;
                     point probe_player = logical_level.player_start;
                     BoxPushTask box_push = make_box_push_task(task.param.box_push);
+
                     if (PlanningCommon::append_box_push_path(probe, probe_player, box_push, segment)) {
-                        Algorithm::Tracker::load_path(segment);
+                        // 推箱路径可能从下一格开始，逻辑起点用于 Tracker 压缩首段
+                        Algorithm::Tracker::load_path(segment, logical_level.player_start);
                         task_done = true;
                     } else {
                         game.error_stage = 3; game.phase = GamePhase::ERROR_OCCURRED;
@@ -222,8 +240,10 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 }
                 case TaskType::LOAD_PATH_OBS: {
                     StaticArray<point, MAX_PATH_LENGTH> segment;
+                    
                     if (PlanningCommon::get_grid_time_path(logical_level, logical_level.player_start, task.param.target_grid, segment)) {
-                        Algorithm::Tracker::load_path(segment);
+                        // 观察移动同样保留逻辑起点，保证第一段航向和视觉校正基准一致
+                        Algorithm::Tracker::load_path(segment, logical_level.player_start);
                         task_done = true;
                     } else {
                         game.error_stage = 4; game.phase = GamePhase::ERROR_OCCURRED;
@@ -369,7 +389,8 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
 
             if (success) {
                 // 求解成功：加载路径并启动自动执行
-                Algorithm::Tracker::load_path(solver.get_result_path());
+                // Sokoban 结果路径由求解器生成，仍用当前逻辑起点修正首段压缩
+                Algorithm::Tracker::load_path(solver.get_result_path(), logical_level.player_start);
                 ctrl.mode = ControlMode::AUTO_TRACKING;
                 game.phase = GamePhase::EXEC_SOKOBAN;
             } else {
@@ -515,14 +536,29 @@ void GameManager::start_macro_action(const MacroAction& action) {
     }
 }
 
-// 根据物理坐标计算当前网格位置
+/// \brief 根据物理坐标计算当前网格位置
+/// \param pos 当前物理位姿
+/// \return 合法网格坐标，越界时返回上一次逻辑位置
+///
+/// \details
+/// 越界时直接进入错误态，而不是 clamp 成地图边界，避免后续规划基于假位置继续执行
+///
 point GameManager::current_grid_from_pose(const Pose2D& pos) const {
-    int8_t grid_x = std::clamp<int8_t>(std::lroundf((pos.x - MAP_OFFSET_X) * INV_GRID_SIZE_CM), 0, MAP_MAX_WIDTH - 1);
-    int8_t grid_y = std::clamp<int8_t>(std::lroundf((pos.y - MAP_OFFSET_Y) * INV_GRID_SIZE_CM), 0, MAP_MAX_HEIGHT - 1);
-    return {grid_x, grid_y};
+    int grid_x = static_cast<int>(std::lroundf((pos.x - MAP_OFFSET_X) * INV_GRID_SIZE_CM));
+    int grid_y = static_cast<int>(std::lroundf((pos.y - MAP_OFFSET_Y) * INV_GRID_SIZE_CM));
+    if (grid_x < 0 || grid_x >= MAP_MAX_WIDTH || grid_y < 0 || grid_y >= MAP_MAX_HEIGHT) {
+        // 物理坐标已经越界时不再 clamp 成合法格点，避免规划层继续基于假位置行动
+        App::g_state.game.error_stage = 9;
+        App::g_state.game.phase = GamePhase::ERROR_OCCURRED;
+        return logical_level.player_start;
+    }
+    return {static_cast<int8_t>(grid_x), static_cast<int8_t>(grid_y)};
 }
 
-// 获取观察动作的激活掩码
+/// \brief 获取观察动作的激活掩码
+/// \param action 当前宏动作
+/// \return OBSERVE 动作返回 active_mask，其他动作返回 0
+///
 uint32_t GameManager::observe_mask_of(const MacroAction& action) const {
     if (action.kind != MacroActionKind::OBSERVE) return 0;
     return action.observe.active_mask;

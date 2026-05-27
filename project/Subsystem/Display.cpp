@@ -68,6 +68,11 @@ namespace { // 匿名命名空间，确保这些数据只在本文件可见
     {"Brake_Lim",  &tune.dynamics.brake_limit,        0.05f },
     {"Reach_R ",   &tune.tracker.reach_radius,        0.1f  },
     {"Reach_M ",   &tune.tracker.reach_radius_min,    0.1f  },
+    // 现场过弯与视觉校正参数，和 Telemetry 的 !S B/N/M/G 指令保持同一组含义
+    {"Turn_V  ",   &tune.tracker.corner_pass_speed,   1.0f  },
+    {"Turn_W  ",   &tune.tracker.corner_switch_window,0.1f  },
+    {"LineTol ",   &tune.tracker.corner_line_tolerance,0.1f },
+    {"VisRej  ",   &tune.tracker.vision_reject_dist,  0.5f  },
     {"Ang_Tol ",   &tune.tracker.ang_tolerance,       0.001 },
     };
     constexpr int DICT_SIZE = sizeof(tune_dict) / sizeof(tune_dict[0]);   
@@ -114,6 +119,12 @@ void init() {
 }
 
 
+/// \brief 屏幕 UI 周期入口
+///
+/// \details
+/// 先扫描按键，再执行页面状态机和渲染
+/// 息屏时只保留返回键唤醒逻辑，避免后台持续刷新 TFT
+///
 void run() { 
     scan_keys(); 
     if (ctx.is_closed) {
@@ -136,7 +147,11 @@ void run() {
 // 4. 私有业务逻辑实现细节
 // ====================================================================
 
-// 按键扫描函数：检测按键边缘，更新按键状态变量，并标记 UI 需要刷新
+/// \brief 扫描四个按键并生成边沿事件
+///
+/// \details
+/// 按键为上拉输入，只有高电平到低电平的瞬间触发一次，避免长按被当成连续点击
+///
 void scan_keys() { 
     bool cur_k1 = gpio_get_level(KEY1);
     bool cur_k2 = gpio_get_level(KEY2);
@@ -157,7 +172,12 @@ void scan_keys() {
     }
 }
 
-// 核心逻辑控制器：状态跳转与参数修改
+/// \brief UI 页面状态机
+///
+/// \details
+/// 负责主菜单、仪表盘、参数调节、Mock/Demo 选图等页面跳转
+/// 参数页通过 tune_dict 指针直接修改全局调参项
+///
 void process_logic() {
     // 高频刷新监控页面
     if (ctx.current_page == MenuPage::DASHBOARD || ctx.current_page == MenuPage::ODOMETRY_DATA) {
@@ -319,7 +339,12 @@ void process_logic() {
 
 // ===================================================== UI 渲染 =====================================================
 
-// UI 渲染器：根据 current_page 调用对应的绘制函数
+/// \brief UI 渲染分发器
+///
+/// \details
+/// 需要全屏重绘时先清屏，再按当前页面调用具体绘制函数
+/// 普通刷新依赖 ui_dirty，降低 TFT 写入频率
+///
 void render_ui() {
     if (!ctx.ui_dirty) return;
     if (ctx.need_full_redraw) { 
@@ -339,7 +364,7 @@ void render_ui() {
     ctx.ui_dirty = false; 
 }
 
-// 绘制主菜单
+/// \brief 绘制主菜单页面
 void draw_main_menu() {
     tft180_show_string(0, 0, "-- COMMAND MENU --");
     draw_item(2, "Dashboard",  ctx.cursor_idx == 0);
@@ -352,7 +377,7 @@ void draw_main_menu() {
     draw_item(9, "right", ctx.cursor_idx == 7); 
 }
 
-// 绘制模式选择页面
+/// \brief 绘制 Mock/Demo 模式选择页面
 void draw_mode_select() {
     tft180_show_string(0, 0, "-- SELECT MODE --");
     
@@ -369,7 +394,7 @@ void draw_mode_select() {
     }
 }
 
-// 绘制地图选择页面
+/// \brief 绘制内置地图选择页面
 void draw_map_select() {
     tft180_show_string(0, 0, "-- SELECT MAP --");
     
@@ -393,7 +418,7 @@ void draw_map_select() {
     }
 }
 
-// 里程计和硬件监控页面
+/// \brief 绘制里程计和硬件监控页面
 void draw_odometry_data() {
     tft180_show_string(0, 0, "-- ODO & HW --");
     auto pos = App::g_state.physical.pose;
@@ -424,7 +449,11 @@ void draw_odometry_data() {
     tft180_show_string(0, 11 * UI_ROW_H, "Spd RB: ");     tft180_show_float(10 * UI_COL_W, 11 * UI_ROW_H, wheels.rb, 3, 1);
 }
 
-// 绘制参数调节页面
+/// \brief 绘制参数调节页面
+///
+/// \details
+/// 根据参数步长自动选择小数位数，避免小屏幕上显示过宽
+///
 void draw_tune_params() {
     tft180_show_string(0, 0, "PARAMETERS");
     
@@ -463,7 +492,12 @@ void draw_tune_params() {
     }
 }
 
-// 仪表盘页面：根据游戏状态动态显示信息
+/// \brief 绘制比赛仪表盘页面
+///
+/// \details
+/// 从 GameEngine 获取渲染上下文，合成地图、路径、观测点和小车位置
+/// 地图采用 back_buffer 做格子级增量刷新，小车单独作为像素级覆盖层绘制
+///
 void draw_dashboard() {
     App::GameEngine::RenderContext render_ctx = App::GameEngine::get_render_context();
     auto& game = App::g_state.game;
@@ -723,7 +757,11 @@ void draw_float_item(uint8_t row, const char* name, float val, bool is_selected,
     tft180_show_string(12 * UI_COL_W, row * UI_ROW_H, val_buf);
 }
 
-// 格式化规划耗时，毫秒字符串放不下时自动退化为秒
+/// \brief 格式化规划耗时
+///
+/// \details
+/// 毫秒字符串放不下时自动退化为秒，避免 HUD 文本溢出 21 字符宽度
+///
 void format_plan_time_line(char* out, size_t size, const char* label, uint32_t ms) {
     int written = snprintf(out, size, "%s %lums", label, static_cast<unsigned long>(ms));
     if (written >= 0 && static_cast<size_t>(written) < size) return;
