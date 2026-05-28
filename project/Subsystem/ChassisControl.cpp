@@ -17,22 +17,22 @@ namespace Subsystem::Chassis {
 // 内部私有实现
 // ====================================================================
 
-__attribute__((section(".dtcm_data"))) static Motor motors[4] = {
+DTCM_DATA static Motor motors[4] = {
     {C6,  PWM2_MODULE0_CHB_C7,  false},   // LF
     {C11, PWM2_MODULE2_CHA_C10, false},   // LB
     {C8,  PWM2_MODULE1_CHB_C9,  true },   // RF
     {D3,  PWM2_MODULE3_CHA_D2,  true }    // RB
 };
 
-__attribute__((section(".dtcm_data"))) static Algorithm::Motion::Speed_PosPid pid_wheels[4] = {
+DTCM_DATA static Algorithm::Motion::Speed_PosPid pid_wheels[4] = {
     Algorithm::Motion::Speed_PosPid(tune.pid_speed), Algorithm::Motion::Speed_PosPid(tune.pid_speed),
     Algorithm::Motion::Speed_PosPid(tune.pid_speed), Algorithm::Motion::Speed_PosPid(tune.pid_speed)
 };
 
-// __attribute__((section(".dtcm_data"))) static Algorithm::Motion::Angle_PosPid pid_pos_yaw(tune.pid_yaw);
+// DTCM_DATA static Algorithm::Motion::Angle_PosPid pid_pos_yaw(tune.pid_yaw);
 
-__attribute__((section(".dtcm_data"))) static Algorithm::Motion::Trajectory velocity_planner;
-__attribute__((section(".dtcm_data"))) static Algorithm::Motion::YawProfiled yaw_controller;
+DTCM_DATA static Algorithm::Motion::Trajectory velocity_planner;
+DTCM_DATA static Algorithm::Motion::YawProfiled yaw_controller;
 
 // --- 内部辅助函数声明 ---
 namespace {

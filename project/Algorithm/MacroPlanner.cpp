@@ -2,7 +2,7 @@
 #include "Strategy.h"
 #include <cstring>
 
-__attribute__((section(".dtcm_data"))) MacroPlanner macro_planner;
+DTCM_DATA MacroPlanner macro_planner;
 
 // ============================================================================
 // 参数面板
@@ -13,8 +13,9 @@ namespace MacroConfig {
     // 槽位功能开关
     // ------------------------------------------------------------------------
     inline constexpr bool ENABLE_COMPLETION_PUSH_SLOT = false;       // 是否启用完成式推箱候选位
-    inline constexpr bool ENABLE_APPROACH_PUSH_SLOT = false;        // 是否启用接近式推箱候选位
-    inline constexpr bool ENABLE_OPPORTUNISTIC_BOMB_SLOT = false;   // 是否启用机会性炸弹候选位
+    inline constexpr bool ENABLE_APPROACH_PUSH_SLOT = false;         // 是否启用接近式推箱候选位
+    inline constexpr bool ENABLE_OPPORTUNISTIC_BOMB_SLOT = false;    // 是否启用机会性炸弹候选位
+    inline constexpr bool ENABLE_SUPPLEMENTAL_OBSERVE_SLOT = false;  // 是否启用补充式观测候选位
 
     // ------------------------------------------------------------------------
     // 完成式推箱候选位
@@ -25,12 +26,12 @@ namespace MacroConfig {
     //   + pressure_reward
     //   - player_to_box    * COMPLETION_DISTANCE_WEIGHT
     //   + COMPLETION_PRESSURE_REWARD
-    inline constexpr int COMPLETION_SCORE_THRESHOLD = 4;   // 执行阈值，给镜像地图的路径拐点差异留出余量
-    inline constexpr int COMPLETION_FOLLOW_WEIGHT = 1;     // 推箱后接回下一参考任务的时间收益权重 [调大：更偏好顺路完成]
-    inline constexpr int COMPLETION_RETURN_WEIGHT = 1;     // 未来少一次回到该箱子附近的时间收益权重 [调大：更愿意提前处理远处箱子]
-    inline constexpr int COMPLETION_DISTANCE_WEIGHT = 1;   // 小车到箱子可站位时间代价的惩罚权重 [调大：更偏向离车近的箱子]
-    inline constexpr int COMPLETION_PRESSURE_REWARD = 4;   // 箱子直接落到目标点后，对第二阶段 IDA* 搜索压力下降的基础时间奖励
-    inline constexpr int COMPLETION_MAX_PUSH_PATH = 20;    // 完成式推箱展开路径长度上限
+    inline constexpr int COMPLETION_SCORE_THRESHOLD = 0;    // 执行阈值，给镜像地图的路径拐点差异留出余量
+    inline constexpr int COMPLETION_FOLLOW_WEIGHT = 3;      // 推箱后接回下一参考任务的时间收益权重 [调大：更偏好顺路完成]
+    inline constexpr int COMPLETION_RETURN_WEIGHT = 1;      // 未来少一次回到该箱子附近的时间收益权重 [调大：更愿意提前处理远处箱子]
+    inline constexpr int COMPLETION_DISTANCE_WEIGHT = 1;    // 小车到箱子可站位时间代价的惩罚权重 [调大：更偏向离车近的箱子]
+    inline constexpr int COMPLETION_PRESSURE_REWARD = 14;   // 箱子直接落到目标点后，对第二阶段 IDA* 搜索压力下降的基础时间奖励
+    inline constexpr int COMPLETION_MAX_PUSH_PATH = 16;     // 完成式推箱展开路径长度上限
 
     // ------------------------------------------------------------------------
     // 参考候选位清障
@@ -38,6 +39,11 @@ namespace MacroConfig {
     inline constexpr int REFERENCE_CLEAR_MAX_STEPS = 2;    //沿四方向最多尝试把挡路箱子推开几格
     inline constexpr int REFERENCE_CLEAR_MAX_PATH = 20;    // 单次清障推箱允许的最大展开路径长度
     inline constexpr int REFERENCE_MATERIALIZED_CLEAR_BONUS = 950; // Strategy 已验证清障序列的优先级奖励
+
+    // ------------------------------------------------------------------------
+    // 补充式观测候选位
+    // ------------------------------------------------------------------------
+    inline constexpr int SUPPLEMENTAL_NON_BOX_PENALTY = 8; // 补看目标点而不是箱子时的收尾惩罚
 }
 
 static constexpr int kInfScore = 1000000;
@@ -71,7 +77,17 @@ bool MacroPlanner::plan_next_action(const MacroPlanContext& ctx, MacroAction& ou
     }
 
     SlotCandidate reference_slot;
-    if (!build_reference_slot(ctx, reference_slot)) return false;
+    if (!build_reference_slot(ctx, reference_slot)) {
+        SlotCandidate supplemental_slot;
+        if (build_supplemental_observe_slot(ctx, supplemental_slot)) {
+            out_action = supplemental_slot.action;
+            pending_actions = supplemental_slot.followups;
+            pending_cursor = 0;
+            return true;
+        }
+        force_supplemental_fallback(ctx.level);
+        return false;
+    }
 
     SlotCandidate best_optional;
     best_optional.score = -kInfScore;
@@ -113,6 +129,24 @@ static int abs_i(int v) {
 
 static int manhattan(point a, point b) {
     return abs_i(a.x - b.x) + abs_i(a.y - b.y);
+}
+
+static bool is_valid_semantic_id(int8_t label) {
+    return label >= 0 && label <= 9;
+}
+
+static int first_unused_semantic_id(const int box_counts[10], const int target_counts[10]) {
+    for (int s = 0; s < 10; ++s) {
+        if (box_counts[s] == 0 && target_counts[s] == 0) return s;
+    }
+    return 0;
+}
+
+static bool mask_contains_box(uint32_t mask, int box_count) {
+    for (int b = 0; b < box_count; ++b) {
+        if (mask & (1UL << b)) return true;
+    }
+    return false;
 }
 
 // 判断参考炸弹是否还没执行；炸弹被使用后会在地图里标记为 {-1, -1}
@@ -267,6 +301,9 @@ void MacroPlanner::reset(const SokobanLevel& level) {
     target_count = level.target_count;
 
     for (int i = 0; i < MAX_ENTITIES; ++i) semantic_labels[i] = -1;
+    for (int i = 0; i < MAX_ENTITIES; ++i) knowledge_state.inferred_semantics[i] = -1;
+    knowledge_state.semantics_ready = false;
+    knowledge_state.needs_supplemental_observe = false;
     for (int i = 0; i < MAX_BOXES; ++i) {
         knowledge_state.candidate_targets[i] = default_candidate_mask();
         knowledge_state.bound_target[i] = 0;
@@ -341,150 +378,197 @@ bool MacroPlanner::reference_sequence_done(const SokobanLevel& level) const {
     return cursor >= reference_plan.size();
 }
 
-/// \brief 根据视觉语义标签建立箱子到目标点的绑定关系
+/// \brief 根据观测标签推断完整实体语义
 /// \param level 当前逻辑地图
 /// \param labels 视觉输出的语义标签，前 box_count 项为箱子，后 target_count 项为目标点
-/// \param out_matched_ids 输出匹配关系，out_matched_ids[i] 为第 i 个箱子对应目标点编号
-/// \return 所有箱子和目标点都完成绑定时返回 true
+/// \param out_labels 输出完整语义标签，允许同一侧存在重复语义
+/// \return 语义推断状态
 ///
 /// \details
-/// 绑定分四轮：已观测同标签先直接配对；已观测箱子的标签如果只可能落在
-/// 唯一未观测目标上，则补到该目标；已观测目标同理反向补到唯一未观测箱子；
-/// 最后只允许一个箱子和一个目标点按唯一空位补齐。
-bool MacroPlanner::match_semantics(const SokobanLevel& level, const int8_t* labels, uint8_t* out_matched_ids) const {
-    bool target_assigned[SystemConfig::MAX_BOXES] = {false};
-    bool box_assigned[SystemConfig::MAX_BOXES] = {false};
+/// Macro 现在只推断语义，不把语义直接等价成“箱子绑定某个固定目标点”。
+/// 已知标签必须满足每个语义在箱子侧和目标侧最终数量一致。若只剩一箱一目标未知，
+/// 则优先用两侧计数缺口推断最后语义；如果缺口为空，说明最后一组可能是任意重复语义，
+/// 这时需要补充式观测。补充式观测关闭时，才把这一组补成 0-9 中未出现的新语义。
+MacroPlanner::SemanticInferenceStatus MacroPlanner::infer_semantics(const SokobanLevel& level,
+                                                                    const int8_t* labels,
+                                                                    int8_t* out_labels,
+                                                                    bool allow_supplemental_observe) const {
+    if (!labels || !out_labels) return SemanticInferenceStatus::INVALID;
+    if (level.box_count != level.target_count) return SemanticInferenceStatus::INVALID;
 
-    for (int i = 0; i < level.box_count; ++i) out_matched_ids[i] = 0;
+    const int entity_count = level.box_count + level.target_count;
+    for (int i = 0; i < entity_count; ++i) out_labels[i] = labels[i];
 
-    if (level.box_count != level.target_count) return false;
+    int box_counts[10] = {0};
+    int target_counts[10] = {0};
+    int hidden_box = -1;
+    int hidden_target = -1;
+    int hidden_box_count = 0;
+    int hidden_target_count = 0;
 
-    int observed_boxes = 0;
-    int observed_targets = 0;
     for (int b = 0; b < level.box_count; ++b) {
-        if (labels[b] != -1) ++observed_boxes;
+        int8_t label = labels[b];
+        if (label == -1) {
+            hidden_box = b;
+            ++hidden_box_count;
+            continue;
+        }
+        if (!is_valid_semantic_id(label)) return SemanticInferenceStatus::INVALID;
+        ++box_counts[label];
     }
+
     for (int t = 0; t < level.target_count; ++t) {
-        if (labels[level.box_count + t] != -1) ++observed_targets;
+        int8_t label = labels[level.box_count + t];
+        if (label == -1) {
+            hidden_target = t;
+            ++hidden_target_count;
+            continue;
+        }
+        if (!is_valid_semantic_id(label)) return SemanticInferenceStatus::INVALID;
+        ++target_counts[label];
     }
 
     int req_boxes = level.box_count - 1;
     int req_targets = level.target_count - 1;
     if (req_boxes < 0) req_boxes = 0;
     if (req_targets < 0) req_targets = 0;
-    if (observed_boxes < req_boxes || observed_targets < req_targets) return false;
-
-    int hidden_box = -1;
-    int hidden_target = -1;
-    int hidden_box_count = 0;
-    int hidden_target_count = 0;
-    for (int b = 0; b < level.box_count; ++b) {
-        if (labels[b] == -1) {
-            hidden_box = b;
-            ++hidden_box_count;
-        }
-    }
-    for (int t = 0; t < level.target_count; ++t) {
-        if (labels[level.box_count + t] == -1) {
-            hidden_target = t;
-            ++hidden_target_count;
-        }
+    if (level.box_count - hidden_box_count < req_boxes ||
+        level.target_count - hidden_target_count < req_targets) {
+        return SemanticInferenceStatus::INSUFFICIENT;
     }
 
-    // 语义图案在同一侧应唯一，重复会让 N-1 推断失去确定性
-    for (int i = 0; i < level.box_count; ++i) {
-        if (labels[i] == -1) continue;
-        for (int j = i + 1; j < level.box_count; ++j) {
-            if (labels[j] == labels[i]) return false;
-        }
-    }
-    for (int i = 0; i < level.target_count; ++i) {
-        int8_t lhs = labels[level.box_count + i];
-        if (lhs == -1) continue;
-        for (int j = i + 1; j < level.target_count; ++j) {
-            if (labels[level.box_count + j] == lhs) return false;
+    if (hidden_box_count > 1 || hidden_target_count > 1) return SemanticInferenceStatus::INSUFFICIENT;
+
+    int box_needs[10] = {0};
+    int target_needs[10] = {0};
+    int box_need_total = 0;
+    int target_need_total = 0;
+    int box_need_sem = -1;
+    int target_need_sem = -1;
+
+    for (int s = 0; s < 10; ++s) {
+        if (box_counts[s] > target_counts[s]) {
+            target_needs[s] = box_counts[s] - target_counts[s];
+            target_need_total += target_needs[s];
+            if (target_needs[s] == 1) target_need_sem = s;
+        } else if (target_counts[s] > box_counts[s]) {
+            box_needs[s] = target_counts[s] - box_counts[s];
+            box_need_total += box_needs[s];
+            if (box_needs[s] == 1) box_need_sem = s;
         }
     }
 
-    // 第一轮：箱子和目标点都有明确语义时，直接同标签绑定
-    for (int b = 0; b < level.box_count; ++b) {
-        int8_t box_sem = labels[b];
-        if (box_sem == -1) continue;
+    if (box_need_total > hidden_box_count || target_need_total > hidden_target_count) {
+        return SemanticInferenceStatus::INVALID;
+    }
 
-        int matched_target = -1;
-        for (int t = 0; t < level.target_count; ++t) {
-            int8_t target_sem = labels[level.box_count + t];
-            if (target_sem == box_sem) {
-                matched_target = t;
-                break;
+    if (hidden_box_count == 0 && hidden_target_count == 0) {
+        return (box_need_total == 0 && target_need_total == 0)
+            ? SemanticInferenceStatus::INFERRED
+            : SemanticInferenceStatus::INVALID;
+    }
+
+    if (hidden_box_count == 1 && hidden_target_count == 0) {
+        if (box_need_total != 1 || target_need_total != 0 || box_need_sem < 0) {
+            return SemanticInferenceStatus::INVALID;
+        }
+        out_labels[hidden_box] = static_cast<int8_t>(box_need_sem);
+        return SemanticInferenceStatus::INFERRED;
+    }
+
+    if (hidden_box_count == 0 && hidden_target_count == 1) {
+        if (target_need_total != 1 || box_need_total != 0 || target_need_sem < 0) {
+            return SemanticInferenceStatus::INVALID;
+        }
+        out_labels[level.box_count + hidden_target] = static_cast<int8_t>(target_need_sem);
+        return SemanticInferenceStatus::INFERRED;
+    }
+
+    if (box_need_total == 1 && target_need_total == 1 &&
+        box_need_sem >= 0 && target_need_sem >= 0) {
+        out_labels[hidden_box] = static_cast<int8_t>(box_need_sem);
+        out_labels[level.box_count + hidden_target] = static_cast<int8_t>(target_need_sem);
+        return SemanticInferenceStatus::INFERRED;
+    }
+
+    if (box_need_total == 0 && target_need_total == 0) {
+        if constexpr (MacroConfig::ENABLE_SUPPLEMENTAL_OBSERVE_SLOT) {
+            if (!allow_supplemental_observe) {
+                int fallback_sem = first_unused_semantic_id(box_counts, target_counts);
+                out_labels[hidden_box] = static_cast<int8_t>(fallback_sem);
+                out_labels[level.box_count + hidden_target] = static_cast<int8_t>(fallback_sem);
+                return SemanticInferenceStatus::INFERRED;
             }
+            return SemanticInferenceStatus::NEED_SUPPLEMENTAL;
         }
-        if (matched_target < 0) continue;
 
-        out_matched_ids[b] = static_cast<uint8_t>(matched_target);
-        box_assigned[b] = true;
-        target_assigned[matched_target] = true;
+        int fallback_sem = first_unused_semantic_id(box_counts, target_counts);
+        out_labels[hidden_box] = static_cast<int8_t>(fallback_sem);
+        out_labels[level.box_count + hidden_target] = static_cast<int8_t>(fallback_sem);
+        return SemanticInferenceStatus::INFERRED;
     }
 
-    // 第二轮：已观测箱子的同标签目标缺席时，只能补到唯一未观测目标
-    if (hidden_target_count == 1) {
-        int candidate_box = -1;
-        int candidate_count = 0;
-        for (int b = 0; b < level.box_count; ++b) {
-            if (box_assigned[b] || labels[b] == -1) continue;
-            candidate_box = b;
-            ++candidate_count;
-        }
-        if (candidate_count == 1 && !target_assigned[hidden_target]) {
-            out_matched_ids[candidate_box] = static_cast<uint8_t>(hidden_target);
-            box_assigned[candidate_box] = true;
-            target_assigned[hidden_target] = true;
-        }
+    return SemanticInferenceStatus::INVALID;
+}
+
+// 将推断出的完整语义写回 Macro 状态，并同步到 semantic_labels。
+// 这样后续 sync_semantics 再次运行时，不会把补充观测失败后的回退结果冲掉。
+bool MacroPlanner::apply_inferred_semantics(const SokobanLevel& level, const int8_t* inferred_labels) {
+    if (!inferred_labels) return false;
+
+    for (int i = 0; i < MAX_ENTITIES; ++i) knowledge_state.inferred_semantics[i] = -1;
+    for (int b = 0; b < box_count; ++b) {
+        knowledge_state.candidate_targets[b] = default_candidate_mask();
+        knowledge_state.bound_target[b] = 0;
+        knowledge_state.is_bound[b] = false;
     }
 
-    // 第三轮：已观测目标的同标签箱子缺席时，只能反向补到唯一未观测箱子
-    if (hidden_box_count == 1) {
-        int candidate_target = -1;
-        int candidate_count = 0;
-        for (int t = 0; t < level.target_count; ++t) {
-            if (target_assigned[t] || labels[level.box_count + t] == -1) continue;
-            candidate_target = t;
-            ++candidate_count;
-        }
-        if (candidate_count == 1 && !box_assigned[hidden_box]) {
-            out_matched_ids[hidden_box] = static_cast<uint8_t>(candidate_target);
-            box_assigned[hidden_box] = true;
-            target_assigned[candidate_target] = true;
-        }
+    const int entity_count = level.box_count + level.target_count;
+    for (int i = 0; i < entity_count; ++i) {
+        if (!is_valid_semantic_id(inferred_labels[i])) return false;
+        knowledge_state.inferred_semantics[i] = inferred_labels[i];
+        semantic_labels[i] = inferred_labels[i];
     }
 
-    // 第四轮：剩余双盲实体按唯一空位补齐
-    int unassigned_box = -1;
-    int unassigned_target = -1;
-    int unassigned_box_count = 0;
-    int unassigned_target_count = 0;
-    for (int b = 0; b < level.box_count; ++b) {
-        if (!box_assigned[b]) {
-            unassigned_box = b;
-            ++unassigned_box_count;
+    knowledge_state.semantics_ready = true;
+    knowledge_state.needs_supplemental_observe = false;
+
+    // 完成式推箱若重新打开，需要一份临时自然顺序目标；最终 Sokoban 只看语义组
+    bool used_targets[MAX_BOXES] = {false};
+    for (int b = 0; b < box_count; ++b) {
+        int chosen = -1;
+        int8_t box_sem = knowledge_state.inferred_semantics[b];
+        for (int t = 0; t < target_count; ++t) {
+            int8_t target_sem = knowledge_state.inferred_semantics[box_count + t];
+            if (used_targets[t] || target_sem != box_sem) continue;
+            chosen = t;
+            break;
         }
-    }
-    for (int t = 0; t < level.target_count; ++t) {
-        if (!target_assigned[t]) {
-            unassigned_target = t;
-            ++unassigned_target_count;
-        }
+        if (chosen < 0) return false;
+
+        used_targets[chosen] = true;
+        knowledge_state.candidate_targets[b] = (1U << chosen);
+        knowledge_state.bound_target[b] = static_cast<uint8_t>(chosen);
+        knowledge_state.is_bound[b] = true;
     }
 
-    if (unassigned_box_count == 1 && unassigned_target_count == 1) {
-        out_matched_ids[unassigned_box] = static_cast<uint8_t>(unassigned_target);
-        box_assigned[unassigned_box] = true;
-        target_assigned[unassigned_target] = true;
-    }
-
-    for (int b = 0; b < level.box_count; ++b) if (!box_assigned[b]) return false;
-    for (int t = 0; t < level.target_count; ++t) if (!target_assigned[t]) return false;
     return true;
+}
+
+bool MacroPlanner::force_supplemental_fallback(const SokobanLevel& level) {
+    if (!needs_supplemental_observation(level)) return false;
+
+    SokobanLevel semantic_level{};
+    semantic_level.box_count = box_count;
+    semantic_level.target_count = target_count;
+
+    int8_t inferred[MAX_ENTITIES];
+    SemanticInferenceStatus status = infer_semantics(semantic_level, semantic_labels, inferred, false);
+    if (status != SemanticInferenceStatus::INFERRED) return false;
+
+    // 补充观测点不可达时，退回到“补充观测关闭”的语义策略：
+    // 给最后一组未观测箱子/目标点分配一个前面没有出现过的新语义。
+    return apply_inferred_semantics(semantic_level, inferred);
 }
 
 /// \brief 写入一次观测结果
@@ -499,70 +583,80 @@ void MacroPlanner::apply_observation(const SokobanLevel& level, uint32_t mask) {
 /// \param labels ART2 语义标签数组，-1 表示未知
 ///
 /// \details
-/// 函数先同步 vision 语义池，再用已明确的箱子/目标同标签关系更新绑定；
-/// 当语义池满足 N-1 规则时，直接调用 match_semantics 补齐剩余盲区。
+/// 函数先同步 vision 语义池，再按“同语义数量相等”的规则做实体语义推断。
+/// 语义完整后只额外生成完成式推箱候选位需要的临时自然顺序映射。
 void MacroPlanner::sync_semantics(const int8_t* labels) {
     if (!labels) return;
     for (int i = 0; i < MAX_ENTITIES; ++i) {
         if (labels[i] != -1) semantic_labels[i] = labels[i];
     }
 
+    knowledge_state.semantics_ready = false;
+    knowledge_state.needs_supplemental_observe = false;
+    for (int i = 0; i < MAX_ENTITIES; ++i) knowledge_state.inferred_semantics[i] = -1;
     for (int b = 0; b < box_count; ++b) {
-        int8_t box_sem = semantic_labels[b];
-        if (box_sem < 0) continue;
-
-        for (int t = 0; t < target_count; ++t) {
-            int target_entity = box_count + t;
-            if (semantic_labels[target_entity] != box_sem) continue;
-
-            knowledge_state.candidate_targets[b] = (1U << t);
-            knowledge_state.bound_target[b] = static_cast<uint8_t>(t);
-            knowledge_state.is_bound[b] = true;
-            break;
-        }
+        knowledge_state.candidate_targets[b] = default_candidate_mask();
+        knowledge_state.bound_target[b] = 0;
+        knowledge_state.is_bound[b] = false;
     }
 
     SokobanLevel semantic_level{};
     semantic_level.box_count = box_count;
     semantic_level.target_count = target_count;
 
-    uint8_t matched[MAX_BOXES];
-    if (!match_semantics(semantic_level, semantic_labels, matched)) return;
-
-    for (int b = 0; b < box_count; ++b) {
-        if (matched[b] >= target_count) continue;
-        knowledge_state.candidate_targets[b] = (1U << matched[b]);
-        knowledge_state.bound_target[b] = matched[b];
-        knowledge_state.is_bound[b] = true;
+    int8_t inferred[MAX_ENTITIES];
+    SemanticInferenceStatus status = infer_semantics(semantic_level, semantic_labels, inferred);
+    if (status == SemanticInferenceStatus::NEED_SUPPLEMENTAL) {
+        knowledge_state.needs_supplemental_observe = true;
+        return;
     }
+    if (status != SemanticInferenceStatus::INFERRED) return;
+    apply_inferred_semantics(semantic_level, inferred);
 }
 
 /// \brief 判断 Macro 阶段是否可以交给 Sokoban
 /// \param level 当前逻辑地图
-/// \return 参考序列完成且语义信息足够时返回 true
+/// \return 参考序列完成且已达到 N-1 观测要求时返回 true
 bool MacroPlanner::ready_for_sokoban(const SokobanLevel& level) const {
     if (pending_cursor < pending_actions.size()) return false;
     if (!reference_sequence_done(level)) return false;
     if (!has_required_observations(level)) return false;
+    if (needs_supplemental_observation(level)) return false;
 
-    for (int b = 0; b < level.box_count; ++b) {
-        if (!knowledge_state.is_bound[b]) return false;
-        if (knowledge_state.bound_target[b] >= target_count) return false;
+    // 语义是否完整交给 BIND_SEMANTICS 阶段判定
+    // 否则最后一个观测点完成后若绑定尚未收敛，会继续请求下一条宏动作并误报 error1
+    return true;
+}
+
+/// \brief 将 Macro 推断出的完整实体语义写回关卡
+/// \param level 当前逻辑地图
+/// \return 语义推断完整时返回 true
+bool MacroPlanner::apply_semantics_to_level(SokobanLevel& level) const {
+    if (!semantics_ready()) return false;
+    if (level.box_count != box_count || level.target_count != target_count) return false;
+
+    for (int b = 0; b < box_count; ++b) {
+        int8_t sem = knowledge_state.inferred_semantics[b];
+        if (!is_valid_semantic_id(sem)) return false;
+        level.box_semantics[b] = static_cast<uint8_t>(sem);
+    }
+    for (int t = 0; t < target_count; ++t) {
+        int8_t sem = knowledge_state.inferred_semantics[box_count + t];
+        if (!is_valid_semantic_id(sem)) return false;
+        level.target_semantics[t] = static_cast<uint8_t>(sem);
     }
     return true;
 }
 
-/// \brief 输出第二阶段需要的 box -> target 配对
-/// \param out_ids 输出数组，out_ids[box_id] = target_id
-/// \param count 当前箱子数量
-/// \return 配对完整时返回 true
-bool MacroPlanner::fill_matched_ids(uint8_t* out_ids, uint8_t count) {
-    for (int b = 0; b < count; ++b) {
-        if (!knowledge_state.is_bound[b]) return false;
-        if (knowledge_state.bound_target[b] >= target_count) return false;
-        out_ids[b] = knowledge_state.bound_target[b];
-    }
-    return true;
+bool MacroPlanner::semantics_ready() const {
+    return knowledge_state.semantics_ready;
+}
+
+bool MacroPlanner::needs_supplemental_observation(const SokobanLevel& level) const {
+    return reference_sequence_done(level) &&
+           has_required_observations(level) &&
+           knowledge_state.needs_supplemental_observe &&
+           !knowledge_state.semantics_ready;
 }
 
 // ============================================================================
@@ -1182,4 +1276,61 @@ bool MacroPlanner::build_opportunistic_bomb_slot(const MacroPlanContext& ctx, co
     (void)reference_action;
     (void)slot;
     return false;
+}
+
+/// \brief 构造补充式观测候选位
+/// \param ctx 当前在线调度上下文
+/// \param slot 输出补充观测动作
+/// \return 找到可执行补充观测时返回 true
+///
+/// \details
+/// 补充式观测只在参考序列已经结束、N-1 数量达标但最后一组语义仍无法唯一推断时启用。
+/// 评分沿用“剩余那个近看哪个”的原则：优先距离和转向小的位姿；如果候选没有看到未知箱子，
+/// 则加入非箱子惩罚，避免收尾时停在离箱子很远的目标点旁边。
+bool MacroPlanner::build_supplemental_observe_slot(const MacroPlanContext& ctx, SlotCandidate& slot) const {
+    if constexpr (!MacroConfig::ENABLE_SUPPLEMENTAL_OBSERVE_SLOT) {
+        (void)ctx;
+        (void)slot;
+        return false;
+    }
+
+    if (!needs_supplemental_observation(ctx.level)) return false;
+
+    StaticArray<ViewPose, MAX_OBS_POINTS> views = patrol_planner.build_current_views(ctx.level);
+    SlotCandidate best;
+    best.score = kInfScore;
+
+    for (int i = 0; i < views.size(); ++i) {
+        uint32_t newly_seen = views[i].mask[0] & ~knowledge_state.observed_mask;
+        if (newly_seen == 0) continue;
+
+        StaticArray<point, MAX_PATH_LENGTH> path;
+        if (!PlanningCommon::get_grid_time_path(ctx.level, ctx.player, views[i].pos, path)) continue;
+
+        int score =
+            PlanningCommon::path_time_cost(ctx.player, path) +
+            PlanningCommon::yaw_turn_time_cost(ctx.yaw, views[i].target_yaw) +
+            views[i].penalty[0];
+
+        if (!mask_contains_box(newly_seen, ctx.level.box_count)) {
+            score += MacroConfig::SUPPLEMENTAL_NON_BOX_PENALTY;
+        }
+
+        if (!best.valid || score < best.score) {
+            MacroAction action = make_observe_macro_action(views[i], newly_seen);
+            action.real_cost =
+                PlanningCommon::path_time_cost(ctx.player, path) +
+                PlanningCommon::yaw_turn_time_cost(ctx.yaw, views[i].target_yaw);
+
+            best.action = action;
+            best.slot = SlotKind::SUPPLEMENTAL_OBSERVE;
+            best.score = score;
+            best.valid = true;
+            best.consumes_reference = false;
+        }
+    }
+
+    if (!best.valid) return false;
+    slot = best;
+    return true;
 }

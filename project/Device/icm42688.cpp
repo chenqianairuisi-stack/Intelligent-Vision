@@ -1,4 +1,5 @@
 #include "Icm42688.h"
+#include "system_config.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -9,7 +10,7 @@ extern "C" {
 }
 #endif
 
-__attribute__((section(".dtcm_data"))) Icm42688 imu_icm42688;
+DTCM_DATA Icm42688 imu_icm42688;
 
 
 /// \brief 初始化 ICM42688

@@ -20,7 +20,7 @@ static constexpr EncoderHWConfig ENC_CONFIGS[4] = {
 };
 
 
-__attribute__((section(".dtcm_data"))) EncoderArray encoders;
+DTCM_DATA EncoderArray encoders;
 
 
 /// \brief 初始化四路正交编码器

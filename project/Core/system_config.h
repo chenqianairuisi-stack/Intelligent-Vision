@@ -2,7 +2,7 @@
 #include <cstdint>
 #include <array>
 
-#define MCU_OCRAM_BSS __attribute__((section(".ocram_bss")))
+#define DTCM_DATA __attribute__((section(".dtcm_data")))
 
 //---------------------------------------------------------------------------------
 //全局坐标系：x 轴正方向为右，y 轴正方向为前，逆时针为正旋转（x 轴设为 0 度）
@@ -159,7 +159,8 @@ struct SokobanLevel {
     point targets[SystemConfig::MAX_BOXES];  uint8_t target_count;
     point boxes[SystemConfig::MAX_BOXES];    uint8_t box_count;
 
-    uint8_t box_ids[SystemConfig::MAX_BOXES];  // 映射关系：box_ids[i] 表示第 i 个箱子对于应的目标点ID
+    uint8_t box_semantics[SystemConfig::MAX_BOXES];      // 箱子语义编号：box_semantics[i] 表示第 i 个箱子的语义 id
+    uint8_t target_semantics[SystemConfig::MAX_BOXES];   // 目标点语义编号：与箱子语义相同即可匹配
 };
 
 

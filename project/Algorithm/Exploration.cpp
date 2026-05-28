@@ -4,38 +4,50 @@
 #include <cstring>
 #include <algorithm>
 
-__attribute__((section(".dtcm_data"))) Exploration patrol_planner;
+DTCM_DATA Exploration patrol_planner;
 
 // ============================================================================
-// 参数面板：巡图启发式代价与观测配置
+// 参数面板
 // ============================================================================
-static constexpr uint16_t MIN_GRID_TIME_LOWER_BOUND = 2;    // DFS 剪枝下界：单个未观测实体至少还要多少基础代价 [越大剪枝越激进]
-static constexpr int32_t  BONUS_FOR_BOMB = 8;               // 炸弹动作奖励
-static constexpr uint16_t BOMB_ROUTE_COST_DIVISOR = 100;   // 推必炸炸弹本体路径的摊销系数
-static constexpr uint16_t FIRST_BOMB_LOCALITY_WEIGHT = 8;   // 巡图炸弹排序：优先处理当前附近的炸弹
-static constexpr uint16_t FINAL_NEAR_BOX_RADIUS = 4;        // 收尾位置靠近箱子的判定半径
-static constexpr uint16_t FINAL_NO_BOX_PENALTY = 10;        // 收尾位置远离箱子的时间惩罚
-static constexpr uint16_t COST_INFINITY = 65535;            // 不可达代价哨兵值
-static constexpr int32_t SEARCH_COST_INFINITY = 1000000000; // DFS 有符号代价上界，允许炸弹奖励产生负代价
-static constexpr int MAX_BOMB_APPROACH_OBS_BRANCHES = 4;    // 每个炸弹宏动作最多展开的顺路观测组合分支数
 
-// 根据剩余实体数量动态计算网格时间下界，更激进地剪枝多实体状态空间
-static constexpr int GRID_TIME_CACHE_SLOTS = 16;            // 小型 LRU 距离图缓存槽数，16 槽约 6KB
+namespace ExplorationConfig {
+    // ------------------------------------------------------------------------
+    // 观测位姿类型开关
+    // ------------------------------------------------------------------------
+    inline constexpr bool ENABLE_FACE_TO_FACE = true;     // 正面贴近观测
+    inline constexpr bool ENABLE_OPTIMAL_DIST = false;    // 远一格的最佳视距观测
+    inline constexpr bool ENABLE_DIAGONAL = false;        // 近斜角观测
+    inline constexpr bool ENABLE_FAR_DIAGONAL = false;    // 远斜角观测
 
-// 根据初始实体数量返回巡图 DFS 使用的乐观距离下界
-static constexpr uint16_t dynamic_grid_time_lower_bound(int initial_entities) {
-    if (initial_entities <= 6) return MIN_GRID_TIME_LOWER_BOUND;
-    if (initial_entities <= 8) return MIN_GRID_TIME_LOWER_BOUND + 8;
-    if (initial_entities <= 10) return MIN_GRID_TIME_LOWER_BOUND + 10;
-    return MIN_GRID_TIME_LOWER_BOUND + 16;
+    // ------------------------------------------------------------------------
+    // 巡图 DFS 代价参数
+    // ------------------------------------------------------------------------
+    inline constexpr uint16_t MIN_GRID_TIME_LOWER_BOUND = 2;    // 单个未观测实体至少还要多少基础代价
+    inline constexpr int32_t BONUS_FOR_BOMB = 8;                // 炸弹动作奖励
+    inline constexpr uint16_t BOMB_ROUTE_COST_DIVISOR = 100;    // 推必炸炸弹本体路径的摊销系数
+    inline constexpr uint16_t FIRST_BOMB_LOCALITY_WEIGHT = 8;   // 巡图炸弹排序：优先处理当前附近的炸弹
+    inline constexpr uint16_t FINAL_NEAR_BOX_RADIUS = 4;        // 收尾位置靠近箱子的判定半径
+    inline constexpr uint16_t FINAL_NO_BOX_PENALTY = 10;        // 收尾位置远离箱子的时间惩罚
+    inline constexpr uint16_t COST_INFINITY = 65535;            // 不可达代价哨兵值
+    inline constexpr int32_t SEARCH_COST_INFINITY = 1000000000; // DFS 有符号代价上界，允许炸弹奖励产生负代价
+
+    // ------------------------------------------------------------------------
+    // 搜索缓存与分支上限
+    // ------------------------------------------------------------------------
+    inline constexpr int MAX_BOMB_APPROACH_OBS_BRANCHES = 4; // 每个炸弹宏动作最多展开的顺路观测组合分支数
+    inline constexpr int GRID_TIME_CACHE_SLOTS = 16;         // 小型 LRU 距离图缓存槽数，16 槽约 6KB
+    inline constexpr int PATROL_DFS_FRAME_LIMIT = 16;        // DFS 递归帧复用数组深度上限
+
+    // 根据初始实体数量返回巡图 DFS 使用的乐观距离下界
+    inline constexpr uint16_t dynamic_grid_time_lower_bound(int initial_entities) {
+        if (initial_entities <= 6) return MIN_GRID_TIME_LOWER_BOUND;
+        if (initial_entities <= 8) return MIN_GRID_TIME_LOWER_BOUND + 8;
+        if (initial_entities <= 10) return MIN_GRID_TIME_LOWER_BOUND + 10;
+        return MIN_GRID_TIME_LOWER_BOUND + 16;
+    }
 }
 
-namespace VisionConfig {
-    constexpr bool ENABLE_FACE_TO_FACE = true;     // 正面贴近观测
-    constexpr bool ENABLE_OPTIMAL_DIST = false;    // 远一格的最佳视距观测
-    constexpr bool ENABLE_DIAGONAL     = false;    // 近斜角观测
-    constexpr bool ENABLE_FAR_DIAGONAL = false;    // 远斜角观测
-}
+using namespace ExplorationConfig;
 
 // ============================================================================
 // 热点工作区
@@ -150,12 +162,12 @@ void Exploration::build_entity_views(const SokobanLevel* multi_maps, int B) {
 
                 struct ViewGrid { point p; uint16_t pen; bool needs_los; bool enabled; };
                 ViewGrid v_pts[6] = {
-                    { p + F,         1, false, VisionConfig::ENABLE_FACE_TO_FACE },
-                    { p + F + F,     0, true,  VisionConfig::ENABLE_OPTIMAL_DIST },
-                    { p + F + L,     4, false, VisionConfig::ENABLE_DIAGONAL     },
-                    { p + F + R,     4, false, VisionConfig::ENABLE_DIAGONAL     },
-                    { p + F + F + L, 5, true,  VisionConfig::ENABLE_FAR_DIAGONAL },
-                    { p + F + F + R, 5, true,  VisionConfig::ENABLE_FAR_DIAGONAL } 
+                    { p + F,         1, false, ExplorationConfig::ENABLE_FACE_TO_FACE },
+                    { p + F + F,     0, true,  ExplorationConfig::ENABLE_OPTIMAL_DIST },
+                    { p + F + L,     4, false, ExplorationConfig::ENABLE_DIAGONAL     },
+                    { p + F + R,     4, false, ExplorationConfig::ENABLE_DIAGONAL     },
+                    { p + F + F + L, 5, true,  ExplorationConfig::ENABLE_FAR_DIAGONAL },
+                    { p + F + F + R, 5, true,  ExplorationConfig::ENABLE_FAR_DIAGONAL }
                 };
 
                 bool valid_any = false;
@@ -394,9 +406,6 @@ struct PatrolApproachObsCandidate {
     int observe_after_push_count; // 在第几个推箱前置任务后插入观测
 };
 
-// 巡图 DFS 最大递归层数，用于适配 32 KiB 栈
-static constexpr int PATROL_DFS_FRAME_LIMIT = 16;
-
 /// \brief 巡图 DFS 单层复用工作区
 struct PatrolDfsFrame {
     uint16_t dist_map[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]; // 当前状态到所有格子的时间代价
@@ -411,7 +420,7 @@ struct PatrolDfsFrame {
     int support_prefix_len[9];                        // 每个前置推箱任务结束时的路径长度
 };
 
-/// \brief 巡图规划共享 scratch，放 OCRAM 避免栈溢出和 DTCM 压力
+/// \brief 巡图规划共享 scratch，默认放 OCRAM 避免栈溢出和 DTCM 压力
 struct PatrolScratchWorkspace {
     uint16_t micro_tt_sig[8192];       // 小型置换表签名
     int32_t micro_tt_cost[8192];       // 小型置换表最低代价
@@ -437,8 +446,8 @@ struct PatrolScratchWorkspace {
     PatrolDfsFrame dfs_frames[PATROL_DFS_FRAME_LIMIT];       // 按递归深度复用的帧数组
 };
 
-// 巡图大工作区放 OCRAM，链接脚本必须将 .ocram_bss 放到非 DTCM 区域
-static MCU_OCRAM_BSS PatrolScratchWorkspace patrol_ws;
+// 巡图大工作区默认放 OCRAM，避免占用 DTCM
+static PatrolScratchWorkspace patrol_ws;
 
 
 /// \brief 搜索最优巡图动作序列

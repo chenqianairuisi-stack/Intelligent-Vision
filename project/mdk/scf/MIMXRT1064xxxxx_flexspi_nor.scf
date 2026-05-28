@@ -153,8 +153,6 @@ LR_m_text m_flash_config_start m_text_start+m_text_size-m_flash_config_start {  
   
   ;DTCM
   RW_m_data m_data_start m_data_size-Stack_Size-Heap_Size { ; RW data
-    .ANY (+ZI)
-	.ANY (+RW)
     *(.dtcm_data) 
     *(m_usb_dma_init_data)
     *(m_usb_dma_noninit_data)
@@ -181,6 +179,8 @@ LR_m_text m_flash_config_start m_text_start+m_text_size-m_flash_config_start {  
     *(.ocram_bss.*)
     * (OCRAM_CACHE.init)
     * (*OCRAM_CACHE)
+    .ANY (+ZI)
+	.ANY (+RW)
   }
   
   ;SDRAM NONCACHE

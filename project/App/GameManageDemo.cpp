@@ -14,6 +14,24 @@ static uint32_t demo_observe_mask_of(const MacroAction& action) {
     return action.observe.active_mask;
 }
 
+static bool demo_box_matches_target_semantic(const SokobanLevel& level, int box_idx, int target_idx) {
+    if (box_idx < 0 || box_idx >= level.box_count) return false;
+    if (target_idx < 0 || target_idx >= level.target_count) return false;
+    return level.box_semantics[box_idx] == level.target_semantics[target_idx];
+}
+
+static bool demo_box_completed_on_semantic_target(const SokobanLevel& level, int box_idx) {
+    if (box_idx < 0 || box_idx >= level.box_count) return false;
+    if (level.boxes[box_idx].x == -1) return false;
+    for (int t = 0; t < level.target_count; ++t) {
+        if (level.boxes[box_idx] == level.targets[t] &&
+            demo_box_matches_target_semantic(level, box_idx, t)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /// \brief Demo 模式状态机拦截器
 ///
 /// \details
@@ -94,6 +112,11 @@ __attribute__((section(".ramfunc"))) void DemoGameManager::update() {
                 if (!demo.has_active_macro) {
                     MacroAction action;
                     if (!plan_next_macro_action(action)) {
+                        macro_planner.sync_semantics(App::g_state.vision.semantic_labels);
+                        if (macro_planner.ready_for_sokoban(logical_level)) {
+                            phase = GamePhase::BIND_SEMANTICS;
+                            break;
+                        }
                         game.error_stage = 1;
                         phase = GamePhase::ERROR_OCCURRED;
                         break;
@@ -245,17 +268,12 @@ __attribute__((section(".ramfunc"))) void DemoGameManager::update() {
             }
 
             if (all_done) {
-                // N-1 规则匹配箱子与目标点 ID
-                uint8_t matched_ids[SystemConfig::MAX_BOXES];
                 macro_planner.sync_semantics(vision_data.semantic_labels);
                 
-                if (!macro_planner.fill_matched_ids(matched_ids, logical_level.box_count)) {
-                    game.error_stage = 4; // 错误阶段4：语义匹配失败（不满足 N-1 规则）
+                if (!macro_planner.apply_semantics_to_level(logical_level)) {
+                    game.error_stage = 4; // 错误阶段4：语义推断失败
                     game.phase = GamePhase::ERROR_OCCURRED;
                     break;
-                }
-                for (int i = 0; i < logical_level.box_count; ++i) {
-                    logical_level.box_ids[i] = matched_ids[i];
                 }
 
                 // 二次炸弹解算（附带语义信息）
@@ -266,9 +284,12 @@ __attribute__((section(".ramfunc"))) void DemoGameManager::update() {
 
                 App::g_state.debug.need_bg_redraw = true;
 
-                solver.load_from_vision(logical_level);   // 导入当前地形（含爆炸改动与小车位置）
-                solver.bind_semantics(matched_ids);       // 绑定语义映射与当前位置
-                solver.load_bomb_tasks(bombs.data(), bombs.size()); // 加载炸弹任务（如果有的话）
+                if (!solver.load_from_vision(logical_level, bombs.empty() ? nullptr : bombs.data(), bombs.size()) ||
+                    !solver.bind_semantics()) {
+                    game.error_stage = 2;
+                    game.phase = GamePhase::ERROR_OCCURRED;
+                    break;
+                }
                 game.phase = GamePhase::PLAN_SOKOBAN;
             }
             break;
@@ -280,10 +301,9 @@ __attribute__((section(".ramfunc"))) void DemoGameManager::update() {
         case GamePhase::PLAN_SOKOBAN: {
             // 记录求解耗时
             uint32_t t0 = Core::Scheduler::get_sys_tick_ms();
-            bool success = game.is_advanced_stage ? solver.solve(GameMode::PHASE2_SPECIFIC) : solver.solve(GameMode::PHASE1_ANY);
+            bool success = solver.solve();
             if (!success && game.is_advanced_stage) {
-                prepare_phase2_solver(true);
-                success = solver.solve(GameMode::PHASE2_SPECIFIC);
+                success = prepare_phase2_solver(true) && solver.solve();
             }
             push_plan_time_ms = Core::Scheduler::get_sys_tick_ms() - t0;
 
@@ -332,8 +352,8 @@ __attribute__((section(".ramfunc"))) void DemoGameManager::update() {
                 };
                 auto is_bound_target_for_box = [&](int box_idx, point p) -> bool {
                     if (box_idx < 0 || box_idx >= logical_level.box_count) return false;
-                    uint8_t target_id = logical_level.box_ids[box_idx];
-                    return target_id < logical_level.target_count && logical_level.targets[target_id] == p;
+                    int target_id = target_id_at(p);
+                    return demo_box_matches_target_semantic(logical_level, box_idx, target_id);
                 };
                 auto demo_base_tile_at = [&](point p) -> uint8_t {
                     return target_id_at(p) >= 0 ? TILE_TARGET : TILE_EMPTY;
@@ -349,7 +369,7 @@ __attribute__((section(".ramfunc"))) void DemoGameManager::update() {
                     // 只有推到自身绑定目标点时才对消，误入其他目标点仍按箱子显示
                     if (completed) {
                         demo.map[new_box_pos.y][new_box_pos.x] = TILE_EMPTY;
-                        if (box_idx >= 0) logical_level.boxes[box_idx] = {-1, -1};
+                        if (box_idx >= 0) logical_level.boxes[box_idx] = new_box_pos;
                     } else {
                         demo.map[new_box_pos.y][new_box_pos.x] = TILE_BOX;
                         if (box_idx >= 0) logical_level.boxes[box_idx] = new_box_pos;
@@ -423,20 +443,32 @@ RenderContext DemoGameManager::get_render_context() const {
 
     // Lambda 函数：将零散的数组强行压平到单层网格里
     auto flatten_to_map = [&](const auto& base_map, const point* boxes, int box_count,
-                            const point* targets, int tgt_count,
-                            const uint8_t* box_ids,
-                            const point* bombs, int bomb_count) {
+                              const point* targets, int tgt_count,
+                              const uint8_t* box_semantics,
+                              const uint8_t* target_semantics,
+                              const point* bombs, int bomb_count) {
+        auto target_id_at = [&](point p) -> int {
+            if (!targets) return -1;
+            for (int t = 0; t < tgt_count; ++t) {
+                if (targets[t] == p) return t;
+            }
+            return -1;
+        };
         auto box_completed_on_target = [&](int box_idx) -> bool {
-            if (!boxes || !targets || !box_ids) return false;
+            if (!boxes || !targets || !box_semantics || !target_semantics) return false;
             if (box_idx < 0 || box_idx >= box_count) return false;
-            if (boxes[box_idx].x == -1) return true;
-            uint8_t target_id = box_ids[box_idx];
-            return target_id < tgt_count && boxes[box_idx] == targets[target_id];
+            if (boxes[box_idx].x == -1) return false;
+            int target_id = target_id_at(boxes[box_idx]);
+            return target_id >= 0 && box_semantics[box_idx] == target_semantics[target_id];
         };
         auto target_completed_by_box = [&](int target_idx) -> bool {
-            if (!boxes || !targets || !box_ids) return false;
+            if (!boxes || !targets || !box_semantics || !target_semantics) return false;
             for (int b = 0; b < box_count; ++b) {
-                if (box_completed_on_target(b) && box_ids[b] == target_idx) return true;
+                if (boxes[b].x != -1 &&
+                    boxes[b] == targets[target_idx] &&
+                    box_semantics[b] == target_semantics[target_idx]) {
+                    return true;
+                }
             }
             return false;
         };
@@ -464,7 +496,8 @@ RenderContext DemoGameManager::get_render_context() const {
             // Demo 模式但不在动画中，把 logical_level 压平传给 UI
             flatten_to_map(logical_level.map, logical_level.boxes, logical_level.box_count,
                 logical_level.targets, logical_level.target_count,
-                box_bindings_available() ? logical_level.box_ids : nullptr,
+                box_bindings_available() ? logical_level.box_semantics : nullptr,
+                box_bindings_available() ? logical_level.target_semantics : nullptr,
                 logical_level.bombs, logical_level.bomb_count);
             ctx.map = &flattened_render_map;
         }
@@ -497,7 +530,8 @@ RenderContext DemoGameManager::get_render_context() const {
             flatten_to_map(logical_level.map, 
                         logical_level.boxes, logical_level.box_count,
                         logical_level.targets, logical_level.target_count,
-                        box_bindings_available() ? logical_level.box_ids : nullptr,
+                        box_bindings_available() ? logical_level.box_semantics : nullptr,
+                        box_bindings_available() ? logical_level.target_semantics : nullptr,
                         logical_level.bombs, logical_level.bomb_count);
             ctx.map = &flattened_render_map;
 
@@ -520,6 +554,7 @@ RenderContext DemoGameManager::get_render_context() const {
                     flatten_to_map(vision_data.map, 
                                 vision_data.boxes, vision_data.box_count,
                                 vision_data.targets, vision_data.box_count,
+                                nullptr,
                                 nullptr,
                                 vision_data.bombs, vision_data.bomb_count);
                     ctx.map = &flattened_render_map;
@@ -559,7 +594,7 @@ RenderContext DemoGameManager::get_render_context() const {
 ///
 /// \details
 /// 进入巡图或推箱动画前调用，把墙、箱、目标点、炸弹同步到 demo.map
-/// 第二阶段之后会根据 box_ids 隐藏已经推到绑定目标上的箱子
+/// 第二阶段之后会根据箱子/目标点语义隐藏已经归位的箱子
 ///
 void DemoGameManager::init_demo_map_from_logical() {
     GamePhase phase = App::g_state.game.phase;
@@ -571,15 +606,15 @@ void DemoGameManager::init_demo_map_from_logical() {
                             phase == GamePhase::ANIMATE_DEMO;
     auto box_completed_on_target = [&](int box_idx) -> bool {
         if (!use_box_bindings) return false;
-        if (box_idx < 0 || box_idx >= logical_level.box_count) return false;
-        if (logical_level.boxes[box_idx].x == -1) return true;
-        uint8_t target_id = logical_level.box_ids[box_idx];
-        return target_id < logical_level.target_count &&
-                logical_level.boxes[box_idx] == logical_level.targets[target_id];
+        return demo_box_completed_on_semantic_target(logical_level, box_idx);
     };
     auto target_completed_by_box = [&](int target_idx) -> bool {
         for (int b = 0; b < logical_level.box_count; ++b) {
-            if (box_completed_on_target(b) && logical_level.box_ids[b] == target_idx) return true;
+            if (logical_level.boxes[b].x != -1 &&
+                logical_level.boxes[b] == logical_level.targets[target_idx] &&
+                demo_box_matches_target_semantic(logical_level, b, target_idx)) {
+                return true;
+            }
         }
         return false;
     };

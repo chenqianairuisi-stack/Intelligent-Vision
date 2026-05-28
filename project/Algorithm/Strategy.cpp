@@ -25,20 +25,36 @@
 // ============================================================================
 // 1. 全局配置与 DFS 缓存区
 // ============================================================================
-__attribute__((section(".dtcm_data"))) StrategicPlanner strategic_planner;
+DTCM_DATA StrategicPlanner strategic_planner;
 
-// DFS 每层最多保留的高分候选数
-constexpr uint8_t PHASE1_SELECTION_RESTRICTIONS = 3;
-constexpr uint8_t PHASE2_SELECTION_RESTRICTIONS = 6;
-constexpr int16_t INF_DIST = 9999;
-constexpr int PHASE1_SOFT_REPLACE_PROFIT_MARGIN = 20;
-constexpr int LOCAL_CLEAR_MAX_TASKS = 8;
-constexpr int LOCAL_CLEAR_MAX_ITER = 5;
-constexpr int LOCAL_CLEAR_CANDIDATE_LIMIT = 10;
-constexpr int LOCAL_CLEAR_CHAIN_DEPTH = 1;
+namespace StrategyConfig {
+    // ------------------------------------------------------------------------
+    // DFS 搜索宽度
+    // ------------------------------------------------------------------------
+    inline constexpr uint8_t PHASE1_SELECTION_RESTRICTIONS = 3;   // Phase1 每层最多保留的高分候选数
+    inline constexpr uint8_t PHASE2_SELECTION_RESTRICTIONS = 6;   // Phase2 每层最多保留的高分候选数
 
-// Phase1 中“目标点是否已被匹配”的 bitmask 数量
-constexpr int PHASE1_MATCH_MASKS = 1 << MAX_BOXES;
+    // ------------------------------------------------------------------------
+    // 距离与收益阈值
+    // ------------------------------------------------------------------------
+    inline constexpr int16_t INF_DIST = 9999;                     // 不可达距离的占位值
+    inline constexpr int PHASE1_SOFT_REPLACE_PROFIT_MARGIN = 20;  // Phase1 软评估替换的最低收益边际；单位是距离场数值，越大越保守
+
+    // ------------------------------------------------------------------------
+    // 局部清障回退
+    // ------------------------------------------------------------------------
+    inline constexpr int LOCAL_CLEAR_MAX_TASKS = 8;               // 回退时最多生成的推箱任务数，过多会增加排序和验证开销
+    inline constexpr int LOCAL_CLEAR_MAX_ITER = 5;                // 回退时最多尝试的推箱迭代次数，过多会增加搜索开销
+    inline constexpr int LOCAL_CLEAR_CANDIDATE_LIMIT = 10;        // 回退时每轮最多考虑的候选推箱数，过多会增加搜索开销
+    inline constexpr int LOCAL_CLEAR_CHAIN_DEPTH = 1;             // 回退时推箱任务的链式生成深度，过大可能会产生过长的回退路径
+
+    // ------------------------------------------------------------------------
+    // Phase1 匹配缓存
+    // ------------------------------------------------------------------------
+    inline constexpr int PHASE1_MATCH_MASKS = 1 << MAX_BOXES;     // Phase1 匹配状态掩码数量
+}
+
+using namespace StrategyConfig;
 
 static int strategy_box_at(const SokobanLevel& lvl, point p) {
     for (int b = 0; b < lvl.box_count; ++b) {
@@ -50,6 +66,42 @@ static int strategy_box_at(const SokobanLevel& lvl, point p) {
 static bool strategy_target_at(const SokobanLevel& lvl, point p) {
     for (int t = 0; t < lvl.target_count; ++t) {
         if (lvl.targets[t] == p) return true;
+    }
+    return false;
+}
+
+static bool strategy_target_matches_box_semantic(const SokobanLevel& lvl, int box_id, int target_id) {
+    if (box_id < 0 || box_id >= lvl.box_count) return false;
+    if (target_id < 0 || target_id >= lvl.target_count) return false;
+    return lvl.box_semantics[box_id] == lvl.target_semantics[target_id];
+}
+
+static bool strategy_is_valid_target_for_box(const SokobanLevel& lvl, int box_id, point p) {
+    for (int t = 0; t < lvl.target_count; ++t) {
+        if (lvl.targets[t] == p && strategy_target_matches_box_semantic(lvl, box_id, t)) return true;
+    }
+    return false;
+}
+
+static int strategy_nearest_semantic_goal_distance(const SokobanLevel& lvl, int box_id, point p) {
+    if (box_id < 0 || box_id >= lvl.box_count) return 99;
+    int best = 99;
+    for (int t = 0; t < lvl.target_count; ++t) {
+        if (!strategy_target_matches_box_semantic(lvl, box_id, t)) continue;
+        int d = std::abs(p.x - lvl.targets[t].x) + std::abs(p.y - lvl.targets[t].y);
+        if (d < best) best = d;
+    }
+    return best;
+}
+
+static bool strategy_has_reachable_semantic_goal(
+    const SokobanLevel& lvl,
+    int box_id,
+    int16_t dist[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]) {
+    for (int t = 0; t < lvl.target_count; ++t) {
+        if (!strategy_target_matches_box_semantic(lvl, box_id, t)) continue;
+        point target = lvl.targets[t];
+        if (dist[target.y][target.x] != INF_DIST) return true;
     }
     return false;
 }
@@ -181,20 +233,20 @@ static void mark_soft_deadlock_boxes(const SokobanLevel& lvl, bool out_hard[MAX_
 }
 
 // dfs_dist_box[depth][box][y][x]：当前 DFS 深度下，某箱子被推到 (x,y) 的估计代价
-__attribute__((section(".dtcm_data"))) static int16_t dfs_dist_box[MAX_BOMBS + 1][MAX_BOXES][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+DTCM_DATA static int16_t dfs_dist_box[MAX_BOMBS + 1][MAX_BOXES][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
 
 // dfs_dist_bomb[depth][bomb][y][x]：当前 DFS 深度下，某炸弹被推到 (x,y) 的估计代价
-__attribute__((section(".dtcm_data"))) static int16_t dfs_dist_bomb[MAX_BOMBS + 1][MAX_BOMBS][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+DTCM_DATA static int16_t dfs_dist_bomb[MAX_BOMBS + 1][MAX_BOMBS][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
 
 // dfs_player_vis[depth][y][x]：当前 DFS 深度下玩家可达区域
-__attribute__((section(".dtcm_data"))) static bool dfs_player_vis[MAX_BOMBS + 1][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+DTCM_DATA static bool dfs_player_vis[MAX_BOMBS + 1][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
 
 // Phase1 结构判定距离场：非死锁箱子视作可挪开的软障碍，避免把临时箱子阻塞误判为必炸墙体。
-__attribute__((section(".dtcm_data"))) static int16_t phase1_soft_dist_box[MAX_BOMBS + 1][MAX_BOXES][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+DTCM_DATA static int16_t phase1_soft_dist_box[MAX_BOMBS + 1][MAX_BOXES][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
 
 // Phase1 候选二次排序使用的临时距离场。只在少量候选上运行，避免污染递归层缓存。
-__attribute__((section(".dtcm_data"))) static int16_t phase1_candidate_dist[MAX_BOXES][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
-__attribute__((section(".dtcm_data"))) static int16_t phase1_candidate_bomb_dist[MAX_BOMBS][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+DTCM_DATA static int16_t phase1_candidate_dist[MAX_BOXES][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+DTCM_DATA static int16_t phase1_candidate_bomb_dist[MAX_BOMBS][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
 
 // Phase1 任意匹配 DP 缓存，避免递归过程中频繁申请大数组
 __attribute__((section(".dtcm_bss"))) static int phase1_match_dp[PHASE1_MATCH_MASKS];
@@ -209,7 +261,7 @@ struct StrategyDfsScratch {
     int probe_distance[MAX_BOMBS + 1][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
 };
 
-static MCU_OCRAM_BSS StrategyDfsScratch strategy_dfs_ws;
+static StrategyDfsScratch strategy_dfs_ws;
 
 // ============================================================================
 // 缺陷驱动逻辑层：把“不可达/死锁”投影为可修复它的 3x3 爆破区域
@@ -403,8 +455,7 @@ static void build_logic_blast_scores(
         point box = lvl.boxes[b];
         bool on_target = false;
         if constexpr (Mode == GameMode::PHASE2_SPECIFIC) {
-            int tid = lvl.box_ids[b];
-            on_target = tid >= 0 && tid < lvl.target_count && lvl.targets[tid] == box;
+            on_target = strategy_is_valid_target_for_box(lvl, b, box);
         } else {
             on_target = strategy_target_at(lvl, box);
         }
@@ -525,7 +576,7 @@ static void build_logic_blast_scores(
     for (int b = 0; b < lvl.box_count; ++b) {
         for (int t = 0; t < lvl.target_count; ++t) {
             if constexpr (Mode == GameMode::PHASE2_SPECIFIC) {
-                if (lvl.box_ids[b] != t) continue;
+                if (!strategy_target_matches_box_semantic(lvl, b, t)) continue;
             }
             point target = lvl.targets[t];
             if (box_dist[b][target.y][target.x] == INF_DIST) target_needed[t] = true;
@@ -544,7 +595,7 @@ static void build_logic_blast_scores(
         bool target_has_box_contact = false;
         for (int b = 0; b < lvl.box_count && !target_has_box_contact; ++b) {
             if constexpr (Mode == GameMode::PHASE2_SPECIFIC) {
-                if (lvl.box_ids[b] != t) continue;
+                if (!strategy_target_matches_box_semantic(lvl, b, t)) continue;
             }
             for (int y = 1; y < MAP_MAX_HEIGHT - 1 && !target_has_box_contact; ++y) {
                 for (int x = 1; x < MAP_MAX_WIDTH - 1; ++x) {
@@ -587,7 +638,7 @@ static void build_logic_blast_scores(
         bool box_has_applicable_target = false;
         for (int t = 0; t < lvl.target_count; ++t) {
             if constexpr (Mode == GameMode::PHASE2_SPECIFIC) {
-                if (lvl.box_ids[b] != t) continue;
+                if (!strategy_target_matches_box_semantic(lvl, b, t)) continue;
             }
             box_has_applicable_target = true;
             point target = lvl.targets[t];
@@ -601,7 +652,7 @@ static void build_logic_blast_scores(
         bool box_has_target_contact = false;
         for (int t = 0; t < lvl.target_count && !box_has_target_contact; ++t) {
             if constexpr (Mode == GameMode::PHASE2_SPECIFIC) {
-                if (lvl.box_ids[b] != t) continue;
+                if (!strategy_target_matches_box_semantic(lvl, b, t)) continue;
             }
             if (!target_needed[t]) continue;
             for (int y = 1; y < MAP_MAX_HEIGHT - 1 && !box_has_target_contact; ++y) {
@@ -641,7 +692,7 @@ static void build_logic_blast_scores(
     for (int b = 0; b < lvl.box_count; ++b) {
         for (int t = 0; t < lvl.target_count; ++t) {
             if constexpr (Mode == GameMode::PHASE2_SPECIFIC) {
-                if (lvl.box_ids[b] != t) continue;
+                if (!strategy_target_matches_box_semantic(lvl, b, t)) continue;
             }
             if (!target_needed[t]) continue;
             point target = lvl.targets[t];
@@ -718,13 +769,13 @@ void StrategicPlanner::reset_profile() {
 }
 
 void StrategicPlanner::begin_profile_eval(uint8_t mode) {
-    if constexpr (!STRATEGY_ENABLE_PROFILE) {
+    if constexpr (!StrategyConfig::ENABLE_PROFILE) {
         (void)mode;
         active_profile_eval = nullptr;
         active_profile_pass = 0;
         return;
     }
-    if (profile.eval_count >= STRATEGY_PROFILE_EVAL_LIMIT) {
+    if (profile.eval_count >= StrategyConfig::PROFILE_EVAL_LIMIT) {
         ++profile.dropped_evals;
         active_profile_eval = nullptr;
         active_profile_pass = 0;
@@ -740,7 +791,7 @@ void StrategicPlanner::begin_profile_eval(uint8_t mode) {
 }
 
 void StrategicPlanner::set_profile_pass(uint8_t pass) {
-    if constexpr (!STRATEGY_ENABLE_PROFILE) {
+    if constexpr (!StrategyConfig::ENABLE_PROFILE) {
         (void)pass;
         return;
     }
@@ -748,7 +799,7 @@ void StrategicPlanner::set_profile_pass(uint8_t pass) {
 }
 
 void StrategicPlanner::record_profile_result(uint8_t pass, const DFSResult& result) {
-    if constexpr (!STRATEGY_ENABLE_PROFILE) {
+    if constexpr (!StrategyConfig::ENABLE_PROFILE) {
         (void)pass;
         (void)result;
         return;
@@ -761,7 +812,7 @@ void StrategicPlanner::record_profile_result(uint8_t pass, const DFSResult& resu
 }
 
 void StrategicPlanner::record_profile_selected(uint8_t pass, const DFSResult& result) {
-    if constexpr (!STRATEGY_ENABLE_PROFILE) {
+    if constexpr (!StrategyConfig::ENABLE_PROFILE) {
         (void)pass;
         (void)result;
         return;
@@ -777,7 +828,7 @@ void StrategicPlanner::record_profile_root_candidates(
     const SokobanLevel& level,
     const StaticArray<BombCandidate, 256>& candidates,
     int branch_limit) {
-    if constexpr (!STRATEGY_ENABLE_PROFILE) {
+    if constexpr (!StrategyConfig::ENABLE_PROFILE) {
         (void)level;
         (void)candidates;
         (void)branch_limit;
@@ -788,8 +839,8 @@ void StrategicPlanner::record_profile_root_candidates(
     p.root_candidates = static_cast<uint16_t>(candidates.size());
     p.root_branch_limit = static_cast<uint8_t>(branch_limit);
     p.top_count = static_cast<uint8_t>(
-        candidates.size() < STRATEGY_PROFILE_TOP_CANDIDATES ?
-        candidates.size() : STRATEGY_PROFILE_TOP_CANDIDATES);
+        candidates.size() < StrategyConfig::PROFILE_TOP_CANDIDATES ?
+        candidates.size() : StrategyConfig::PROFILE_TOP_CANDIDATES);
 
     for (int i = 0; i < p.top_count; ++i) {
         const BombCandidate& c = candidates[i];
@@ -808,74 +859,74 @@ void StrategicPlanner::record_profile_root_candidates(
 }
 
 void StrategicPlanner::record_profile_dfs_node() {
-    if constexpr (!STRATEGY_ENABLE_PROFILE) return;
+    if constexpr (!StrategyConfig::ENABLE_PROFILE) return;
     if (!active_profile_eval || active_profile_pass >= 3) return;
     StrategyPassProfile& p = active_profile_eval->passes[active_profile_pass];
     if (p.dfs_nodes < 65535) ++p.dfs_nodes;
 }
 
 void StrategicPlanner::record_profile_fast_bfs_call() {
-    if constexpr (!STRATEGY_ENABLE_PROFILE) return;
+    if constexpr (!StrategyConfig::ENABLE_PROFILE) return;
     if (!active_profile_eval || active_profile_pass >= 3) return;
     StrategyPassProfile& p = active_profile_eval->passes[active_profile_pass];
     if (p.fast_bfs_calls < 65535) ++p.fast_bfs_calls;
 }
 
 void StrategicPlanner::record_profile_candidate_eval() {
-    if constexpr (!STRATEGY_ENABLE_PROFILE) return;
+    if constexpr (!StrategyConfig::ENABLE_PROFILE) return;
     if (!active_profile_eval || active_profile_pass >= 3) return;
     StrategyPassProfile& p = active_profile_eval->passes[active_profile_pass];
     if (p.candidate_evals < 65535) ++p.candidate_evals;
 }
 
 void StrategicPlanner::record_profile_candidate_kept() {
-    if constexpr (!STRATEGY_ENABLE_PROFILE) return;
+    if constexpr (!StrategyConfig::ENABLE_PROFILE) return;
     if (!active_profile_eval || active_profile_pass >= 3) return;
     StrategyPassProfile& p = active_profile_eval->passes[active_profile_pass];
     if (p.candidate_kept < 65535) ++p.candidate_kept;
 }
 
 void StrategicPlanner::record_profile_child_branch() {
-    if constexpr (!STRATEGY_ENABLE_PROFILE) return;
+    if constexpr (!StrategyConfig::ENABLE_PROFILE) return;
     if (!active_profile_eval || active_profile_pass >= 3) return;
     StrategyPassProfile& p = active_profile_eval->passes[active_profile_pass];
     if (p.child_branches < 65535) ++p.child_branches;
 }
 
 void StrategicPlanner::record_profile_logic_build() {
-    if constexpr (!STRATEGY_ENABLE_PROFILE) return;
+    if constexpr (!StrategyConfig::ENABLE_PROFILE) return;
     if (!active_profile_eval || active_profile_pass >= 3) return;
     StrategyPassProfile& p = active_profile_eval->passes[active_profile_pass];
     if (p.logic_builds < 255) ++p.logic_builds;
 }
 
 void StrategicPlanner::record_profile_post_refine_test() {
-    if constexpr (!STRATEGY_ENABLE_PROFILE) return;
+    if constexpr (!StrategyConfig::ENABLE_PROFILE) return;
     if (!active_profile_eval || active_profile_pass >= 3) return;
     StrategyPassProfile& p = active_profile_eval->passes[active_profile_pass];
     if (p.post_refine_tests < 65535) ++p.post_refine_tests;
 }
 
 void StrategicPlanner::record_profile_local_clear_call() {
-    if constexpr (!STRATEGY_ENABLE_PROFILE) return;
+    if constexpr (!StrategyConfig::ENABLE_PROFILE) return;
     if (!active_profile_eval || active_profile_pass >= 3) return;
     ++active_profile_eval->passes[active_profile_pass].local_clear_calls;
 }
 
 void StrategicPlanner::record_profile_local_clear_success() {
-    if constexpr (!STRATEGY_ENABLE_PROFILE) return;
+    if constexpr (!StrategyConfig::ENABLE_PROFILE) return;
     if (!active_profile_eval || active_profile_pass >= 3) return;
     ++active_profile_eval->passes[active_profile_pass].local_clear_successes;
 }
 
 void StrategicPlanner::record_profile_materialize_call() {
-    if constexpr (!STRATEGY_ENABLE_PROFILE) return;
+    if constexpr (!StrategyConfig::ENABLE_PROFILE) return;
     if (!active_profile_eval || active_profile_pass >= 3) return;
     ++active_profile_eval->passes[active_profile_pass].materialize_calls;
 }
 
 void StrategicPlanner::record_profile_materialize_success() {
-    if constexpr (!STRATEGY_ENABLE_PROFILE) return;
+    if constexpr (!StrategyConfig::ENABLE_PROFILE) return;
     if (!active_profile_eval || active_profile_pass >= 3) return;
     ++active_profile_eval->passes[active_profile_pass].materialize_successes;
 }
@@ -991,6 +1042,75 @@ static void evaluate_phase1_any_matching(
     int pair_divisor = selected_task_count >= 2 ? 4 : 6;
     int unreachable_penalty = selected_task_count >= 2 ? 15 : 10;
     out_distance = best_distance + all_pair_distance / pair_divisor + unreachable_pairs * unreachable_penalty + out_deadlocks * 1000;
+}
+
+/// \brief 评估 Phase2 同语义箱-目标匹配质量
+/// \param lvl 当前炸弹序列执行后的地图状态
+/// \param box_dist box_dist[b][y][x] 表示第 b 个箱子被推到 (x,y) 的估计代价
+/// \param out_deadlocks 输出：无法匹配到同语义目标的箱子惩罚，按 10 倍权重返回
+/// \param out_distance 输出：语义约束下的最小总推动距离
+///
+/// \details
+/// 重复语义时不能只看每个箱子的最近目标，否则两个箱子可能同时“看中”同一个目标点。
+/// 这里沿用 bitmask DP，为每个箱子分配一个未使用且同语义可达的目标点。
+static void evaluate_phase2_semantic_matching(
+    const SokobanLevel& lvl,
+    int16_t box_dist[MAX_BOXES][MAP_MAX_HEIGHT][MAP_MAX_WIDTH],
+    int& out_deadlocks,
+    int& out_distance)
+{
+    const int assign_inf = 999999;
+    if (lvl.box_count == 0) {
+        out_deadlocks = 0;
+        out_distance = 0;
+        return;
+    }
+
+    int mask_limit = 1 << lvl.target_count;
+    for (int mask = 0; mask < mask_limit; ++mask) phase1_match_dp[mask] = assign_inf;
+    phase1_match_dp[0] = 0;
+
+    int* cur = phase1_match_dp;
+    int* next = phase1_match_next;
+
+    for (int b = 0; b < lvl.box_count; ++b) {
+        for (int mask = 0; mask < mask_limit; ++mask) next[mask] = cur[mask];
+
+        for (int mask = 0; mask < mask_limit; ++mask) {
+            if (cur[mask] >= assign_inf) continue;
+            for (int t = 0; t < lvl.target_count; ++t) {
+                if (mask & (1 << t)) continue;
+                if (!strategy_target_matches_box_semantic(lvl, b, t)) continue;
+
+                point target = lvl.targets[t];
+                int d = box_dist[b][target.y][target.x];
+                if (d == INF_DIST) continue;
+
+                int next_mask = mask | (1 << t);
+                int next_cost = cur[mask] + d;
+                if (next_cost < next[next_mask]) next[next_mask] = next_cost;
+            }
+        }
+        std::swap(cur, next);
+    }
+
+    int best_matched = -1;
+    int best_distance = assign_inf;
+    for (int mask = 0; mask < mask_limit; ++mask) {
+        if (cur[mask] >= assign_inf) continue;
+        int matched = bit_count_u16(static_cast<uint16_t>(mask));
+        if (matched > best_matched || (matched == best_matched && cur[mask] < best_distance)) {
+            best_matched = matched;
+            best_distance = cur[mask];
+        }
+    }
+
+    if (best_matched < 0) {
+        best_matched = 0;
+        best_distance = 0;
+    }
+    out_deadlocks = (lvl.box_count - best_matched) * 10;
+    out_distance = best_distance;
 }
 
 static int count_phase1_unreachable_pairs(
@@ -2100,20 +2220,11 @@ void StrategicPlanner::dfs_bomb_sequence(
         } else {
             this->fast_push_bfs(current_lvl, current_lvl.boxes[b], player_start, false, dfs_dist_box[depth][b], this->phase2_soft_bomb_eval);
         }
-
-        if constexpr (Mode == GameMode::PHASE2_SPECIFIC) {
-            // 第二阶段：精准评估，必须能走到专属的目标点才行！
-            int t_id = current_lvl.box_ids[b]; // 获取它的专属目标
-            point target = current_lvl.targets[t_id];
-            if (dfs_dist_box[depth][b][target.y][target.x] == INF_DIST) {
-                current_deadlocks += 10; // 定向死锁是致命的，加大惩罚
-            } else {
-                current_distance += dfs_dist_box[depth][b][target.y][target.x];
-            }
-        }
     }
     if constexpr (Mode == GameMode::PHASE1_ANY) {
         evaluate_phase1_any_matching(current_lvl, phase1_soft_dist_box[depth], current_seq.size(), current_deadlocks, current_distance);
+    } else {
+        evaluate_phase2_semantic_matching(current_lvl, dfs_dist_box[depth], current_deadlocks, current_distance);
     }
     int current_unreachable_pairs = 9999;
     if constexpr (Mode == GameMode::PHASE1_ANY) {
@@ -2277,16 +2388,8 @@ void StrategicPlanner::dfs_bomb_sequence(
             for (int b = 0; b < lvl.box_count; ++b) {
                 this->fast_push_bfs(lvl, lvl.boxes[b], eval_player, false,
                                     phase1_candidate_dist[b], this->phase2_soft_bomb_eval);
-                int t_id = lvl.box_ids[b];
-                if (t_id >= lvl.target_count) {
-                    out_deadlocks += 10;
-                    continue;
-                }
-                point target = lvl.targets[t_id];
-                int d = phase1_candidate_dist[b][target.y][target.x];
-                if (d == INF_DIST) out_deadlocks += 10;
-                else out_distance += d;
             }
+            evaluate_phase2_semantic_matching(lvl, phase1_candidate_dist, out_deadlocks, out_distance);
         }
     };
 
@@ -3046,7 +3149,7 @@ void StrategicPlanner::macro_soft_dijkstra(const SokobanLevel& lvl, point start_
 /// \param start_lvl 起始地图状态
 /// \param bomb_idx 要推动的炸弹编号
 /// \param target_wall 目标爆破墙体
-/// \param phase2_specific true 表示按第二阶段固定箱-目标关系做安全检查
+/// \param phase2_specific true 表示按第二阶段语义规则做安全检查
 /// \param out_lvl 输出完成清障后的地图状态，尚未应用爆炸效果
 /// \param out_cost 输出清障和推炸弹的估计代价
 /// \param out_box_pushes 输出为了让路而生成的推箱子子任务
@@ -3088,8 +3191,7 @@ bool StrategicPlanner::local_clear_bomb_route(
 
     auto is_target_for_box = [&](int box_id, point p) -> bool {
         if (phase2_specific) {
-            int tid = work.box_ids[box_id];
-            return tid >= 0 && tid < work.target_count && work.targets[tid] == p;
+            return strategy_is_valid_target_for_box(work, box_id, p);
         }
         for (int t = 0; t < work.target_count; ++t) {
             if (work.targets[t] == p) return true;
@@ -3131,14 +3233,15 @@ bool StrategicPlanner::local_clear_bomb_route(
     };
 
     auto bomb_can_rescue_box = [&](const SokobanLevel& lvl, int box_id, point box_pos) -> bool {
-        point goal = {-1, -1};
-        if (phase2_specific) {
-            int tid = lvl.box_ids[box_id];
-            if (tid >= 0 && tid < lvl.target_count) goal = lvl.targets[tid];
-        }
-
         if (cheb(target_wall, box_pos) <= 2) return true;
-        if (goal.x != -1 && cheb(target_wall, goal) <= 2) return true;
+        if (phase2_specific) {
+            for (int t = 0; t < lvl.target_count; ++t) {
+                if (strategy_target_matches_box_semantic(lvl, box_id, t) &&
+                    cheb(target_wall, lvl.targets[t]) <= 2) {
+                    return true;
+                }
+            }
+        }
 
         for (int b = 0; b < lvl.bomb_count; ++b) {
             if (b == bomb_idx || lvl.bombs[b].x == -1) continue;
@@ -3148,7 +3251,14 @@ bool StrategicPlanner::local_clear_bomb_route(
                     if (lvl.map[y][x] != 1 || soft_dist[y][x] == INF_DIST) continue;
                     point wall = {(int8_t)x, (int8_t)y};
                     if (cheb(wall, box_pos) <= 2) return true;
-                    if (goal.x != -1 && cheb(wall, goal) <= 2) return true;
+                    if (phase2_specific) {
+                        for (int t = 0; t < lvl.target_count; ++t) {
+                            if (strategy_target_matches_box_semantic(lvl, box_id, t) &&
+                                cheb(wall, lvl.targets[t]) <= 2) {
+                                return true;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -3159,8 +3269,7 @@ bool StrategicPlanner::local_clear_bomb_route(
         point box_pos = lvl.boxes[box_id];
         bool on_valid_target = false;
         if (phase2_specific) {
-            int tid = lvl.box_ids[box_id];
-            on_valid_target = tid >= 0 && tid < lvl.target_count && lvl.targets[tid] == box_pos;
+            on_valid_target = strategy_is_valid_target_for_box(lvl, box_id, box_pos);
         } else {
             for (int t = 0; t < lvl.target_count; ++t) {
                 if (lvl.targets[t] == box_pos) on_valid_target = true;
@@ -3170,11 +3279,7 @@ bool StrategicPlanner::local_clear_bomb_route(
         this->fast_push_bfs(lvl, box_pos, check_player, false, box_dist, true);
         bool can_reach_goal = false;
         if (phase2_specific) {
-            int tid = lvl.box_ids[box_id];
-            if (tid >= 0 && tid < lvl.target_count) {
-                point goal = lvl.targets[tid];
-                can_reach_goal = box_dist[goal.y][goal.x] != INF_DIST;
-            }
+            can_reach_goal = strategy_has_reachable_semantic_goal(lvl, box_id, box_dist);
         } else {
             for (int t = 0; t < lvl.target_count; ++t) {
                 point goal = lvl.targets[t];
@@ -3261,13 +3366,10 @@ bool StrategicPlanner::local_clear_bomb_route(
         clearing_stack[box_id] = true;
 
         auto nearest_goal_distance = [&](point p) -> int {
-            int best = 99;
             if (phase2_specific) {
-                int tid = work.box_ids[box_id];
-                if (tid >= 0 && tid < work.target_count) {
-                    return std::abs(p.x - work.targets[tid].x) + std::abs(p.y - work.targets[tid].y);
-                }
+                return strategy_nearest_semantic_goal_distance(work, box_id, p);
             }
+            int best = 99;
             for (int t = 0; t < work.target_count; ++t) {
                 int d = std::abs(p.x - work.targets[t].x) + std::abs(p.y - work.targets[t].y);
                 if (d < best) best = d;
@@ -3640,13 +3742,10 @@ bool StrategicPlanner::local_clear_bomb_route(
                     if (opens_bomb_path) score += (segment.size() + bomb_after_push.size()) * 6;
                     else score += 250 + segment.size() * 4;
                     auto nearest_goal_dist_for_real = [&](point p) -> int {
-                        int best = 99;
                         if (phase2_specific) {
-                            int tid = lvl.box_ids[b];
-                            if (tid >= 0 && tid < lvl.target_count) {
-                                return std::abs(p.x - lvl.targets[tid].x) + std::abs(p.y - lvl.targets[tid].y);
-                            }
+                            return strategy_nearest_semantic_goal_distance(lvl, b, p);
                         }
+                        int best = 99;
                         for (int t = 0; t < lvl.target_count; ++t) {
                             int gd = std::abs(p.x - lvl.targets[t].x) + std::abs(p.y - lvl.targets[t].y);
                             if (gd < best) best = gd;

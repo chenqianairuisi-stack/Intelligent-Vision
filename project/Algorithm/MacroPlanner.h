@@ -30,13 +30,17 @@ MacroPlanner 模块说明
 ///
 /// \details
 /// observed_mask 的低 box_count 位表示箱子，后续 target_count 位表示目标点。
-/// candidate_targets / bound_target 用于把 ART2 识别结果逐步收敛成
-/// 第二阶段 Sokoban 需要的 box -> target 配对。
+/// inferred_semantics 保存 Macro 根据观测和 N-1 规则得到的实体语义。
+/// candidate_targets / bound_target 只供完成式推箱候选位使用，
+/// 不代表最终 Sokoban 的固定箱-目标绑定。
 struct KnowledgeState {
     uint32_t observed_mask = 0;              // 已观测实体 bitmask
+    int8_t inferred_semantics[MAX_ENTITIES]; // 推断后的实体语义，-1 表示仍未知
+    bool semantics_ready = false;            // 是否已经得到完整实体语义
+    bool needs_supplemental_observe = false; // N-1 后仍无法唯一推断最后一组时置位
     uint16_t candidate_targets[MAX_BOXES];   // 每个箱子仍可能绑定到哪些目标点
     uint8_t bound_target[MAX_BOXES];         // 已确定绑定时的目标点编号
-    bool is_bound[MAX_BOXES];                // 对应箱子是否已经完成语义绑定
+    bool is_bound[MAX_BOXES];                // 完成式推箱是否已有临时 box -> target
 };
 
 /// \brief 单次在线决策所需的动态上下文
@@ -93,11 +97,10 @@ public:
 
     const KnowledgeState& knowledge() const { return knowledge_state; }
 
-    /// \brief 输出第二阶段需要的 box -> target 配对
-    /// \param out_ids 输出数组，out_ids[box_id] = target_id
-    /// \param box_count 当前箱子数量
-    /// \return 配对完整时返回 true
-    bool fill_matched_ids(uint8_t* out_ids, uint8_t box_count);
+    /// \brief 将 Macro 推断出的实体语义写回关卡
+    /// \param level 当前逻辑地图
+    /// \return 语义推断完整时返回 true
+    bool apply_semantics_to_level(SokobanLevel& level) const;
 
 private:
     // ------------------------------------------------------------------------
@@ -109,7 +112,15 @@ private:
         REFERENCE,
         COMPLETION_PUSH,
         APPROACH_PUSH,
-        OPPORTUNISTIC_BOMB
+        OPPORTUNISTIC_BOMB,
+        SUPPLEMENTAL_OBSERVE
+    };
+
+    enum class SemanticInferenceStatus : uint8_t {
+        INSUFFICIENT,
+        INFERRED,
+        NEED_SUPPLEMENTAL,
+        INVALID
     };
 
     struct SlotCandidate {
@@ -140,9 +151,17 @@ private:
     // ------------------------------------------------------------------------
 
     uint16_t default_candidate_mask() const;
-    bool match_semantics(const SokobanLevel& level, const int8_t* semantic_labels, uint8_t* out_matched_ids) const;
+    SemanticInferenceStatus infer_semantics(
+        const SokobanLevel& level,
+        const int8_t* labels,
+        int8_t* out_labels,
+        bool allow_supplemental_observe = true) const;
+    bool apply_inferred_semantics(const SokobanLevel& level, const int8_t* inferred_labels);
+    bool force_supplemental_fallback(const SokobanLevel& level);
     bool has_required_observations(const SokobanLevel& level) const;
     bool reference_sequence_done(const SokobanLevel& level) const;
+    bool semantics_ready() const;
+    bool needs_supplemental_observation(const SokobanLevel& level) const;
 
     // ------------------------------------------------------------------------
     // 参考主线推进
@@ -164,6 +183,7 @@ private:
     bool build_completion_push_slot(const MacroPlanContext& ctx, const MacroAction& reference_action, SlotCandidate& slot) const;
     bool build_approach_push_slot(const MacroPlanContext& ctx, const MacroAction& reference_action, SlotCandidate& slot) const;
     bool build_opportunistic_bomb_slot(const MacroPlanContext& ctx, const MacroAction& reference_action, SlotCandidate& slot) const;
+    bool build_supplemental_observe_slot(const MacroPlanContext& ctx, SlotCandidate& slot) const;
 
     // ------------------------------------------------------------------------
     // 动作验证与评分辅助

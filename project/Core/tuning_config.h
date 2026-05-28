@@ -1,4 +1,5 @@
 #pragma once
+#include "system_config.h"
 
 // 可复用 PID 参数块
 struct PidParams {
@@ -55,7 +56,7 @@ struct TuningConfig {
 };
 
 // 全局调参实例，放在 DTCM 区域，供高频控制和业务模块访问
-__attribute__((section(".dtcm_data"))) inline TuningConfig tune {
+DTCM_DATA inline TuningConfig tune {
     {3.7f, 0.0f, 0.0f},      // pid_yaw
     {0.45f, 0.08f, 0.0f},    // pid_speed
     {0.2f, 4.0f, 0.54f},     // feedforward

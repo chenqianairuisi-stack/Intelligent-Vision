@@ -82,6 +82,6 @@ struct RobotState {
     } debug;
 };
 
-inline __attribute__((section(".dtcm_data"))) RobotState g_state;
+inline DTCM_DATA RobotState g_state;
 
 }

@@ -12,7 +12,7 @@
 
 namespace App::GameEngine {
 
-__attribute__((section(".dtcm_data"))) static DemoGameManager core_engine;
+DTCM_DATA static DemoGameManager core_engine;
 
 // 倒数计算宏区（利用编译期算好替代除法）
 constexpr float INV_360 = 1.0f / 360.0f;
@@ -122,7 +122,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 logical_level.box_count = vision_data.box_count;
                 logical_level.target_count = vision_data.box_count;
                 logical_level.bomb_count = vision_data.bomb_count;
-                
+
                 for(int i=0; i<logical_level.box_count; ++i) {
                     logical_level.boxes[i] = vision_data.boxes[i];
                     logical_level.targets[i] = vision_data.targets[i];
@@ -131,13 +131,25 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     logical_level.bombs[i] = vision_data.bombs[i];
                 }
 
+                // 刚开始先把箱子和目标点都归到同一语义组，如果是第一阶段不做改变；如果是第二阶段，后续会根据视觉识别结果重新绑定语义
+                for(int i=0; i<logical_level.box_count; ++i) {
+                    logical_level.box_semantics[i] = 0;
+                }
+                for(int i=0; i<logical_level.target_count; ++i) {
+                    logical_level.target_semantics[i] = 0;
+                }
+
                 // 异步请求位姿，用于后续全局定位校准
                 Subsystem::Vision::request_pose_ART1(); 
 
                 if (game.is_advanced_stage) {  
                     game.phase = GamePhase::PLAN_PATROL;       // 进入巡图
                 } else {
-                    solver.load_from_vision(logical_level);    // 将视觉数据加载到推箱求解器
+                    if (!solver.load_from_vision(logical_level, nullptr, 0) || !solver.bind_semantics()) {
+                        game.error_stage = 6;
+                        game.phase = GamePhase::ERROR_OCCURRED;
+                        break;
+                    }
                     game.phase = GamePhase::PLAN_SOKOBAN;      // 直接进入推箱子阶段
                 }
             } else {
@@ -189,6 +201,11 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             } else {
                 MacroAction act;
                 if (!plan_next_macro_action(act)) {
+                    macro_planner.sync_semantics(vision_data.semantic_labels);
+                    if (macro_planner.ready_for_sokoban(logical_level)) {
+                        game.phase = GamePhase::BIND_SEMANTICS;
+                        break;
+                    }
                     game.error_stage = 1;
                     game.phase = GamePhase::ERROR_OCCURRED;
                     break;
@@ -351,40 +368,28 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             }
 
             if (all_done) {
-                // N-1 规则匹配箱子与目标点 ID
-                uint8_t matched_ids[SystemConfig::MAX_BOXES];
-                
                 macro_planner.sync_semantics(vision_data.semantic_labels);
-                if (!macro_planner.fill_matched_ids(matched_ids, logical_level.box_count)) {
-                    // 错误阶段 5：语义匹配失败（不满足 N-1 规则）
+                if (!macro_planner.apply_semantics_to_level(logical_level)) {
+                    // 错误阶段 5：语义推断失败（观测结果无法形成完整箱子/目标点语义）
                     game.error_stage = 5; game.phase = GamePhase::ERROR_OCCURRED;  
                     break;
                 }
 
-                // 将匹配结果写回逻辑地图，供后续求解器使用
-                for (int i = 0; i < logical_level.box_count; ++i) {
-                    logical_level.box_ids[i] = matched_ids[i];
+                // 根据语义后的地图重新选择炸弹，并加载融合版 Sokoban
+                if (!prepare_phase2_solver(false)) {
+                    game.error_stage = 6;
+                    game.phase = GamePhase::ERROR_OCCURRED;
+                    break;
                 }
-
-                // 二次炸弹解算（附带语义信息）
-                auto& bombs = App::g_state.planning.bomb_tasks;
-                bombs = strategic_planner.evaluate_and_assign_bombs<GameMode::PHASE2_SPECIFIC>(logical_level);
-
-                // 加载推箱求解器
-                solver.load_from_vision(logical_level);              // 导入当前地形（含爆炸改动与小车位置）
-                solver.bind_semantics(matched_ids);                  // 绑定语义映射与当前位置
-                solver.load_bomb_tasks(bombs.data(), bombs.size());  // 加载炸弹任务
                 game.phase = GamePhase::PLAN_SOKOBAN;
             }
             break;
         }
         
         case GamePhase::PLAN_SOKOBAN: {
-            // 按赛段调用不同求解模式
-            bool success = game.is_advanced_stage ? solver.solve(GameMode::PHASE2_SPECIFIC) : solver.solve(GameMode::PHASE1_ANY);
+            bool success = solver.solve();
             if (!success && game.is_advanced_stage) {
-                prepare_phase2_solver(true);
-                success = solver.solve(GameMode::PHASE2_SPECIFIC);
+                success = prepare_phase2_solver(true) && solver.solve();
             }
 
             if (success) {
@@ -455,26 +460,20 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
 /// \param dynamic_fallback 是否启用二阶段动态炸弹兜底策略
 ///
 /// \details
-/// 函数会根据当前 logical_level.box_ids 恢复语义绑定，
+/// 函数会根据当前 logical_level.box_semantics / target_semantics 恢复语义绑定，
 /// 重新计算第二阶段炸弹任务，并把当前逻辑地图、语义关系、
 /// 炸弹任务一起载入 Sokoban 求解器。求解失败重试时会传入 true，
 /// 让 Strategy 使用更激进的动态兜底策略重新选择炸弹任务。
-void GameManager::prepare_phase2_solver(bool dynamic_fallback) {
-    uint8_t matched_ids[SystemConfig::MAX_BOXES];
-    for (int i = 0; i < logical_level.box_count; ++i) {
-        matched_ids[i] = logical_level.box_ids[i];
-    }
-
+bool GameManager::prepare_phase2_solver(bool dynamic_fallback) {
     auto& bombs = App::g_state.planning.bomb_tasks;
     strategic_planner.set_phase2_dynamic_fallback(dynamic_fallback);
     bombs = strategic_planner.evaluate_and_assign_bombs<GameMode::PHASE2_SPECIFIC>(logical_level);
     strategic_planner.set_phase2_dynamic_fallback(false);
 
-    solver.load_from_vision(logical_level);
-    solver.bind_semantics(matched_ids);
-    solver.load_bomb_tasks(bombs.empty() ? nullptr : bombs.data(), bombs.size());
+    if (!solver.load_from_vision(logical_level, bombs.empty() ? nullptr : bombs.data(), bombs.size())) return false;
+    if (!solver.bind_semantics()) return false;
+    return true;
 }
-
 
 /// \brief 规划下一条巡图宏动作
 /// \param out_action 输出选中的宏动作
@@ -491,7 +490,6 @@ bool GameManager::plan_next_macro_action(MacroAction& out_action) {
 
     return macro_planner.plan_next_action(ctx, out_action);
 }
-
 
 /// \brief 启动一条宏动作
 /// \param action 由 MacroPlanner 选出的宏动作

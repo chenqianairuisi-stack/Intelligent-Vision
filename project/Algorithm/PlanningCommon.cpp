@@ -13,7 +13,7 @@ namespace MotionCost {
     // 单格平移的基础时间单位，建议先按实测直线走一格耗时缩放到整数
     inline constexpr uint16_t GRID_MOVE = 1;
     // 路径方向发生变化时的停车和再启动惩罚，麦轮拐点停顿明显时应显著大于 GRID_MOVE
-    inline constexpr uint16_t CORNER_STOP = 4;
+    inline constexpr uint16_t CORNER_STOP = 3;
     // 到达观测位后为了对准目标朝向产生的额外代价，不参与普通路径拐点统计
     inline constexpr uint16_t OBSERVE_YAW = 4;
     // uint16_t 对外接口的饱和值，和旧 BFS 不可达返回值保持一致
@@ -56,11 +56,11 @@ struct SimpleBfsWorkspace {
     uint16_t current_gen = 0;                        // 当前 BFS 代数
 };
 
-// 时间搜索工作区放 OCRAM，避免挤占 DTCM
-static MCU_OCRAM_BSS TimeSearchWorkspace time_ws;
+// 时间搜索工作区默认放 OCRAM，避免挤占 DTCM
+static TimeSearchWorkspace time_ws;
 
-// 普通 BFS 工作区放 OCRAM，消除热点函数中的局部大数组
-static MCU_OCRAM_BSS SimpleBfsWorkspace simple_bfs_ws;
+// 普通 BFS 工作区默认放 OCRAM，消除热点函数中的局部大数组
+static SimpleBfsWorkspace simple_bfs_ws;
 
 // 将 32 位内部代价钳制到对外 uint16_t 代价范围
 static uint16_t clamp_time_cost(uint32_t cost) {
@@ -257,7 +257,7 @@ struct BombPathWorkspace {
 };
 
 // 推物体工作区保留在 DTCM，提高宏微双层搜索访问速度
-__attribute__((section(".dtcm_data"))) static BombPathWorkspace b_ws;
+DTCM_DATA static BombPathWorkspace b_ws;
 
 // ============================================================================
 // 地图与实体查询
@@ -617,7 +617,7 @@ bool get_grid_time_path(const SokobanLevel& lvl, point start, point end, StaticA
     if (start == end) return true;
 
     uint16_t cost_map[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
-    static MCU_OCRAM_BSS TimeParent parent[MAP_MAX_HEIGHT][MAP_MAX_WIDTH][4];
+    static TimeParent parent[MAP_MAX_HEIGHT][MAP_MAX_WIDTH][4];
     if (!run_grid_time_search(lvl, start, cost_map, parent)) return false;
     if (cost_map[end.y][end.x] == MotionCost::INF) return false;
 

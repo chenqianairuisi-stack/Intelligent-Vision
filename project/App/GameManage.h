@@ -63,7 +63,7 @@ protected:
     // --- 内部函数 ---
     bool plan_next_macro_action(MacroAction& out_action);
     void start_macro_action(const MacroAction& action);
-    void prepare_phase2_solver(bool dynamic_fallback);
+    bool prepare_phase2_solver(bool dynamic_fallback);
     point current_grid_from_pose(const Pose2D& pos) const;
     uint32_t observe_mask_of(const MacroAction& action) const;
 };

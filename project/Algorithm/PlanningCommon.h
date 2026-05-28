@@ -126,8 +126,8 @@ void sync_bomb_tasks_after_push(StaticArray<BombTask, MAX_BOMBS>& tasks, const B
 /// \param tasks 需要同步的剩余炸弹任务列表
 /// \param action 已完成执行的推炸弹宏动作
 void apply_executed_bomb_push_result(SokobanLevel& lvl,
-                                     StaticArray<BombTask, MAX_BOMBS>& tasks,
-                                     const BombPushAction& action);
+                                    StaticArray<BombTask, MAX_BOMBS>& tasks,
+                                    const BombPushAction& action);
 
 // --- 普通网格寻路 ---
 uint16_t bfs_shortest_path(const SokobanLevel& lvl, point start, point end);

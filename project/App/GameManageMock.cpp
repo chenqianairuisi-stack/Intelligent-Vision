@@ -768,17 +768,17 @@ void load_mock_map(uint8_t map_idx) {
 /// \brief 生成 Mock 语义标签
 ///
 /// \details
-/// 箱子和目标点写入相同的 1 基标签，模拟 ART2 已经识别出可配对语义
+/// 箱子和目标点默认写入 0..n-1 标签，模拟 ART2 已经识别出可配对语义
 ///
 void MockGameManager::inject_mock_semantics() {
     std::memset(mock_truth_labels, -1, sizeof(mock_truth_labels));
 
     int num = g_state.vision.box_count;
 
-    // 模拟 ART2 的 1 基语义编号，Macro 只按同标签配对
+    // Mock 默认使用 0 基语义编号，和真实 ART2 的 0~9 特征数字保持一致
     for(int i = 0; i < num; i++) {
-        mock_truth_labels[i] = i + 1;          // 箱子语义
-        mock_truth_labels[num + i] = i + 1;    // 对应目标语义
+        mock_truth_labels[i] = i % 10;          // 箱子语义
+        mock_truth_labels[num + i] = i % 10;    // 对应目标语义
     }
 }
 

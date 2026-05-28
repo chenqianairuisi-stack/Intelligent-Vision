@@ -32,8 +32,8 @@ namespace {
     };
 
     // 分配在极速区的独立解析器
-    __attribute__((section(".dtcm_data"))) ProtocolParser parser_art1;
-    __attribute__((section(".dtcm_data"))) ProtocolParser parser_art2; 
+    DTCM_DATA ProtocolParser parser_art1;
+    DTCM_DATA ProtocolParser parser_art2; 
 
     // 协议指令定义
     constexpr uint8_t CMD_REQ_MAP      = 0x10;  // 请求地图指令 (ART1)

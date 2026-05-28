@@ -75,33 +75,40 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
 /// \return 期望角速度 rad/s
 ///
 /// \details
+/// 角速度由剩余角度和最大角加速度反推，保证接近目标时提前进入可刹停速度
 /// 平移时不额外叠加静摩擦补偿，避免平移和旋转耦合后产生抖动
-/// 静止转向时会给很小目标角速度补偿 k_stiction，帮助克服启动摩擦
+/// 静止转向时只在刹车距离足够时补偿 k_stiction，避免小角度来回越界
 ///
 __attribute__((section(".ramfunc")))
 float YawProfiled::calculate(float err, float dt, bool is_translating) {
 
     // 容差死区判断：到达目标后彻底切断动力，防止持续微调引起的抖动
-    if (std::abs(err) <= tune.tracker.ang_tolerance) {
+    float abs_err = std::abs(err);
+    if (abs_err <= tune.tracker.ang_tolerance) {
         current_vw = 0.0f;
         return 0.0f; 
     }
 
-    // 纯 P 控制：距离越近，要求速度越小
-    float target_vw = tune.pid_yaw.kp * err;
+    float max_ang_vel = std::max(tune.dynamics.max_ang_vel, 0.0f);
+    float max_ang_acc = std::max(tune.dynamics.max_ang_acc, 0.001f);
+
+    // 按剩余角度反推当前允许角速度，速度曲线不再受 yaw Kp 影响
+    float target_abs_vw = sqrtf(2.0f * max_ang_acc * abs_err);
+    target_abs_vw = std::min(target_abs_vw, max_ang_vel);
 
     // 静摩擦补偿：当目标速度过小时，提供一个最小的补偿速度，帮助克服静摩擦阈值
     if (!is_translating) {
-        if (std::abs(target_vw) < tune.ff.k_stiction) {
-            target_vw = std::copysign(tune.ff.k_stiction, err);
+        float stiction_vw = std::min(tune.ff.k_stiction, max_ang_vel);
+        float stiction_brake_err = (stiction_vw * stiction_vw) / (2.0f * max_ang_acc);
+        if (target_abs_vw < stiction_vw && abs_err > stiction_brake_err) {
+            target_abs_vw = stiction_vw;
         }
     }
 
-    // 速度物理限幅
-    target_vw = std::clamp(target_vw, -tune.dynamics.max_ang_vel, tune.dynamics.max_ang_vel);
+    float target_vw = std::copysign(target_abs_vw, err);
 
     // 加速度物理限幅：防止起步打滑和急刹打滑
-    float max_dv = tune.dynamics.max_ang_acc * dt;
+    float max_dv = max_ang_acc * dt;
     if (target_vw > current_vw + max_dv) {
         current_vw += max_dv;       
     } else if (target_vw < current_vw - max_dv) {

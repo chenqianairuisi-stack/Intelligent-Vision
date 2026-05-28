@@ -24,8 +24,6 @@ extern "C" {
 
 namespace Subsystem::PoseEstimator {
 namespace { 
-    #define DTCM_DATA __attribute__((section(".dtcm_data")))
-
     DTCM_DATA DebugProbes g_probes = {0}; 
 
     // 基础状态变量

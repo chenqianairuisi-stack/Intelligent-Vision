@@ -18,6 +18,7 @@ Get-Content -Encoding UTF8
 ## 写代码习惯
 
 - 保持改动范围小，只改和当前任务相关的代码。
+- 代码前的缩进尽量为4的倍数。
 - 不要回退用户已有改动，也不要顺手重构无关文件。
 - 手动改源码优先使用 `apply_patch`。
 - 嵌入式规划代码里优先使用已有的 `StaticArray` 和固定容量数组，避免 `new` / `malloc` / `std::vector` 进入热路径。
@@ -99,6 +100,6 @@ ART1 地图
 ## 内存注意事项
 
 - `MAX_PATH_LENGTH` 当前应为 200。
-- 大型规划 scratch buffer 使用 `MCU_OCRAM_BSS` 标记，必须进入 `.ocram_bss`。
-- Keil scatter 文件必须把 `.ocram_bss` 和 `.ocram_bss.*` 放到 OCRAM，不要落到 DTCM。
+- 只有明确需要放入 DTCM 的数据才使用 `DTCM_DATA` 标记。
+- 大型规划 scratch buffer 不要标记 `DTCM_DATA`，默认留在 OCRAM，避免挤占 DTCM。
 - 大型规划函数不要随便放进 `.ramfunc` / ITCM，除非明确有性能理由并确认 ITCM 空间足够。

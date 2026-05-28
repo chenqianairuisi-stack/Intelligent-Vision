@@ -30,8 +30,8 @@ Strategy 是规划链路里的“炸弹战略层”。它不负责输出最终�
 阶段差异：
 - PHASE1_ANY：语义绑定尚未完成，任意箱子可以匹配任意目标点。评估时用箱子-目标集合匹配
     来衡量地图整体可解性，重点是打开“让更多箱子能到更多目标”的通路。
-- PHASE2_SPECIFIC：箱子和目标点已经绑定。评估时必须检查每个箱子能否到达自己的专属目标，
-    对定向不可达的情况施加更高惩罚，适合作为最终 Sokoban 求解前的炸弹补救策略。
+- PHASE2_SPECIFIC：箱子和目标点语义已经确定。评估时必须检查每个箱子能否到达任一同语义目标，
+    对语义目标不可达的情况施加更高惩罚，适合作为最终 Sokoban 求解前的炸弹补救策略。
 
 输出约定：
 - 返回的 StaticArray<BombTask, MAX_BOMBS> 是建议炸弹序列，可能为空。
@@ -50,9 +50,11 @@ Strategy 是规划链路里的“炸弹战略层”。它不负责输出最终�
 
 using namespace SystemConfig;
 
-#ifndef STRATEGY_ENABLE_PROFILE
-#define STRATEGY_ENABLE_PROFILE 1
-#endif
+namespace StrategyConfig {
+    inline constexpr bool ENABLE_PROFILE = true;
+    inline constexpr int PROFILE_EVAL_LIMIT = 8;
+    inline constexpr int PROFILE_TOP_CANDIDATES = 3;
+}
 
 // ============================================================================
 // 策略层内部数据结构
@@ -79,8 +81,6 @@ struct DFSResult {
 // ============================================================================
 // 炸弹战略规划器
 // ============================================================================
-static constexpr int STRATEGY_PROFILE_EVAL_LIMIT = 8;
-static constexpr int STRATEGY_PROFILE_TOP_CANDIDATES = 3;
 
 struct StrategyCandidateProfile {
     int8_t bomb_x = -1;
@@ -104,7 +104,7 @@ struct StrategyPassProfile {
     uint8_t logic_builds = 0;
     uint16_t post_refine_tests = 0;
     uint8_t top_count = 0;
-    StrategyCandidateProfile top[STRATEGY_PROFILE_TOP_CANDIDATES];
+    StrategyCandidateProfile top[StrategyConfig::PROFILE_TOP_CANDIDATES];
     uint16_t local_clear_calls = 0;
     uint16_t local_clear_successes = 0;
     uint16_t materialize_calls = 0;
@@ -124,7 +124,7 @@ struct StrategyEvalProfile {
 struct StrategyProfile {
     uint8_t eval_count = 0;
     uint16_t dropped_evals = 0;
-    StrategyEvalProfile evals[STRATEGY_PROFILE_EVAL_LIMIT];
+    StrategyEvalProfile evals[StrategyConfig::PROFILE_EVAL_LIMIT];
 };
 
 class StrategicPlanner {
