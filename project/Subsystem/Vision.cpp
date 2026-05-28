@@ -5,6 +5,7 @@
 
 #include <string.h> 
 #include <array>
+#include <cmath>
 
 #include "UartComm.h"
 
@@ -52,6 +53,18 @@ namespace {
     /// \details
     /// 解析器支持被主循环反复调用，每次尽可能消费 FIFO 中已有字节
     ///
+    constexpr uint32_t ART1_POSE_STABLE_MAX_GAP_MS = 300U;
+    constexpr float ART1_POSE_STABLE_MAX_STEP_CM = 60.0f;
+    constexpr float ART1_POSE_STABLE_MAX_YAW_STEP_DEG = 60.0f;
+
+    [[gnu::always_inline]] inline float abs_yaw_delta_deg(float a, float b) {
+        float delta = std::fabs(a - b);
+        if (delta > 180.0f) {
+            delta = 360.0f - delta;
+        }
+        return delta;
+    }
+
     __attribute__((always_inline))
     inline bool step_parser(UartComm& uart, ProtocolParser& parser) {
         uint8_t byte;
@@ -130,10 +143,38 @@ namespace {
             memcpy(&next_pose.yaw, &parser_art1.payload_buf[8], 4);
 
             // seq 和 tick 给标定/循迹校正判断新帧与时效性
+            uint32_t now = Core::Scheduler::get_sys_tick_ms();
+            if (!std::isfinite(next_pose.x) ||
+                !std::isfinite(next_pose.y) ||
+                !std::isfinite(next_pose.yaw)) {
+                vis.art1_pose_stable_count = 0;
+                return;
+            }
+
+            bool stable_frame = true;
+            if (vis.art1_pose_seq != 0U) {
+                uint32_t gap_ms = now - vis.art1_pose_tick_ms;
+                float dx = next_pose.x - vis.art1_pose.x;
+                float dy = next_pose.y - vis.art1_pose.y;
+                float step_sq = dx * dx + dy * dy;
+                stable_frame =
+                    gap_ms <= ART1_POSE_STABLE_MAX_GAP_MS &&
+                    step_sq <= ART1_POSE_STABLE_MAX_STEP_CM * ART1_POSE_STABLE_MAX_STEP_CM &&
+                    abs_yaw_delta_deg(next_pose.yaw, vis.art1_pose.yaw) <= ART1_POSE_STABLE_MAX_YAW_STEP_DEG;
+            }
+
+            if (stable_frame) {
+                if (vis.art1_pose_stable_count < App::ART1_POSE_STABLE_REQUIRED_FRAMES) {
+                    vis.art1_pose_stable_count++;
+                }
+            } else {
+                vis.art1_pose_stable_count = 1;
+            }
+
             vis.art1_pose = next_pose;
             vis.art1_pose_publish_idx = write_idx;
             vis.art1_pose_seq++;
-            vis.art1_pose_tick_ms = Core::Scheduler::get_sys_tick_ms();
+            vis.art1_pose_tick_ms = now;
             vis.art1_pose_updated = true;
         }
     }
@@ -195,6 +236,11 @@ void request_pose_ART1() {
     uart_cam1.send_packet(CMD_REQ_POSE, nullptr, 0);
 }
 
+/// \brief 在非中断主循环中尽快请求 ART1 返回绝对位姿
+void schedule_pose_request_ART1() {
+    App::g_state.vision.art1_pose_request_pending = true;
+}
+
 /// \brief 请求 ART2 捕获并识别一个实体
 /// \param entity_id 实体编号
 /// \param is_box true 表示箱子，false 表示目标点
@@ -216,6 +262,11 @@ __attribute__((section(".ramfunc"))) void update() {
     }
     if (step_parser(uart_cam2, parser_art2)) {
         process_art2_packet();
+    }
+
+    if (App::g_state.vision.art1_pose_request_pending) {
+        App::g_state.vision.art1_pose_request_pending = false;
+        request_pose_ART1();
     }
 }
 

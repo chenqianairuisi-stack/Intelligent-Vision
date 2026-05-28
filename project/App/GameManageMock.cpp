@@ -798,7 +798,7 @@ __attribute__((section(".ramfunc"))) void MockGameManager::update() {
     switch (game.phase) {
         case GamePhase::EXIT_START_ZONE: {
             if (Algorithm::Tracker::check_arrival({OUT_TARGET_X, OUT_TARGET_Y}, tune.tracker.reach_radius_min)) {
-                
+
                 load_mock_map(App::g_state.game.selected_map_id);  // 加载 Mock 地图数据到视觉黑板，触发后续逻辑转储
                 game.phase = GamePhase::WAIT_FOR_VISION;
             }

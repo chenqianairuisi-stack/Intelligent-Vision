@@ -34,6 +34,11 @@ DTCM_DATA static Algorithm::Motion::Speed_PosPid pid_wheels[4] = {
 DTCM_DATA static Algorithm::Motion::Trajectory velocity_planner;
 DTCM_DATA static Algorithm::Motion::YawProfiled yaw_controller;
 
+DTCM_DATA static bool control_history_ready = false;
+DTCM_DATA static ControlMode last_control_mode = ControlMode::AUTO_TRACKING;
+DTCM_DATA static TrackerState last_tracker_state = TrackerState::NONE;
+DTCM_DATA static Pose2D last_control_target = {0.0f, 0.0f, SystemConfig::ENTRY_YAW};
+
 // --- 内部辅助函数声明 ---
 namespace {
     // 防止偏航角误差出现 359度 变成 -1度 导致的疯狂原地打转，将角度归一化到 [-pi, pi] 范围内
@@ -46,6 +51,48 @@ namespace {
     __attribute__((always_inline)) inline float smooth_sign(float val) {
         // 0.5f 决定了过渡带的陡峭程度，值越小越接近阶跃，但不突变
         return val / (std::abs(val) + 0.5f); 
+    }
+
+    __attribute__((always_inline)) inline void reset_motion_residue() {
+        velocity_planner.reset();
+        yaw_controller.reset();
+        for (auto& pid : pid_wheels) {
+            pid.reset();
+        }
+    }
+
+    __attribute__((always_inline)) inline bool target_changed_for_point_mode(const Pose2D& target) {
+        return std::abs(target.x - last_control_target.x) > 0.01f ||
+               std::abs(target.y - last_control_target.y) > 0.01f ||
+               std::abs(target.yaw - last_control_target.yaw) > 0.01f;
+    }
+
+    __attribute__((always_inline)) inline void guard_motion_residue(const App::RobotState& state) {
+        const auto& ctrl = state.control;
+        if (!control_history_ready) {
+            control_history_ready = true;
+            last_control_mode = ctrl.mode;
+            last_tracker_state = ctrl.tracker_state;
+            last_control_target = ctrl.current_target;
+            return;
+        }
+
+        bool mode_changed = (ctrl.mode != last_control_mode);
+        bool auto_tracking_started =
+            ctrl.mode == ControlMode::AUTO_TRACKING &&
+            ctrl.tracker_state == TrackerState::TRACKING &&
+            last_tracker_state != TrackerState::TRACKING;
+        bool point_target_changed =
+            ctrl.mode == ControlMode::POINT_TRACKING &&
+            target_changed_for_point_mode(ctrl.current_target);
+
+        if (mode_changed || auto_tracking_started || point_target_changed) {
+            reset_motion_residue();
+        }
+
+        last_control_mode = ctrl.mode;
+        last_tracker_state = ctrl.tracker_state;
+        last_control_target = ctrl.current_target;
     }
 
     // 检查位姿是否明显跑出地图边界（允许有一定容错，防止里程计轻微抖动误触发）
@@ -125,7 +172,11 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick() {
     // 如果是 POINT_TRACKING，我们就不调用 update_target，直接用上位机写入 ctrl.current_target 的值
     if (ctrl.mode == ControlMode::AUTO_TRACKING && ctrl.tracker_state == TrackerState::TRACKING) {
         Algorithm::Tracker::update_target();
+    } else if (ctrl.mode == ControlMode::POINT_TRACKING) {
+        Algorithm::Tracker::update_vision_assist({ctrl.current_target.x, ctrl.current_target.y});
     }
+
+    guard_motion_residue(App::g_state);
 
     // 计算全局误差
     float err_global_x = ctrl.current_target.x - posi.x;

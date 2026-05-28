@@ -1,7 +1,19 @@
 #include "MotionControl.h"
+#include "RobotState.h"
+#include "CoreScheduler.h"
 
 
 namespace Algorithm::Motion {
+namespace {
+    [[gnu::always_inline]] inline bool has_recent_vision_pose() {
+        const auto& vision = App::g_state.vision;
+        constexpr uint32_t POSE_RECENT_MS = 300U;
+        return vision.art1_map_ready &&
+               vision.art1_pose_seq != 0U &&
+               vision.art1_pose_stable_count >= App::ART1_POSE_STABLE_REQUIRED_FRAMES &&
+               (Core::Scheduler::get_sys_tick_ms() - vision.art1_pose_tick_ms) <= POSE_RECENT_MS;
+    }
+}
 
 /// \brief 根据当前位置误差生成平滑的全局平移速度
 /// \param dx 目标点相对当前位置的 X 向误差 cm
@@ -21,9 +33,11 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
     float max_acc = tune.dynamics.max_acc;
     float brake_acc = max_acc * tune.dynamics.brake_limit;
     float target_end_speed = std::clamp(end_speed, 0.0f, max_speed);
+    float terminal_reach_radius =
+        std::min(tune.tracker.reach_radius_min, TuningDefaults::TERMINAL_REACH_RADIUS_CAP_CM);
 
     // 只有终点才允许直接清零，普通拐角保留 end_speed 继续滑过
-    if (distance < tune.tracker.reach_radius_min && target_end_speed <= 0.1f) {
+    if (distance <= terminal_reach_radius && target_end_speed <= 0.1f) {
         current_v = 0.0f;
         return {0.0f, 0.0f};
     }
@@ -43,7 +57,7 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
         // 反推当前距离下允许的速度，保证到段尾时仍可保留目标末速度
         target_v = sqrtf(target_end_speed * target_end_speed + 2.0f * brake_acc * distance);
 
-        constexpr float MIN_CREEP_SPEED = 10.0f;
+        constexpr float MIN_CREEP_SPEED = 15.0f;
         float min_speed = target_end_speed > 0.1f ? target_end_speed : MIN_CREEP_SPEED;
         if (target_v < min_speed) {
             target_v = min_speed;
@@ -51,6 +65,27 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
     }
 
     // 最后一层速度变化限幅，避免目标速度突变直接打到轮速环
+    float target_blend = (target_end_speed <= 0.1f && has_recent_vision_pose()) ? 1.0f : 0.0f;
+    constexpr float FINAL_CAP_BLEND_RATE = 4.0f;
+    float blend_step = FINAL_CAP_BLEND_RATE * dt;
+    if (final_cap_blend < target_blend) {
+        final_cap_blend = std::min(final_cap_blend + blend_step, target_blend);
+    } else if (final_cap_blend > target_blend) {
+        final_cap_blend = std::max(final_cap_blend - blend_step, target_blend);
+    }
+
+    if (target_end_speed <= 0.1f && final_cap_blend > 0.0f) {
+        constexpr float FINAL_APPROACH_ZONE_CM = 45.0f;
+        constexpr float FINAL_APPROACH_MIN_SPEED = 15.0f;
+        constexpr float FINAL_APPROACH_SPEED_SLOPE = 0.65f;
+        if (distance < FINAL_APPROACH_ZONE_CM) {
+            float final_cap = FINAL_APPROACH_MIN_SPEED + distance * FINAL_APPROACH_SPEED_SLOPE;
+            if (target_v > final_cap) {
+                target_v = target_v * (1.0f - final_cap_blend) + final_cap * final_cap_blend;
+            }
+        }
+    }
+
     float max_dv_acc = max_acc * dt;
     float max_dv_dec = brake_acc * dt;
 

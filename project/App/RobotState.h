@@ -6,6 +6,8 @@
 
 namespace App {
 
+inline constexpr uint8_t ART1_POSE_STABLE_REQUIRED_FRAMES = 10U;
+
 // 全局机器人状态结构体，包含游戏状态、视觉输入、规划结果、控制指令和物理状态等信息，供各模块读写共享 
 struct RobotState {
 
@@ -39,8 +41,10 @@ struct RobotState {
         uint32_t art1_pose_tick_ms = 0;         // 位姿帧接收时间，用于拒绝过期视觉数据
         
         // ART1 业务同步标志位
+        uint8_t art1_pose_stable_count = 0;     // Stable ART1 pose frame count for motion control gating
         bool art1_map_ready = false;
         bool art1_pose_updated = false;
+        bool art1_pose_request_pending = false;
         // ART2 业务同步标志位
         bool art2_result_ready = false;
         // ART2 异步流水线状态
@@ -58,7 +62,8 @@ struct RobotState {
 
         StaticArray<BombTask, SystemConfig::MAX_BOMBS> bomb_tasks;            // 炸弹任务列表
         Point2D vision_segment_start = {0.0f, 0.0f};                          // 当前直线路径段起点，用于判断视觉校正轴向
-        bool vision_correction_done = false;                                  // 当前路径段是否已经做过一次视觉校正
+        uint32_t vision_last_correction_seq = 0;                              // 已参与运动中校正的最后一帧视觉序号
+        uint32_t vision_last_request_tick_ms = 0;                              // Reserved: tracking no longer requests ART1 pose periodically
     } planning;
 
     // 4. 控制层 (Tracker 写入，底盘 Chassis 读取)

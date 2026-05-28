@@ -73,6 +73,8 @@ namespace { // 匿名命名空间，确保这些数据只在本文件可见
     {"Turn_W  ",   &tune.tracker.corner_switch_window,0.1f  },
     {"LineTol ",   &tune.tracker.corner_line_tolerance,0.1f },
     {"VisRej  ",   &tune.tracker.vision_reject_dist,  0.5f  },
+    {"EncLat  ",   &tune.latency.encoder_latency_gain,0.01f },
+    {"VisLat  ",   &tune.latency.vision_latency_ms,   10.0f },
     {"Ang_Tol ",   &tune.tracker.ang_tolerance,       0.001 },
     };
     constexpr int DICT_SIZE = sizeof(tune_dict) / sizeof(tune_dict[0]);   
@@ -96,6 +98,7 @@ static void draw_item(uint8_t row, const char* name, bool is_selected);
 static void draw_float_item(uint8_t row, const char* name, float val, bool is_selected, bool is_editing, uint8_t decimals);
 static void format_plan_time_line(char* out, size_t size, const char* label, uint32_t ms);
 static void fill_rect(uint8_t x, uint8_t y, uint8_t w, uint8_t h, uint16_t color);
+static void clamp_latency_params();
 
 
 // ====================================================================
@@ -203,7 +206,9 @@ void process_logic() {
                     system_delay_ms(300);
                 }
                 if (ctx.cursor_idx == 4) {
-                    Storage::load_params();
+                    if (Storage::load_params()) {
+                        Storage::save_params();
+                    }
                     tft180_show_string(15 * UI_COL_W, 6 * UI_ROW_H, "[OK]");
                     system_delay_ms(300);
                 }
@@ -239,6 +244,7 @@ void process_logic() {
                 // 编辑模式：直接操作字典中的指针，一键修改全局黑板变量
                 if (ctx.key_up_pressed)   *(tune_dict[ctx.cursor_idx].val_ptr) += tune_dict[ctx.cursor_idx].step;
                 if (ctx.key_down_pressed) *(tune_dict[ctx.cursor_idx].val_ptr) -= tune_dict[ctx.cursor_idx].step;
+                clamp_latency_params();
                 if (ctx.key_enter_pressed || ctx.key_back_pressed) ctx.is_editing = false;
             }
             break;
@@ -498,6 +504,20 @@ void draw_tune_params() {
 /// 从 GameEngine 获取渲染上下文，合成地图、路径、观测点和小车位置
 /// 地图采用 back_buffer 做格子级增量刷新，小车单独作为像素级覆盖层绘制
 ///
+void clamp_latency_params() {
+    if (tune.latency.encoder_latency_gain < TuningDefaults::MIN_ENCODER_LATENCY_GAIN) {
+        tune.latency.encoder_latency_gain = TuningDefaults::MIN_ENCODER_LATENCY_GAIN;
+    } else if (tune.latency.encoder_latency_gain > TuningDefaults::MAX_ENCODER_LATENCY_GAIN) {
+        tune.latency.encoder_latency_gain = TuningDefaults::MAX_ENCODER_LATENCY_GAIN;
+    }
+
+    if (tune.latency.vision_latency_ms < TuningDefaults::MIN_VISION_LATENCY_MS) {
+        tune.latency.vision_latency_ms = TuningDefaults::MIN_VISION_LATENCY_MS;
+    } else if (tune.latency.vision_latency_ms > TuningDefaults::MAX_VISION_LATENCY_MS) {
+        tune.latency.vision_latency_ms = TuningDefaults::MAX_VISION_LATENCY_MS;
+    }
+}
+
 void draw_dashboard() {
     App::GameEngine::RenderContext render_ctx = App::GameEngine::get_render_context();
     auto& game = App::g_state.game;

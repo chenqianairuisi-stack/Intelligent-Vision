@@ -2,6 +2,7 @@
 #include "Tracker.h"
 #include "RobotState.h"
 #include "PoseEstimate.h"
+#include "CoreScheduler.h"
 #include <cmath>
 
 using namespace SystemConfig;
@@ -37,6 +38,30 @@ namespace {
     [[gnu::always_inline]] inline Point2D current_pose_point() {
         const auto& pose = App::g_state.physical.pose;
         return {pose.x, pose.y};
+    }
+
+    [[gnu::always_inline]] inline void reset_vision_assist(Point2D segment_start) {
+        auto& plan = App::g_state.planning;
+        plan.vision_segment_start = segment_start;
+        plan.vision_last_correction_seq = App::g_state.vision.art1_pose_seq;
+    }
+
+    [[gnu::always_inline]] inline bool has_trackable_segment(Point2D segment_start, Point2D target) {
+        float dx = target.x - segment_start.x;
+        float dy = target.y - segment_start.y;
+        return (dx * dx + dy * dy) >= 1.0f;
+    }
+
+    [[gnu::always_inline]] inline bool art1_pose_recent(uint32_t now) {
+        const auto& vision = App::g_state.vision;
+        constexpr uint32_t POSE_RECENT_MS = 300U;
+        return vision.art1_pose_seq != 0U &&
+               vision.art1_pose_stable_count >= App::ART1_POSE_STABLE_REQUIRED_FRAMES &&
+               (now - vision.art1_pose_tick_ms) <= POSE_RECENT_MS;
+    }
+
+    [[gnu::always_inline]] inline float terminal_reach_radius() {
+        return std::min(tune.tracker.reach_radius_min, TuningDefaults::TERMINAL_REACH_RADIUS_CAP_CM);
     }
 
     /// \brief 判断直线段是否可以提前切到下一段
@@ -107,9 +132,7 @@ static void load_path_impl(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
     plan.grid_path.clear();
     plan.physical_path.clear();
     ctrl.tracker_state = TrackerState::FINISHED;
-    plan.vision_segment_start = current_pose_point();
-    plan.vision_correction_done = false;
-    App::g_state.vision.art1_pose_updated = false;
+    reset_vision_assist(current_pose_point());
 
     if (raw_path.size() == 0) return;
 
@@ -146,7 +169,7 @@ static void load_path_impl(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
     }
 
     // 视觉校正需要知道当前直线段的真实起点，用来区分前进轴和横向轴
-    plan.vision_segment_start = can_use_start ? grid_to_physical(start_grid) : current_pose_point();
+    reset_vision_assist(can_use_start ? grid_to_physical(start_grid) : current_pose_point());
     plan.current_wp_idx = 0;
     ctrl.tracker_state = TrackerState::TRACKING;
     ctrl.mode = ControlMode::AUTO_TRACKING;
@@ -163,10 +186,52 @@ void load_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path, point start_
 }
 
 
+/// \brief 运动中的视觉辅助：周期请求 ART1，并在速度规划前应用延时补偿后的视觉修正
+__attribute__((section(".ramfunc"))) void update_vision_assist(const Point2D& target) {
+    if (!App::g_state.vision.art1_map_ready) {
+        return;
+    }
+
+    auto& plan = App::g_state.planning;
+    const Point2D segment_start = plan.vision_segment_start;
+
+    if (!has_trackable_segment(segment_start, target)) {
+        return;
+    }
+
+    const auto& pose = App::g_state.physical.pose;
+    float target_dx = target.x - pose.x;
+    float target_dy = target.y - pose.y;
+    constexpr float VISION_ASSIST_TARGET_FREEZE_RADIUS_CM = 0.5f;
+    if (target_dx * target_dx + target_dy * target_dy <=
+        VISION_ASSIST_TARGET_FREEZE_RADIUS_CM * VISION_ASSIST_TARGET_FREEZE_RADIUS_CM) {
+        return;
+    }
+
+    // 只在仍有平移运动时参与，避免终点停车后视觉噪声继续拉扯底盘。
+    // 靠近终点但尚未停稳时仍允许最后几帧视觉修正，防止估计位姿先进入半径后提前刹停。
+    if (App::g_state.physical.is_stopped) {
+        return;
+    }
+
+    uint32_t now = Core::Scheduler::get_sys_tick_ms();
+    bool pose_recent = art1_pose_recent(now);
+    if (!pose_recent) {
+        return;
+    }
+
+    Subsystem::PoseEstimator::apply_vision_axis_correction(
+        segment_start,
+        target,
+        plan.vision_last_correction_seq
+    );
+}
+
+
 /// \brief 更新当前跟踪目标，供底盘控制周期调用
 ///
 /// \details
-/// 该函数负责航点切换、拐角提前切换和每段一次的视觉轴向校正
+/// 该函数负责航点切换、拐角提前切换和运动中的视觉辅助
 ///
 __attribute__((section(".ramfunc"))) void update_target() {
     auto& plan = App::g_state.planning;
@@ -176,24 +241,18 @@ __attribute__((section(".ramfunc"))) void update_target() {
 
     bool is_last_point = (plan.current_wp_idx == plan.physical_path.size() - 1);
     Point2D target_phys = plan.physical_path[plan.current_wp_idx];
-    float current_radius = is_last_point ? tune.tracker.reach_radius_min : tune.tracker.reach_radius;
+    update_vision_assist(target_phys);
+
+    float current_radius = is_last_point ? terminal_reach_radius() : tune.tracker.reach_radius;
     // 非终点航点允许提前切换，终点必须按更小半径进入并停稳
     bool arrived = is_last_point ?
         check_arrival(target_phys, current_radius) :
         (check_arrival(target_phys, current_radius) || check_corner_switch(plan.vision_segment_start, target_phys));
 
     if (arrived) {
-        if (!plan.vision_correction_done) {
-            // 每个直线段只做一次视觉轴向修正，避免同一帧视觉数据反复覆盖里程计
-            Subsystem::PoseEstimator::apply_vision_axis_correction(plan.vision_segment_start, target_phys);
-            plan.vision_correction_done = true;
-        }
-
         if (!is_last_point) {
-            // 切到下一段后重新允许视觉修正，并丢弃上一段残留的视觉更新标志
-            plan.vision_segment_start = target_phys;
-            plan.vision_correction_done = false;
-            App::g_state.vision.art1_pose_updated = false;
+            // 切到下一段后按新运动方向重新判定横向轴，并忽略已经见过的视觉帧
+            reset_vision_assist(target_phys);
             plan.current_wp_idx++;
             target_phys = plan.physical_path[plan.current_wp_idx];
         } else if (App::g_state.physical.is_stopped) {
@@ -218,9 +277,7 @@ void track_point(const Pose2D& target) {
 
     plan.grid_path.clear();
     plan.physical_path.clear();
-    plan.vision_segment_start = current_pose_point();
-    plan.vision_correction_done = false;
-    App::g_state.vision.art1_pose_updated = false;
+    reset_vision_assist(current_pose_point());
 
     ctrl.current_target = target;
     ctrl.mode = ControlMode::POINT_TRACKING;
