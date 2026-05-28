@@ -11,12 +11,13 @@ namespace Algorithm::Motion {
 // ==========================================
 class Trajectory {
 public:
-    inline void reset() { current_v = 0.0f; current_a = 0.0f; }  
+    inline void reset() { current_v = 0.0f; current_a = 0.0f; final_cap_blend = 0.0f; }
     // 生成平滑平移速度，end_speed 用于拐角不停顿通过
     Speed2D velocity_planning_1d(float dx, float dy, float dt, float end_speed = 0.0f);
 private:
     float current_v = 0.0f;  
     float current_a = 0.0f; 
+    float final_cap_blend = 0.0f;
 };
 
 

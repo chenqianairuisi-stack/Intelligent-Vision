@@ -131,9 +131,6 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     logical_level.bombs[i] = vision_data.bombs[i];
                 }
 
-                // 异步请求位姿，用于后续全局定位校准
-                Subsystem::Vision::request_pose_ART1(); 
-
                 if (game.is_advanced_stage) {  
                     game.phase = GamePhase::PLAN_PATROL;       // 进入巡图
                 } else {
@@ -307,15 +304,19 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                         task.param.bomb_push
                     );
 
-                    // 更新当前物理位姿对应的逻辑位置
-                    logical_level.player_start = current_grid_from_pose(pos);
+                    // 离散地图位置按本次规划终点结算，不再用带视觉微修正的物理 pose 反推格点
+                    if (!App::g_state.planning.grid_path.empty()) {
+                        logical_level.player_start = App::g_state.planning.grid_path.back();
+                    }
                     
                     task_done = true;
                     break;
                 }
                 case TaskType::UPDATE_BOX_LOGIC: {
                     PlanningCommon::apply_box_push_action_effect(logical_level, task.param.box_push);
-                    logical_level.player_start = current_grid_from_pose(pos);
+                    if (!App::g_state.planning.grid_path.empty()) {
+                        logical_level.player_start = App::g_state.planning.grid_path.back();
+                    }
                     task_done = true;
                     break;
                 }
@@ -419,11 +420,13 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
         // =============================================================================
         case GamePhase::PLAN_RETURN_HOME: {
             Algorithm::Tracker::track_point({IN_TARGET_X, IN_TARGET_Y, ENTRY_YAW});
+            game.phase = GamePhase::EXEC_RETURN_HOME;
             break;
         }
 
         case GamePhase::EXEC_RETURN_HOME: {
-            if (Algorithm::Tracker::check_arrival({IN_TARGET_X, IN_TARGET_Y}, tune.tracker.reach_radius_min)) {
+            if (Algorithm::Tracker::check_arrival({IN_TARGET_X, IN_TARGET_Y}, tune.tracker.reach_radius_min) &&
+                App::g_state.physical.is_stopped) {
                 game.phase = GamePhase::FINISHED;
             }
             break;

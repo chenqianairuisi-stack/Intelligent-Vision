@@ -37,7 +37,7 @@ struct TuningConfig {
         float corner_pass_speed;      // 非终点过弯保留速度 cm/s
         float corner_switch_window;   // 拐角提前切换窗口 cm
         float corner_line_tolerance;  // 拐角切换横向允许误差 cm
-        float vision_request_distance; // 预留：距离路径点多远请求视觉定位 cm
+        float vision_request_interval_ms; // Reserved: no periodic ART1 pose request while tracking
         float vision_reject_dist;     // 视觉轴向校正最大接受误差 cm
         float ang_tolerance;          // 航向角死区 rad
     } tracker;
@@ -52,7 +52,97 @@ struct TuningConfig {
         float rf_speed;  // 右前轮测试速度
         float rb_speed;  // 右后轮测试速度
     } motors;
+
+    struct {
+        float encoder_latency_gain; // Encoder odometry latency compensation gain
+        float vision_latency_ms;    // Vision pose pipeline latency estimate ms
+    } latency;
 };
+
+namespace TuningDefaults {
+    inline constexpr float DEFAULT_REACH_RADIUS_MIN = 0.25f;
+    inline constexpr float TERMINAL_REACH_RADIUS_CAP_CM = 0.25f;
+    inline constexpr float DEFAULT_CORNER_PASS_SPEED = 18.0f;
+    inline constexpr float DEFAULT_BRAKE_LIMIT = 0.85f;
+    inline constexpr float DEFAULT_ENCODER_LATENCY_GAIN = 1.00f;
+    inline constexpr float DEFAULT_VISION_LATENCY_MS = 300.0f;
+    inline constexpr float DEFAULT_VISION_REQUEST_INTERVAL_MS = 250.0f;
+    inline constexpr float DEFAULT_VISION_REJECT_DIST = 3.0f;
+
+    inline constexpr float MIN_REACH_RADIUS_MIN = 0.10f;
+    inline constexpr float MAX_REACH_RADIUS_MIN = 3.0f;
+    inline constexpr float MIN_CORNER_PASS_SPEED = 0.0f;
+    inline constexpr float MAX_CORNER_PASS_SPEED = 80.0f;
+    inline constexpr float MIN_BRAKE_LIMIT = 0.10f;
+    inline constexpr float MAX_BRAKE_LIMIT = 2.0f;
+    inline constexpr float MIN_ENCODER_LATENCY_GAIN = 0.01f;
+    inline constexpr float MAX_ENCODER_LATENCY_GAIN = 2.00f;
+    inline constexpr float MIN_VISION_LATENCY_MS = 10.0f;
+    inline constexpr float MAX_VISION_LATENCY_MS = 1000.0f;
+    inline constexpr float MIN_VISION_REQUEST_INTERVAL_MS = 100.0f;
+    inline constexpr float MAX_VISION_REQUEST_INTERVAL_MS = 1500.0f;
+    inline constexpr float MIN_VISION_REJECT_DIST = 0.5f;
+    inline constexpr float MAX_VISION_REJECT_DIST = 8.0f;
+
+    [[nodiscard]] inline bool repair_if_outside(float& value, float min_value, float max_value, float default_value) {
+        if (value >= min_value && value <= max_value) {
+            return false;
+        }
+
+        value = default_value;
+        return true;
+    }
+
+    [[nodiscard]] inline bool clamp_if_outside(float& value, float min_value, float max_value, float default_value) {
+        if (value >= min_value && value <= max_value) {
+            return false;
+        }
+
+        if (value < min_value) {
+            value = min_value;
+        } else if (value > max_value) {
+            value = max_value;
+        } else {
+            value = default_value;
+        }
+        return true;
+    }
+
+    [[nodiscard]] inline bool sanitize(TuningConfig& config) {
+        bool changed = false;
+
+        changed = repair_if_outside(config.dynamics.brake_limit,
+                                    MIN_BRAKE_LIMIT,
+                                    MAX_BRAKE_LIMIT,
+                                    DEFAULT_BRAKE_LIMIT) || changed;
+        changed = repair_if_outside(config.tracker.reach_radius_min,
+                                    MIN_REACH_RADIUS_MIN,
+                                    MAX_REACH_RADIUS_MIN,
+                                    DEFAULT_REACH_RADIUS_MIN) || changed;
+        changed = repair_if_outside(config.tracker.corner_pass_speed,
+                                    MIN_CORNER_PASS_SPEED,
+                                    MAX_CORNER_PASS_SPEED,
+                                    DEFAULT_CORNER_PASS_SPEED) || changed;
+        changed = repair_if_outside(config.tracker.vision_request_interval_ms,
+                                    MIN_VISION_REQUEST_INTERVAL_MS,
+                                    MAX_VISION_REQUEST_INTERVAL_MS,
+                                    DEFAULT_VISION_REQUEST_INTERVAL_MS) || changed;
+        changed = repair_if_outside(config.tracker.vision_reject_dist,
+                                    MIN_VISION_REJECT_DIST,
+                                    MAX_VISION_REJECT_DIST,
+                                    DEFAULT_VISION_REJECT_DIST) || changed;
+        changed = clamp_if_outside(config.latency.encoder_latency_gain,
+                                   MIN_ENCODER_LATENCY_GAIN,
+                                   MAX_ENCODER_LATENCY_GAIN,
+                                   DEFAULT_ENCODER_LATENCY_GAIN) || changed;
+        changed = clamp_if_outside(config.latency.vision_latency_ms,
+                                   MIN_VISION_LATENCY_MS,
+                                   MAX_VISION_LATENCY_MS,
+                                   DEFAULT_VISION_LATENCY_MS) || changed;
+
+        return changed;
+    }
+}
 
 // 全局调参实例，放在 DTCM 区域，供高频控制和业务模块访问
 __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
@@ -67,15 +157,15 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
         4.6f,    // max_ang_acc
         1.044f,  // kinematic_gain_x
         1.015f,  // kinematic_gain_y
-        0.6f     // brake_limit
+        TuningDefaults::DEFAULT_BRAKE_LIMIT  // brake_limit
     },
     {
         0.3f,    // reach_radius
-        0.2f,    // reach_radius_min
-        24.0f,   // corner_pass_speed
+        TuningDefaults::DEFAULT_REACH_RADIUS_MIN,   // reach_radius_min
+        TuningDefaults::DEFAULT_CORNER_PASS_SPEED,  // corner_pass_speed
         0.7f,    // corner_switch_window
         1.0f,    // corner_line_tolerance
-        18.0f,   // vision_request_distance
+        250.0f,  // vision_request_interval_ms
         3.0f,    // vision_reject_dist
         0.006f   // ang_tolerance
     },
@@ -87,5 +177,9 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
         0.0f,    // lb_speed
         0.0f,    // rf_speed
         0.0f     // rb_speed
+    },
+    {
+        TuningDefaults::DEFAULT_ENCODER_LATENCY_GAIN,  // encoder_latency_gain
+        TuningDefaults::DEFAULT_VISION_LATENCY_MS      // vision_latency_ms
     }
 };

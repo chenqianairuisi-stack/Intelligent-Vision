@@ -13,8 +13,11 @@ namespace Algorithm::Tracker {
     // 更新当前目标位姿，供控制模块调用
     void update_target();
 
+    // 运动中的视觉辅助，POINT_TRACKING 也可复用
+    void update_vision_assist(const Point2D& target);
+
     // 直接追踪单个物理目标点
-    void track_point(const Pose2D& target); 
+    void track_point(const Pose2D& target);
 
     // 检查是否到达当前目标点
     bool check_arrival(Point2D target, float radius); 

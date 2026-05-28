@@ -11,6 +11,7 @@ namespace Subsystem::Vision {
     // 动作控制接口
     void request_map_ART1();
     void request_pose_ART1();
+    void schedule_pose_request_ART1();
     void request_capture_ART2(uint8_t entity_id, bool is_box);
 
     // 寻图前清空缓存
