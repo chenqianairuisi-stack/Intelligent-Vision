@@ -15,13 +15,13 @@ void Storage::init() {
             save_params();
         }
     } else {
-        TuningDefaults::sanitize(tune);
+        (void)TuningDefaults::sanitize(tune);
         save_params();
     }
 }
 
 void Storage::save_params() {
-    TuningDefaults::sanitize(tune);
+    (void)TuningDefaults::sanitize(tune);
     flash_buffer_clear();
 
     flash_union_buffer[0].uint32_type = CONFIG_MAGIC_WORD;
@@ -37,13 +37,19 @@ bool Storage::load_params() {
     flash_read_page_to_buffer(FLASH_SECTION_INDEX, FLASH_PAGE_INDEX);
 
     if (flash_union_buffer[0].uint32_type != CONFIG_MAGIC_WORD) {
-        TuningDefaults::sanitize(tune);
+        (void)TuningDefaults::sanitize(tune);
         return true;
     }
 
     memcpy(&tune, &flash_union_buffer[1], sizeof(TuningConfig));
 
     changed = TuningDefaults::sanitize(tune) || changed;
+    if (tune.latency.encoder_latency_gain == 1.00f &&
+        tune.latency.vision_latency_ms == 300.0f) {
+        tune.latency.encoder_latency_gain = TuningDefaults::DEFAULT_ENCODER_LATENCY_GAIN;
+        tune.latency.vision_latency_ms = TuningDefaults::DEFAULT_VISION_LATENCY_MS;
+        changed = true;
+    }
 
     return changed;
 }

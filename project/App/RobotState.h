@@ -58,12 +58,13 @@ struct RobotState {
         StaticArray<point, SystemConfig::MAX_PATH_LENGTH> grid_path;          // 供 UI 渲染
 
         StaticArray<Point2D, SystemConfig::MAX_PATH_LENGTH> physical_path;    // 物理路径（cm级坐标），供 Tracker 追踪
+        StaticArray<uint8_t, SystemConfig::MAX_PATH_LENGTH> force_stop_at_wp; // 该航点是否必须停稳后再切下一段
         uint16_t current_wp_idx = 0;                                          // 当前正在追的航点索引
 
         StaticArray<BombTask, SystemConfig::MAX_BOMBS> bomb_tasks;            // 炸弹任务列表
         Point2D vision_segment_start = {0.0f, 0.0f};                          // 当前直线路径段起点，用于判断视觉校正轴向
         uint32_t vision_last_correction_seq = 0;                              // 已参与运动中校正的最后一帧视觉序号
-        uint32_t vision_last_request_tick_ms = 0;                              // Reserved: tracking no longer requests ART1 pose periodically
+        uint32_t vision_last_request_tick_ms = 0;                              // 上次循迹位姿请求时刻
     } planning;
 
     // 4. 控制层 (Tracker 写入，底盘 Chassis 读取)

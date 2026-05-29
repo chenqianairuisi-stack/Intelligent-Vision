@@ -13,6 +13,7 @@
 namespace App::GameEngine {
 
 DTCM_DATA static DemoGameManager core_engine;
+DTCM_DATA static GamePhase s_last_update_phase = GamePhase::NONE;
 
 // 倒数计算宏区（利用编译期算好替代除法）
 constexpr float INV_360 = 1.0f / 360.0f;
@@ -90,12 +91,20 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
     auto& ctrl = App::g_state.control;       
     auto& game = App::g_state.game;          
     auto& vision_data = App::g_state.vision;
+    const GamePhase phase_at_entry = game.phase;
+    const bool phase_entered = (phase_at_entry != s_last_update_phase);
     
     switch (game.phase) {
         // =============================================================================
         // ---- 阶段一：启动出库与建图 ----
         // =============================================================================
         case GamePhase::INIT_CALIBRATE: {
+            vision_data.art1_map_ready = false;
+            vision_data.art1_pose_updated = false;
+            vision_data.art1_pose_request_pending = false;
+            vision_data.art1_pose_seq = 0U;
+            vision_data.art1_pose_tick_ms = 0U;
+            vision_data.art1_pose_stable_count = 0U;
             Subsystem::PoseEstimator::set_position(ENTRY_X, ENTRY_Y, ENTRY_YAW);
             Algorithm::Tracker::track_point({OUT_TARGET_X, OUT_TARGET_Y, ENTRY_YAW});
 
@@ -105,8 +114,8 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
 
         case GamePhase::EXIT_START_ZONE: {
             // 到位后请求视觉模块 ART1 返回地图数据，进入等待状态
-            if (Algorithm::Tracker::check_arrival({OUT_TARGET_X, OUT_TARGET_Y}, tune.tracker.reach_radius_min)) {
-
+            if (Algorithm::Tracker::check_arrival({OUT_TARGET_X, OUT_TARGET_Y}, tune.tracker.reach_radius_min) &&
+                App::g_state.physical.is_stopped) {
                 Subsystem::Vision::request_map_ART1();   // 请求 ART1 地图
                 game.phase = GamePhase::WAIT_FOR_VISION;
             }
@@ -427,34 +436,43 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
         // ---- 阶段四：返回起点 ----
         // =============================================================================
         case GamePhase::PLAN_RETURN_HOME: {
-            Algorithm::Tracker::track_point({IN_TARGET_X, IN_TARGET_Y, ENTRY_YAW});
+            Algorithm::Tracker::track_point_with_vision_assist({IN_TARGET_X, IN_TARGET_Y, ENTRY_YAW});
             game.phase = GamePhase::EXEC_RETURN_HOME;
             break;
         }
 
         case GamePhase::EXEC_RETURN_HOME: {
             if (Algorithm::Tracker::check_arrival({IN_TARGET_X, IN_TARGET_Y}, tune.tracker.reach_radius_min) &&
-                App::g_state.physical.is_stopped) {
+                App::g_state.physical.is_stopped &&
+                !Algorithm::Tracker::final_coord_check_pending_for_target({IN_TARGET_X, IN_TARGET_Y})) {
                 game.phase = GamePhase::FINISHED;
             }
             break;
         }
 
         case GamePhase::FINISHED: {
-            // 完成态：保持原地
-            Algorithm::Tracker::track_point({pos.x, pos.y, SystemConfig::ENTRY_YAW});
+            // 完成态只在进入时锁住当前位姿，避免循环重置目标导致原地找零
+            if (phase_entered || ctrl.mode != ControlMode::POINT_TRACKING) {
+                Algorithm::Tracker::track_point({pos.x, pos.y, pos.yaw});
+                ctrl.tracker_state = TrackerState::FINISHED;
+            }
             break;
         }
 
         case GamePhase::ERROR_OCCURRED: {
-            // 错误态：立即停车并保持姿态
-            Algorithm::Tracker::track_point({pos.x, pos.y, SystemConfig::ENTRY_YAW});
+            // 错误态同样保持当前姿态，不再强行转回入口角
+            if (phase_entered || ctrl.mode != ControlMode::POINT_TRACKING) {
+                Algorithm::Tracker::track_point({pos.x, pos.y, pos.yaw});
+                ctrl.tracker_state = TrackerState::FINISHED;
+            }
             break;
         }
 
         default:
             break;
     }
+
+    s_last_update_phase = phase_at_entry;
 }
 
 

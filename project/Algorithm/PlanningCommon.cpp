@@ -1252,10 +1252,13 @@ bool get_bomb_push_path(const SokobanLevel& lvl, point player_start, const BombT
         }
     }
 
-    out_path.push_back({
+    point final_car_pos = {
         static_cast<int8_t>(macro_path.back().bx - MOVE[macro_path.back().p_dir].x),
         static_cast<int8_t>(macro_path.back().by - MOVE[macro_path.back().p_dir].y)
-    });
+    };
+    if (out_path.empty() || out_path.back() != final_car_pos) {
+        out_path.push_back(final_car_pos);
+    }
 
     return true;
 }

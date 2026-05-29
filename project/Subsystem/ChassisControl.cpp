@@ -17,27 +17,26 @@ namespace Subsystem::Chassis {
 // 内部私有实现
 // ====================================================================
 
-DTCM_DATA static Motor motors[4] = {
+__attribute__((section(".dtcm_data"))) static Motor motors[4] = {
     {C6,  PWM2_MODULE0_CHB_C7,  false},   // LF
     {C11, PWM2_MODULE2_CHA_C10, false},   // LB
     {C8,  PWM2_MODULE1_CHB_C9,  true },   // RF
     {D3,  PWM2_MODULE3_CHA_D2,  true }    // RB
 };
 
-DTCM_DATA static Algorithm::Motion::Speed_PosPid pid_wheels[4] = {
+__attribute__((section(".dtcm_data"))) static Algorithm::Motion::Speed_PosPid pid_wheels[4] = {
     Algorithm::Motion::Speed_PosPid(tune.pid_speed), Algorithm::Motion::Speed_PosPid(tune.pid_speed),
     Algorithm::Motion::Speed_PosPid(tune.pid_speed), Algorithm::Motion::Speed_PosPid(tune.pid_speed)
 };
 
-// DTCM_DATA static Algorithm::Motion::Angle_PosPid pid_pos_yaw(tune.pid_yaw);
+// __attribute__((section(".dtcm_data"))) static Algorithm::Motion::Angle_PosPid pid_pos_yaw(tune.pid_yaw);
 
-DTCM_DATA static Algorithm::Motion::Trajectory velocity_planner;
-DTCM_DATA static Algorithm::Motion::YawProfiled yaw_controller;
-
-DTCM_DATA static bool control_history_ready = false;
-DTCM_DATA static ControlMode last_control_mode = ControlMode::AUTO_TRACKING;
-DTCM_DATA static TrackerState last_tracker_state = TrackerState::NONE;
-DTCM_DATA static Pose2D last_control_target = {0.0f, 0.0f, SystemConfig::ENTRY_YAW};
+__attribute__((section(".dtcm_data"))) static Algorithm::Motion::Trajectory velocity_planner;
+__attribute__((section(".dtcm_data"))) static Algorithm::Motion::YawProfiled yaw_controller;
+__attribute__((section(".dtcm_data"))) static bool control_history_ready = false;
+__attribute__((section(".dtcm_data"))) static ControlMode last_control_mode = ControlMode::AUTO_TRACKING;
+__attribute__((section(".dtcm_data"))) static TrackerState last_tracker_state = TrackerState::NONE;
+__attribute__((section(".dtcm_data"))) static Pose2D last_control_target = {0.0f, 0.0f, SystemConfig::ENTRY_YAW};
 
 // --- 内部辅助函数声明 ---
 namespace {
@@ -191,7 +190,9 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick() {
         int current_wp = static_cast<int>(plan.current_wp_idx);
         if (path_size > 0 && current_wp < path_size - 1) {
             // 非最后一个航点不刹停，保留过弯速度给速度规划器
-            target_end_speed = tune.tracker.corner_pass_speed;
+            bool force_stop_wp =
+                current_wp < plan.force_stop_at_wp.size() && plan.force_stop_at_wp[current_wp] != 0U;
+            target_end_speed = force_stop_wp ? 0.0f : tune.tracker.corner_pass_speed;
         }
     }
 

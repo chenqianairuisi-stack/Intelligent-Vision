@@ -9,12 +9,25 @@ namespace Algorithm::Tracker {
     void load_path(const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& raw_path);
     // 载入网格路径，并用真实逻辑起点辅助首段压缩
     void load_path(const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& raw_path, point start_grid);
+    void load_box_push_path(const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& raw_path,
+                            point start_grid,
+                            point box_start,
+                            point box_target,
+                            const SokobanLevel& level);
+    void load_bomb_push_path(const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& raw_path,
+                             point start_grid,
+                             point bomb_target);
+    void set_box_push_final_press_cm(float press_cm);
+    float get_box_push_final_press_cm();
 
     // 更新当前目标位姿，供控制模块调用
     void update_target();
 
     // 运动中的视觉辅助，POINT_TRACKING 也可复用
     void update_vision_assist(const Point2D& target);
+    void track_point(const Pose2D& target);
+    void track_point_with_vision_assist(const Pose2D& target);
+    bool final_coord_check_pending_for_target(Point2D target);
 
     // 直接追踪单个物理目标点
     void track_point(const Pose2D& target);

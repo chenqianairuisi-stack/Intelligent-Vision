@@ -141,6 +141,20 @@ namespace Subsystem::PoseEstimator {
     bool apply_vision_axis_correction(const Point2D& segment_start, const Point2D& segment_end,
                                       uint32_t& last_consumed_seq);
 
+    struct VisionLatencyDebug {
+        Pose2D raw_pose;
+        Pose2D compensated_pose;
+        float odom_dx;
+        float odom_dy;
+        float correction_x;
+        float correction_y;
+        uint32_t receive_tick_ms;
+        uint32_t capture_tick_ms;
+        bool valid;
+    };
+
+    const VisionLatencyDebug& get_vision_latency_debug();
+
     // 两个高频中断钩子
     void update_yaw_1ms_tick();
     void update_position_20ms_tick(const int16_t* encoder_counts, float current_yaw_deg);

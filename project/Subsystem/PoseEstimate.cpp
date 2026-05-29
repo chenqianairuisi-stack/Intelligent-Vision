@@ -24,6 +24,8 @@ extern "C" {
 
 namespace Subsystem::PoseEstimator {
 namespace { 
+    #define DTCM_DATA __attribute__((section(".dtcm_data")))
+
     DTCM_DATA DebugProbes g_probes = {0}; 
 
     // 基础状态变量
@@ -46,12 +48,13 @@ namespace {
     DTCM_DATA AsyncCalibState s_calib_state = AsyncCalibState::IDLE;  // 当前标定状态
     DTCM_DATA uint32_t s_last_calib_vision_seq = 0;                   // 标定流程已消费的最后一帧视觉序号
 
-    constexpr uint32_t MAX_CONFIGURED_VISION_LATENCY_MS =
+    constexpr uint32_t MAX_VISION_LATENCY_LOOKBACK_MS =
         static_cast<uint32_t>(TuningDefaults::MAX_VISION_LATENCY_MS);
-    constexpr uint32_t ODOM_HISTORY_MARGIN_MS = 0U;
+    constexpr uint32_t ODOM_HISTORY_LOOKBACK_MS = 3000U;
+    static_assert(ODOM_HISTORY_LOOKBACK_MS >= MAX_VISION_LATENCY_LOOKBACK_MS,
+                  "Odom history must cover the configured vision latency range");
     constexpr uint16_t ODOM_HISTORY_SIZE =
-        static_cast<uint16_t>((MAX_CONFIGURED_VISION_LATENCY_MS + ODOM_HISTORY_MARGIN_MS) /
-                              SystemConfig::PIT_CH1_PERIOD_MS + 2U);
+        static_cast<uint16_t>(ODOM_HISTORY_LOOKBACK_MS / SystemConfig::PIT_CH1_PERIOD_MS + 3U);
     constexpr uint32_t ODOM_HISTORY_COVERAGE_MS =
         static_cast<uint32_t>(ODOM_HISTORY_SIZE - 1U) * SystemConfig::PIT_CH1_PERIOD_MS;
 
@@ -65,12 +68,12 @@ namespace {
     DTCM_DATA Pose2D s_encoder_pose = {0.0f, 0.0f, SystemConfig::ENTRY_YAW};
     DTCM_DATA OdomPoseSample s_odom_history[ODOM_HISTORY_SIZE];
     DTCM_DATA uint16_t s_odom_history_idx = 0;
+    DTCM_DATA VisionLatencyDebug s_vision_latency_debug = {};
 
     // 常量定义
     constexpr float PLUSE_TO_CM = (2.0f * PI * SystemConfig::WHEEL_RADIUS) / SystemConfig::PULSES_PER_REV;  // 编码器计数转换为轮子移动的距离（cm）
     constexpr float SAMPLE_FREQ = 1.0f / SystemConfig::PIT_CH0_DT_S;  // 采样频率 (Hz)，根据系统定时器周期计算
     constexpr uint32_t VISION_POSE_MAX_AGE_MS = 300;  // 视觉位姿数据的最大有效时间，超过这个时间就丢弃
-    constexpr float DEFAULT_VISION_LATENCY_MS = TuningDefaults::DEFAULT_VISION_LATENCY_MS;
     constexpr float DEFAULT_ENCODER_LATENCY_GAIN = TuningDefaults::DEFAULT_ENCODER_LATENCY_GAIN;
     constexpr float LONG_DISTANCE_REMAINING_CM = 100.0f;
     constexpr float VISION_LATERAL_DEADBAND_CM = 0.15f;
@@ -108,25 +111,6 @@ namespace {
         return gain;
     }
 
-    [[gnu::always_inline]] inline uint32_t vision_latency_ms() {
-        float latency = tune.latency.vision_latency_ms;
-        if (!std::isfinite(latency)) {
-            latency = DEFAULT_VISION_LATENCY_MS;
-        }
-        if (latency <= 0.0f) {
-            return 0U;
-        }
-        uint32_t latency_ms = static_cast<uint32_t>(latency + 0.5f);
-        uint32_t max_latency_ms = ODOM_HISTORY_COVERAGE_MS - SystemConfig::PIT_CH1_PERIOD_MS;
-        return latency_ms > max_latency_ms ? max_latency_ms : latency_ms;
-    }
-
-    [[gnu::always_inline]] inline float distance_sq(const Pose2D& a, const Pose2D& b) {
-        float dx = a.x - b.x;
-        float dy = a.y - b.y;
-        return dx * dx + dy * dy;
-    }
-
     void reset_odom_history(const Pose2D& pose, uint32_t tick_ms) {
         s_encoder_pose = pose;
         s_odom_history_idx = 0;
@@ -136,24 +120,34 @@ namespace {
         push_odom_history(tick_ms, s_encoder_pose);
     }
 
-    bool match_delayed_vision_to_odom(const Pose2D& delayed_vision_pose, Pose2D& out_pose) {
+    [[gnu::always_inline]] inline float pose_distance_sq_xy(const Pose2D& a, const Pose2D& b) {
+        float dx = a.x - b.x;
+        float dy = a.y - b.y;
+        return dx * dx + dy * dy;
+    }
+
+    bool match_vision_pose_to_odom_history(const Pose2D& delayed_vision_pose,
+                                           uint32_t receive_tick_ms,
+                                           Pose2D& out_odom_pose,
+                                           uint32_t& out_capture_tick_ms) {
+        // Estimate the capture time by matching the delayed vision pose to encoder-only history.
         const OdomPoseSample* best = nullptr;
         float best_dist_sq = 0.0f;
-        uint32_t now = Core::Scheduler::get_sys_tick_ms();
-        uint32_t history_ms = vision_latency_ms();
 
         for (const auto& sample : s_odom_history) {
             if (!sample.valid) {
                 continue;
             }
-            if (now - sample.tick_ms > history_ms) {
+
+            uint32_t age_ms = receive_tick_ms - sample.tick_ms;
+            if (age_ms > ODOM_HISTORY_LOOKBACK_MS) {
                 continue;
             }
 
-            float d_sq = distance_sq(delayed_vision_pose, sample.pose);
-            if (best == nullptr || d_sq < best_dist_sq) {
+            float dist_sq = pose_distance_sq_xy(delayed_vision_pose, sample.pose);
+            if (best == nullptr || dist_sq < best_dist_sq) {
                 best = &sample;
-                best_dist_sq = d_sq;
+                best_dist_sq = dist_sq;
             }
         }
 
@@ -161,38 +155,60 @@ namespace {
             return false;
         }
 
-        out_pose = best->pose;
+        out_odom_pose = best->pose;
+        out_capture_tick_ms = best->tick_ms;
         return true;
     }
 
-    bool odom_delta_since_vision_pose(const Pose2D& delayed_vision_pose, float& out_dx, float& out_dy) {
+    bool odom_delta_since_matched_vision_pose(const Pose2D& delayed_vision_pose,
+                                             uint32_t receive_tick_ms,
+                                             uint32_t& out_capture_tick_ms,
+                                             float& out_dx,
+                                             float& out_dy) {
         out_dx = 0.0f;
         out_dy = 0.0f;
 
-        Pose2D odom_at_vision_pose;
-        if (!match_delayed_vision_to_odom(delayed_vision_pose, odom_at_vision_pose)) {
+        Pose2D odom_at_capture;
+        if (!match_vision_pose_to_odom_history(
+                delayed_vision_pose,
+                receive_tick_ms,
+                odom_at_capture,
+                out_capture_tick_ms)) {
             return false;
         }
 
         float gain = encoder_latency_gain();
-        out_dx = (s_encoder_pose.x - odom_at_vision_pose.x) * gain;
-        out_dy = (s_encoder_pose.y - odom_at_vision_pose.y) * gain;
+        out_dx = (s_encoder_pose.x - odom_at_capture.x) * gain;
+        out_dy = (s_encoder_pose.y - odom_at_capture.y) * gain;
         return true;
     }
 
     bool compensate_vision_latency(const Pose2D& delayed_vision_pose,
                                    uint32_t receive_tick_ms,
                                    Pose2D& compensated) {
-        (void)receive_tick_ms;
         compensated = delayed_vision_pose;
         float odom_dx = 0.0f;
         float odom_dy = 0.0f;
-        if (!odom_delta_since_vision_pose(delayed_vision_pose, odom_dx, odom_dy)) {
+        uint32_t capture_tick_ms = receive_tick_ms;
+        s_vision_latency_debug.valid = false;
+        s_vision_latency_debug.raw_pose = delayed_vision_pose;
+        s_vision_latency_debug.receive_tick_ms = receive_tick_ms;
+        if (!odom_delta_since_matched_vision_pose(
+                delayed_vision_pose,
+                receive_tick_ms,
+                capture_tick_ms,
+                odom_dx,
+                odom_dy)) {
             return false;
         }
 
         compensated.x += odom_dx;
         compensated.y += odom_dy;
+        s_vision_latency_debug.compensated_pose = compensated;
+        s_vision_latency_debug.odom_dx = odom_dx;
+        s_vision_latency_debug.odom_dy = odom_dy;
+        s_vision_latency_debug.capture_tick_ms = capture_tick_ms;
+        s_vision_latency_debug.valid = true;
         return true;
     }
 
@@ -641,17 +657,22 @@ bool apply_vision_axis_correction(const Point2D& segment_start, const Point2D& s
         return false;
     }
 
+    float before_x = pose.x;
+    float before_y = pose.y;
     bool long_distance_phase =
         remain_sq >= LONG_DISTANCE_REMAINING_CM * LONG_DISTANCE_REMAINING_CM;
 
-    // Far from target only use the lateral axis; inside 100cm use both compensated axes.
+    bool applied = false;
     if (!long_distance_phase) {
-        bool applied = apply_smoothed_near_axis_correction(vision_pose.x, pose.x);
+        applied = apply_smoothed_near_axis_correction(vision_pose.x, pose.x);
         applied = apply_smoothed_near_axis_correction(vision_pose.y, pose.y) || applied;
-        return applied;
+    } else {
+        applied = apply_projected_lateral_correction(vision_pose, pose, dx, dy, segment_len_sq);
     }
 
-    return apply_projected_lateral_correction(vision_pose, pose, dx, dy, segment_len_sq);
+    s_vision_latency_debug.correction_x = pose.x - before_x;
+    s_vision_latency_debug.correction_y = pose.y - before_y;
+    return applied;
 }
 
 void reset_async_calibrate() {
@@ -730,6 +751,10 @@ AsyncCalibState async_calibrate_vision(uint32_t timeout_ms, float reject_thresho
     }
 
     return s_calib_state; // BUSY
+}
+
+const VisionLatencyDebug& get_vision_latency_debug() {
+    return s_vision_latency_debug;
 }
 
 

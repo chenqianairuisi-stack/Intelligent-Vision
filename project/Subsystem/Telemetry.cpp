@@ -147,7 +147,6 @@ void send_wave_data() {
             // 附带监控我们最关心的 Yaw，看看它有没有漂移
             tx_packet.data_6 = cur_pose.yaw;         
         }
-
         wireless_uart_send_buffer((uint8*)&tx_packet, sizeof(VofaJustFloat));
     }
 
@@ -348,6 +347,9 @@ namespace {
                     case 'G': tune.tracker.vision_reject_dist = value; break;
                     case 'C': tune.tracker.ang_tolerance = value; break;
                     case 'V': tune.estimate.mahony_kp = value; break;
+                    case '1': tune.latency.encoder_latency_gain = value; break;
+                    case '2': tune.latency.vision_latency_ms = value; break;
+                    case '3': Algorithm::Tracker::set_box_push_final_press_cm(value); break;
 
                     case 'P': App::g_state.debug.telemetry_mode = (int)value; break; 
                     default: return;
@@ -383,6 +385,7 @@ namespace {
                 if (sub == 'C') { 
                     // !P C -> 清空航点列表
                     plan.physical_path.clear();
+                    plan.force_stop_at_wp.clear();
                     plan.current_wp_idx = 0;
                     wireless_uart_send_buffer((uint8_t*)"[PATH] Cleared.\r\n", 17);
                 } 
@@ -392,6 +395,7 @@ namespace {
                     if (sscanf(&cmd[3], "%f %f", &px, &py) == 2) {
                         if (plan.physical_path.size() < SystemConfig::MAX_PATH_LENGTH) {
                             plan.physical_path.push_back({px, py});
+                            plan.force_stop_at_wp.push_back(0U);
                         }
                     }
                 }

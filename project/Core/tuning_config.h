@@ -1,5 +1,4 @@
 #pragma once
-#include "system_config.h"
 
 // 可复用 PID 参数块
 struct PidParams {
@@ -62,7 +61,6 @@ struct TuningConfig {
 
 namespace TuningDefaults {
     inline constexpr float DEFAULT_REACH_RADIUS_MIN = 0.25f;
-    inline constexpr float TERMINAL_REACH_RADIUS_CAP_CM = 0.25f;
     inline constexpr float DEFAULT_CORNER_PASS_SPEED = 18.0f;
     inline constexpr float DEFAULT_BRAKE_LIMIT = 0.85f;
     inline constexpr float DEFAULT_ENCODER_LATENCY_GAIN = 1.00f;
@@ -78,8 +76,8 @@ namespace TuningDefaults {
     inline constexpr float MAX_BRAKE_LIMIT = 2.0f;
     inline constexpr float MIN_ENCODER_LATENCY_GAIN = 0.01f;
     inline constexpr float MAX_ENCODER_LATENCY_GAIN = 2.00f;
-    inline constexpr float MIN_VISION_LATENCY_MS = 10.0f;
-    inline constexpr float MAX_VISION_LATENCY_MS = 1000.0f;
+    inline constexpr float MIN_VISION_LATENCY_MS = 0.0f;
+    inline constexpr float MAX_VISION_LATENCY_MS = 3000.0f;
     inline constexpr float MIN_VISION_REQUEST_INTERVAL_MS = 100.0f;
     inline constexpr float MAX_VISION_REQUEST_INTERVAL_MS = 1500.0f;
     inline constexpr float MIN_VISION_REJECT_DIST = 0.5f;
@@ -146,7 +144,7 @@ namespace TuningDefaults {
 }
 
 // 全局调参实例，放在 DTCM 区域，供高频控制和业务模块访问
-DTCM_DATA inline TuningConfig tune {
+__attribute__((section(".dtcm_data"))) inline TuningConfig tune {
     {3.7f, 0.0f, 0.0f},      // pid_yaw
     {0.45f, 0.08f, 0.0f},    // pid_speed
     {0.2f, 4.0f, 0.54f},     // feedforward
