@@ -11,29 +11,22 @@ using namespace SystemConfig;
 
 namespace Algorithm::Tracker {
 namespace {
-    constexpr bool TRACKING_VISION_ASSIST_ENABLED = true;
+    constexpr bool TRACKING_VISION_ASSIST_ENABLED = true; // 动中视觉辅助开关，默认关闭，调试时可打开观察效果
     constexpr float DEFAULT_BOX_PUSH_FINAL_PRESS_CM = 0.2f;
     constexpr float MIN_BOX_PUSH_FINAL_PRESS_CM = 0.0f;
     constexpr float MAX_BOX_PUSH_FINAL_PRESS_CM = 1.0f;
-    constexpr float LONG_SEGMENT_FINAL_CHECK_CM = 60.0f;
-    constexpr float FINAL_COORD_CHECK_TOLERANCE_CM = 0.8f;
-    constexpr float FINAL_COORD_CHECK_REJECT_CM = 25.0f;
-    constexpr float VISION_ASSIST_TARGET_FREEZE_RADIUS_CM = 0.5f;
-    constexpr uint32_t FINAL_COORD_CHECK_TIMEOUT_MS = 800U;
-    constexpr uint32_t FINAL_COORD_CHECK_REQUEST_INTERVAL_MS = 180U;
+    constexpr float VISION_ASSIST_MIN_SEGMENT_CM = 15.0f;
+    constexpr float VISION_ASSIST_TARGET_FREEZE_RADIUS_CM = 10.0f;
+    constexpr float FINAL_LOCK_RADIUS_CM = 1.5f;
     constexpr float DEFAULT_WAYPOINT_REACH_RADIUS_CM = 0.3f;
     constexpr float MAX_WAYPOINT_REACH_RADIUS_CM = 1.0f;
-    constexpr float DEFAULT_CORNER_SWITCH_WINDOW_CM = 0.7f;
-    constexpr float MAX_CORNER_SWITCH_WINDOW_CM = 1.0f;
-    constexpr float DEFAULT_CORNER_LINE_TOLERANCE_CM = 1.0f;
-    constexpr float MAX_CORNER_LINE_TOLERANCE_CM = 2.0f;
+    constexpr float DEFAULT_CORNER_SWITCH_WINDOW_CM = 0.0f;
+    constexpr float MAX_CORNER_SWITCH_WINDOW_CM = 0.0f;
+    constexpr float DEFAULT_CORNER_LINE_TOLERANCE_CM = 0.5f;
+    constexpr float MAX_CORNER_LINE_TOLERANCE_CM = 0.7f;
     constexpr float STOP_SETTLE_RELEASE_RADIUS_CM = 1.0f;
     DTCM_DATA float s_box_push_final_press_cm = DEFAULT_BOX_PUSH_FINAL_PRESS_CM;
-    DTCM_DATA bool s_final_coord_check_required = false;
-    DTCM_DATA bool s_final_coord_check_active = false;
-    DTCM_DATA uint32_t s_final_coord_check_start_ms = 0U;
-    DTCM_DATA uint32_t s_final_coord_check_last_request_ms = 0U;
-    DTCM_DATA uint32_t s_final_coord_check_start_seq = 0U;
+    DTCM_DATA bool s_stop_at_every_waypoint = true;
     DTCM_DATA bool s_force_vision_assist_current_segment = false;
     DTCM_DATA bool s_stop_settle_active = false;
     DTCM_DATA uint16_t s_stop_settle_wp_idx = 0U;
@@ -89,19 +82,15 @@ namespace {
         auto& plan = App::g_state.planning;
         plan.vision_segment_start = segment_start;
         plan.vision_last_correction_seq = App::g_state.vision.art1_pose_seq;
+        plan.vision_last_request_tick_ms = 0U;
         s_force_vision_assist_current_segment = force_vision_assist;
     }
 
     [[gnu::always_inline]] inline bool has_trackable_segment(Point2D segment_start, Point2D target) {
         float dx = target.x - segment_start.x;
         float dy = target.y - segment_start.y;
-        return (dx * dx + dy * dy) >= 1.0f;
-    }
-
-    [[gnu::always_inline]] inline bool is_long_vision_segment(Point2D segment_start, Point2D target) {
-        float dx = target.x - segment_start.x;
-        float dy = target.y - segment_start.y;
-        return (dx * dx + dy * dy) > LONG_SEGMENT_FINAL_CHECK_CM * LONG_SEGMENT_FINAL_CHECK_CM;
+        return (dx * dx + dy * dy) >
+               VISION_ASSIST_MIN_SEGMENT_CM * VISION_ASSIST_MIN_SEGMENT_CM;
     }
 
     [[gnu::always_inline]] inline bool art1_pose_recent(uint32_t now) {
@@ -112,14 +101,32 @@ namespace {
                (now - vision.art1_pose_tick_ms) <= POSE_RECENT_MS;
     }
 
-    [[gnu::always_inline]] inline bool vision_pose_control_allowed() {
-        const auto phase = static_cast<uint8_t>(App::g_state.game.phase);
-        const auto wait_map = static_cast<uint8_t>(GamePhase::WAIT_FOR_VISION);
-        return App::g_state.vision.art1_map_ready && phase > wait_map;
+    [[gnu::always_inline]] inline uint32_t vision_request_interval_ms() {
+        float interval = tune.tracker.vision_request_interval_ms;
+        if (!std::isfinite(interval)) {
+            interval = TuningDefaults::DEFAULT_VISION_REQUEST_INTERVAL_MS;
+        }
+        if (interval < TuningDefaults::MIN_VISION_REQUEST_INTERVAL_MS) {
+            interval = TuningDefaults::MIN_VISION_REQUEST_INTERVAL_MS;
+        }
+        if (interval > TuningDefaults::MAX_VISION_REQUEST_INTERVAL_MS) {
+            interval = TuningDefaults::MAX_VISION_REQUEST_INTERVAL_MS;
+        }
+        return static_cast<uint32_t>(interval);
+    }
+
+    [[gnu::always_inline]] inline void request_forced_vision_pose(uint32_t now) {
+        auto& plan = App::g_state.planning;
+        uint32_t interval = vision_request_interval_ms();
+        if (plan.vision_last_request_tick_ms == 0U ||
+            now - plan.vision_last_request_tick_ms >= interval) {
+            plan.vision_last_request_tick_ms = now;
+            Subsystem::Vision::schedule_pose_request_ART1();
+        }
     }
 
     [[gnu::always_inline]] inline float terminal_reach_radius() {
-        return tune.tracker.reach_radius_min;
+        return FINAL_LOCK_RADIUS_CM;
     }
 
     [[gnu::always_inline]] inline float waypoint_reach_radius() {
@@ -145,12 +152,6 @@ namespace {
         return std::min(tune.tracker.corner_line_tolerance, MAX_CORNER_LINE_TOLERANCE_CM);
     }
 
-    [[gnu::always_inline]] inline float distance_sq(Point2D a, Point2D b) {
-        float dx = b.x - a.x;
-        float dy = b.y - a.y;
-        return dx * dx + dy * dy;
-    }
-
     [[gnu::always_inline]] inline bool is_force_stop_waypoint(uint16_t idx) {
         const auto& plan = App::g_state.planning;
         return idx < plan.force_stop_at_wp.size() && plan.force_stop_at_wp[idx] != 0U;
@@ -161,18 +162,6 @@ namespace {
         for (int i = 0; i < plan.force_stop_at_wp.size(); ++i) {
             plan.force_stop_at_wp[i] = 1U;
         }
-    }
-
-    [[gnu::always_inline]] inline void reset_final_coord_check() {
-        s_final_coord_check_active = false;
-        s_final_coord_check_start_ms = 0U;
-        s_final_coord_check_last_request_ms = 0U;
-        s_final_coord_check_start_seq = 0U;
-    }
-
-    [[gnu::always_inline]] inline void disable_final_coord_check() {
-        s_final_coord_check_required = false;
-        reset_final_coord_check();
     }
 
     [[gnu::always_inline]] inline void clear_stop_settle() {
@@ -187,68 +176,6 @@ namespace {
         if (path.empty() || path.back() != waypoint) {
             path.push_back(waypoint);
         }
-    }
-
-    bool final_coord_check_pending(Point2D target) {
-        if (!s_final_coord_check_required || !vision_pose_control_allowed()) {
-            reset_final_coord_check();
-            return false;
-        }
-
-        uint32_t now = Core::Scheduler::get_sys_tick_ms();
-        auto& vision = App::g_state.vision;
-        auto& pose = App::g_state.physical.pose;
-
-        if (!s_final_coord_check_active) {
-            s_final_coord_check_active = true;
-            s_final_coord_check_start_ms = now;
-            s_final_coord_check_last_request_ms = 0U;
-            s_final_coord_check_start_seq = vision.art1_pose_seq;
-        }
-
-        if (s_final_coord_check_last_request_ms == 0U ||
-            now - s_final_coord_check_last_request_ms >= FINAL_COORD_CHECK_REQUEST_INTERVAL_MS) {
-            Subsystem::Vision::schedule_pose_request_ART1();
-            s_final_coord_check_last_request_ms = now;
-        }
-
-        if (now - s_final_coord_check_start_ms > FINAL_COORD_CHECK_TIMEOUT_MS) {
-            s_final_coord_check_required = false;
-            reset_final_coord_check();
-            return false;
-        }
-
-        if (vision.art1_pose_seq == s_final_coord_check_start_seq || !art1_pose_recent(now)) {
-            return true;
-        }
-
-        const Pose2D vision_pose = vision.art1_pose_buffer[vision.art1_pose_publish_idx];
-        if (!std::isfinite(vision_pose.x) || !std::isfinite(vision_pose.y)) {
-            return true;
-        }
-
-        float err_x = target.x - vision_pose.x;
-        float err_y = target.y - vision_pose.y;
-        float err_sq = err_x * err_x + err_y * err_y;
-        float tol_sq = FINAL_COORD_CHECK_TOLERANCE_CM * FINAL_COORD_CHECK_TOLERANCE_CM;
-        float reject_sq = FINAL_COORD_CHECK_REJECT_CM * FINAL_COORD_CHECK_REJECT_CM;
-        if (err_sq >= reject_sq) {
-            s_final_coord_check_required = false;
-            reset_final_coord_check();
-            return false;
-        }
-
-        if (err_sq > tol_sq) {
-            pose.x = vision_pose.x;
-            pose.y = vision_pose.y;
-            s_final_coord_check_required = false;
-            reset_final_coord_check();
-            return false;
-        }
-
-        s_final_coord_check_required = false;
-        reset_final_coord_check();
-        return false;
     }
 
     /// \brief 判断直线段是否可以提前切到下一段
@@ -319,7 +246,6 @@ static void load_path_impl(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
     plan.grid_path.clear();
     plan.physical_path.clear();
     plan.force_stop_at_wp.clear();
-    disable_final_coord_check();
     clear_stop_settle();
     ctrl.tracker_state = TrackerState::FINISHED;
     reset_vision_assist(current_pose_point());
@@ -363,17 +289,6 @@ static void load_path_impl(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
         plan.force_stop_at_wp.push_back(0U);
     }
 
-    Point2D prev_phys = can_use_start ? grid_to_physical(start_grid) : current_pose_point();
-    constexpr float LONG_SEGMENT_FINAL_CHECK_SQ =
-        LONG_SEGMENT_FINAL_CHECK_CM * LONG_SEGMENT_FINAL_CHECK_CM;
-    for (int i = 0; i < plan.physical_path.size() - 1; ++i) {
-        prev_phys = plan.physical_path[i];
-    }
-
-    if (distance_sq(prev_phys, plan.physical_path.back()) > LONG_SEGMENT_FINAL_CHECK_SQ) {
-        s_final_coord_check_required = true;
-    }
-
     // 视觉校正需要知道当前直线段的真实起点，用来区分前进轴和横向轴
     reset_vision_assist(can_use_start ? grid_to_physical(start_grid) : current_pose_point());
     plan.current_wp_idx = 0;
@@ -414,8 +329,6 @@ void load_box_push_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
     plan.physical_path[plan.physical_path.size() - 1].x += unit.x * press;
     plan.physical_path[plan.physical_path.size() - 1].y += unit.y * press;
 
-    // Box contact must finish from encoder; a late ART1 correction can re-push.
-    disable_final_coord_check();
 }
 
 void load_bomb_push_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
@@ -426,7 +339,6 @@ void load_bomb_push_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
 
     auto& plan = App::g_state.planning;
     if (plan.physical_path.empty() || raw_path.size() == 0) {
-        disable_final_coord_check();
         return;
     }
 
@@ -440,8 +352,6 @@ void load_bomb_push_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
     plan.physical_path[plan.physical_path.size() - 1].x += unit.x * press;
     plan.physical_path[plan.physical_path.size() - 1].y += unit.y * press;
 
-    // Bomb contact is physical; do not let ART1 pull after blast.
-    disable_final_coord_check();
 }
 
 void set_box_push_final_press_cm(float press_cm) {
@@ -469,6 +379,11 @@ __attribute__((section(".ramfunc"))) void update_vision_assist(const Point2D& ta
 
     auto& plan = App::g_state.planning;
     const Point2D segment_start = plan.vision_segment_start;
+    uint32_t now = Core::Scheduler::get_sys_tick_ms();
+
+    if (s_force_vision_assist_current_segment) {
+        request_forced_vision_pose(now);
+    }
 
     if (!has_trackable_segment(segment_start, target)) {
         return;
@@ -477,18 +392,18 @@ __attribute__((section(".ramfunc"))) void update_vision_assist(const Point2D& ta
     const auto& pose = App::g_state.physical.pose;
     float target_dx = target.x - pose.x;
     float target_dy = target.y - pose.y;
-    if (target_dx * target_dx + target_dy * target_dy <=
+    if (!s_force_vision_assist_current_segment &&
+        target_dx * target_dx + target_dy * target_dy <=
         VISION_ASSIST_TARGET_FREEZE_RADIUS_CM * VISION_ASSIST_TARGET_FREEZE_RADIUS_CM) {
         return;
     }
 
     // 只在仍有平移运动时参与，避免终点停车后视觉噪声继续拉扯底盘。
     // 靠近终点但尚未停稳时仍允许最后几帧视觉修正，防止估计位姿先进入半径后提前刹停。
-    if (App::g_state.physical.is_stopped) {
+    if (!s_force_vision_assist_current_segment && App::g_state.physical.is_stopped) {
         return;
     }
 
-    uint32_t now = Core::Scheduler::get_sys_tick_ms();
     bool pose_recent = art1_pose_recent(now);
     if (!pose_recent) {
         return;
@@ -497,7 +412,8 @@ __attribute__((section(".ramfunc"))) void update_vision_assist(const Point2D& ta
     Subsystem::PoseEstimator::apply_vision_axis_correction(
         segment_start,
         target,
-        plan.vision_last_correction_seq
+        plan.vision_last_correction_seq,
+        s_force_vision_assist_current_segment
     );
 }
 
@@ -526,7 +442,20 @@ __attribute__((section(".ramfunc"))) void update_target() {
     bool is_last_point = (plan.current_wp_idx == plan.physical_path.size() - 1);
     bool force_stop_wp = is_force_stop_waypoint(plan.current_wp_idx);
     Point2D target_phys = plan.physical_path[plan.current_wp_idx];
-    bool must_stop_at_wp = is_last_point || force_stop_wp;
+    bool must_stop_at_wp = is_last_point || force_stop_wp || s_stop_at_every_waypoint;
+
+    if (is_last_point && check_arrival(target_phys, FINAL_LOCK_RADIUS_CM)) {
+        Point2D hold = current_pose_point();
+        ctrl.current_target.x = hold.x;
+        ctrl.current_target.y = hold.y;
+        ctrl.current_target.yaw = App::g_state.physical.pose.yaw;
+        if (App::g_state.physical.is_stopped) {
+            ctrl.tracker_state = TrackerState::FINISHED;
+            clear_stop_settle();
+            reset_vision_assist(current_pose_point());
+        }
+        return;
+    }
 
     float current_radius = must_stop_at_wp ?
         terminal_reach_radius() :
@@ -587,13 +516,11 @@ __attribute__((section(".ramfunc"))) void update_target() {
             clear_stop_settle();
             target_phys = plan.physical_path[plan.current_wp_idx];
         } else if (App::g_state.physical.is_stopped) {
-            if (!final_coord_check_pending(target_phys)) {
-                ctrl.tracker_state = TrackerState::FINISHED;
-                clear_stop_settle();
-                reset_vision_assist(current_pose_point());
-                target_phys = current_pose_point();
-                ctrl.current_target.yaw = App::g_state.physical.pose.yaw;
-            }
+            ctrl.tracker_state = TrackerState::FINISHED;
+            clear_stop_settle();
+            reset_vision_assist(current_pose_point());
+            target_phys = current_pose_point();
+            ctrl.current_target.yaw = App::g_state.physical.pose.yaw;
         }
     }
 
@@ -611,16 +538,11 @@ __attribute__((section(".ramfunc"))) void update_target() {
 void track_point_impl(const Pose2D& target, bool force_vision_assist) {
     auto& plan = App::g_state.planning;
     auto& ctrl = App::g_state.control;
-    Point2D start = current_pose_point();
-    Point2D target_point = {target.x, target.y};
-
     plan.grid_path.clear();
     plan.physical_path.clear();
     plan.force_stop_at_wp.clear();
     clear_stop_settle();
-    s_final_coord_check_required = force_vision_assist || is_long_vision_segment(start, target_point);
-    reset_final_coord_check();
-    reset_vision_assist(start, force_vision_assist);
+    reset_vision_assist(current_pose_point(), force_vision_assist);
 
     ctrl.current_target = target;
     ctrl.mode = ControlMode::POINT_TRACKING;
@@ -632,10 +554,6 @@ void track_point(const Pose2D& target) {
 
 void track_point_with_vision_assist(const Pose2D& target) {
     track_point_impl(target, true);
-}
-
-bool final_coord_check_pending_for_target(Point2D target) {
-    return final_coord_check_pending(target);
 }
 
 // 检查是否到达当前目标点

@@ -27,8 +27,6 @@ namespace Algorithm::Tracker {
     void update_vision_assist(const Point2D& target);
     void track_point(const Pose2D& target);
     void track_point_with_vision_assist(const Pose2D& target);
-    bool final_coord_check_pending_for_target(Point2D target);
-
     // 直接追踪单个物理目标点
     void track_point(const Pose2D& target);
 

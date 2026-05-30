@@ -182,19 +182,7 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick() {
     float err_global_y = ctrl.current_target.y - posi.y;
     float err_yaw = normalize_angle(ctrl.current_target.yaw - yaw);
 
-    // 如果当前正在自动循迹追一个非最后的航点，允许速度规划器保留一定的过弯速度，否则默认在每个航点都完全停下来（end_speed=0）
     float target_end_speed = 0.0f;
-    if (ctrl.mode == ControlMode::AUTO_TRACKING && ctrl.tracker_state == TrackerState::TRACKING) {
-        const auto& plan = App::g_state.planning;
-        int path_size = plan.physical_path.size();
-        int current_wp = static_cast<int>(plan.current_wp_idx);
-        if (path_size > 0 && current_wp < path_size - 1) {
-            // 非最后一个航点不刹停，保留过弯速度给速度规划器
-            bool force_stop_wp =
-                current_wp < plan.force_stop_at_wp.size() && plan.force_stop_at_wp[current_wp] != 0U;
-            target_end_speed = force_stop_wp ? 0.0f : tune.tracker.corner_pass_speed;
-        }
-    }
 
     // 平移速度规划
     Speed2D expected_global_vel = velocity_planner.velocity_planning_1d(

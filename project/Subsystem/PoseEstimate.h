@@ -139,7 +139,8 @@ namespace Subsystem::PoseEstimator {
 
     // Apply latency-compensated vision correction for the current straight segment.
     bool apply_vision_axis_correction(const Point2D& segment_start, const Point2D& segment_end,
-                                      uint32_t& last_consumed_seq);
+                                      uint32_t& last_consumed_seq,
+                                      bool allow_near_target_correction = false);
 
     struct VisionLatencyDebug {
         Pose2D raw_pose;

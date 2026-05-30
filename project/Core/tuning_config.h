@@ -37,7 +37,7 @@ struct TuningConfig {
         float corner_pass_speed;      // 非终点过弯保留速度 cm/s
         float corner_switch_window;   // 拐角提前切换窗口 cm
         float corner_line_tolerance;  // 拐角切换横向允许误差 cm
-        float vision_request_interval_ms; // Reserved: no periodic ART1 pose request while tracking
+        float vision_request_interval_ms; // Reserved: ART1 pose stream is requested once, then consumed continuously
         float vision_reject_dist;     // 视觉轴向校正最大接受误差 cm
         float ang_tolerance;          // 航向角死区 rad
     } tracker;
@@ -60,24 +60,24 @@ struct TuningConfig {
 };
 
 namespace TuningDefaults {
-    inline constexpr float DEFAULT_REACH_RADIUS_MIN = 0.25f;
-    inline constexpr float DEFAULT_CORNER_PASS_SPEED = 18.0f;
+    inline constexpr float DEFAULT_REACH_RADIUS_MIN = 0.20f;
+    inline constexpr float DEFAULT_CORNER_PASS_SPEED = 0.0f;
     inline constexpr float DEFAULT_BRAKE_LIMIT = 0.85f;
     inline constexpr float DEFAULT_ENCODER_LATENCY_GAIN = 1.00f;
     inline constexpr float DEFAULT_VISION_LATENCY_MS = 300.0f;
-    inline constexpr float DEFAULT_VISION_REQUEST_INTERVAL_MS = 250.0f;
+    inline constexpr float DEFAULT_VISION_REQUEST_INTERVAL_MS = 100.0f;
     inline constexpr float DEFAULT_VISION_REJECT_DIST = 3.0f;
 
     inline constexpr float MIN_REACH_RADIUS_MIN = 0.10f;
     inline constexpr float MAX_REACH_RADIUS_MIN = 3.0f;
     inline constexpr float MIN_CORNER_PASS_SPEED = 0.0f;
-    inline constexpr float MAX_CORNER_PASS_SPEED = 80.0f;
+    inline constexpr float MAX_CORNER_PASS_SPEED = 0.0f;
     inline constexpr float MIN_BRAKE_LIMIT = 0.10f;
     inline constexpr float MAX_BRAKE_LIMIT = 2.0f;
     inline constexpr float MIN_ENCODER_LATENCY_GAIN = 0.01f;
     inline constexpr float MAX_ENCODER_LATENCY_GAIN = 2.00f;
     inline constexpr float MIN_VISION_LATENCY_MS = 0.0f;
-    inline constexpr float MAX_VISION_LATENCY_MS = 3000.0f;
+    inline constexpr float MAX_VISION_LATENCY_MS = 1000.0f;
     inline constexpr float MIN_VISION_REQUEST_INTERVAL_MS = 100.0f;
     inline constexpr float MAX_VISION_REQUEST_INTERVAL_MS = 1500.0f;
     inline constexpr float MIN_VISION_REJECT_DIST = 0.5f;
@@ -162,9 +162,9 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
         0.3f,    // reach_radius
         TuningDefaults::DEFAULT_REACH_RADIUS_MIN,   // reach_radius_min
         TuningDefaults::DEFAULT_CORNER_PASS_SPEED,  // corner_pass_speed
-        0.7f,    // corner_switch_window
-        1.0f,    // corner_line_tolerance
-        250.0f,  // vision_request_interval_ms
+        0.0f,    // corner_switch_window
+        0.5f,    // corner_line_tolerance
+        TuningDefaults::DEFAULT_VISION_REQUEST_INTERVAL_MS,  // vision_request_interval_ms
         3.0f,    // vision_reject_dist
         0.006f   // ang_tolerance
     },

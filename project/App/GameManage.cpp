@@ -19,6 +19,65 @@ DTCM_DATA static GamePhase s_last_update_phase = GamePhase::NONE;
 constexpr float INV_360 = 1.0f / 360.0f;
 constexpr float INV_GRID_SIZE_CM = 1.0f / SystemConfig::GRID_SIZE_CM;
 
+namespace {
+    constexpr Point2D RETURN_HOME_TARGET = {SystemConfig::ENTRY_X, SystemConfig::ENTRY_Y};
+    constexpr float RETURN_HOME_YAW = SystemConfig::ENTRY_YAW;
+    constexpr float RETURN_FINAL_VISUAL_RADIUS_CM = 1.5f;
+    constexpr float RETURN_FINAL_YAW_TOLERANCE_DEG = 2.0f;
+    constexpr uint32_t RETURN_POSE_RECENT_MS = 300U;
+    constexpr uint32_t RETURN_POSE_REQUEST_INTERVAL_MS = 150U;
+
+    DTCM_DATA uint32_t s_return_pose_request_tick_ms = 0U;
+
+    [[gnu::always_inline]] inline float yaw_error_abs_deg(float target, float current) {
+        float diff = target - current;
+        return std::abs(diff - 360.0f * std::roundf(diff * INV_360));
+    }
+
+    [[gnu::always_inline]] inline bool point_in_radius(Point2D target,
+                                                       const Pose2D& pose,
+                                                       float radius_cm) {
+        float dx = target.x - pose.x;
+        float dy = target.y - pose.y;
+        return dx * dx + dy * dy <= radius_cm * radius_cm;
+    }
+
+    [[gnu::always_inline]] inline void request_return_pose_sample(uint32_t now) {
+        if (s_return_pose_request_tick_ms == 0U ||
+            now - s_return_pose_request_tick_ms >= RETURN_POSE_REQUEST_INTERVAL_MS) {
+            s_return_pose_request_tick_ms = now;
+            Subsystem::Vision::schedule_pose_request_ART1();
+        }
+    }
+
+    [[gnu::always_inline]] inline bool get_recent_return_vision_pose(uint32_t now,
+                                                                     Pose2D& out_pose) {
+        const auto& vision = App::g_state.vision;
+        if (vision.art1_pose_seq == 0U ||
+            vision.art1_pose_stable_count < App::ART1_POSE_STABLE_REQUIRED_FRAMES ||
+            now - vision.art1_pose_tick_ms > RETURN_POSE_RECENT_MS) {
+            return false;
+        }
+
+        out_pose = vision.art1_pose_buffer[vision.art1_pose_publish_idx];
+        return std::isfinite(out_pose.x) && std::isfinite(out_pose.y);
+    }
+
+    [[gnu::always_inline]] inline void start_return_home_tracking() {
+        Algorithm::Tracker::track_point_with_vision_assist(
+            {RETURN_HOME_TARGET.x, RETURN_HOME_TARGET.y, RETURN_HOME_YAW});
+    }
+
+    [[gnu::always_inline]] inline void lock_return_home_pose() {
+        auto& ctrl = App::g_state.control;
+        Subsystem::PoseEstimator::set_position(
+            RETURN_HOME_TARGET.x, RETURN_HOME_TARGET.y, RETURN_HOME_YAW);
+        Algorithm::Tracker::track_point(
+            {RETURN_HOME_TARGET.x, RETURN_HOME_TARGET.y, RETURN_HOME_YAW});
+        ctrl.tracker_state = TrackerState::FINISHED;
+    }
+}
+
 //===================================================================
 // GameEngine 模块对外接口实现
 // ==================================================================
@@ -242,7 +301,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     BombTask bomb = make_bomb_task(task.param.bomb_push);
                     if (PlanningCommon::get_bomb_push_path(logical_level, logical_level.player_start, bomb, segment)) {
                         // 传入真实逻辑起点，避免路径首点缺失时 Tracker 误判第一段方向
-                        Algorithm::Tracker::load_path(segment, logical_level.player_start);
+                        Algorithm::Tracker::load_bomb_push_path(segment, logical_level.player_start, bomb.target_wall);
                         task_done = true;
                     } else {
                         game.error_stage = 2; game.phase = GamePhase::ERROR_OCCURRED;
@@ -257,7 +316,10 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
 
                     if (PlanningCommon::append_box_push_path(probe, probe_player, box_push, segment)) {
                         // 推箱路径可能从下一格开始，逻辑起点用于 Tracker 压缩首段
-                        Algorithm::Tracker::load_path(segment, logical_level.player_start);
+                        Algorithm::Tracker::load_box_push_path(segment, logical_level.player_start,
+                                                               box_push.box_start,
+                                                               box_push.box_target,
+                                                               logical_level);
                         task_done = true;
                     } else {
                         game.error_stage = 3; game.phase = GamePhase::ERROR_OCCURRED;
@@ -436,16 +498,43 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
         // ---- 阶段四：返回起点 ----
         // =============================================================================
         case GamePhase::PLAN_RETURN_HOME: {
-            Algorithm::Tracker::track_point_with_vision_assist({IN_TARGET_X, IN_TARGET_Y, ENTRY_YAW});
+            s_return_pose_request_tick_ms = 0U;
+            request_return_pose_sample(Core::Scheduler::get_sys_tick_ms());
+            start_return_home_tracking();
             game.phase = GamePhase::EXEC_RETURN_HOME;
             break;
         }
 
         case GamePhase::EXEC_RETURN_HOME: {
-            if (Algorithm::Tracker::check_arrival({IN_TARGET_X, IN_TARGET_Y}, tune.tracker.reach_radius_min) &&
+            uint32_t now = Core::Scheduler::get_sys_tick_ms();
+            request_return_pose_sample(now);
+
+            bool yaw_aligned =
+                yaw_error_abs_deg(RETURN_HOME_YAW, pos.yaw) <= RETURN_FINAL_YAW_TOLERANCE_DEG;
+
+            Pose2D vision_pose;
+            bool has_return_vision = get_recent_return_vision_pose(now, vision_pose);
+            if (has_return_vision &&
                 App::g_state.physical.is_stopped &&
-                !Algorithm::Tracker::final_coord_check_pending_for_target({IN_TARGET_X, IN_TARGET_Y})) {
+                yaw_aligned &&
+                point_in_radius(RETURN_HOME_TARGET,
+                                vision_pose,
+                                RETURN_FINAL_VISUAL_RADIUS_CM)) {
+                lock_return_home_pose();
                 game.phase = GamePhase::FINISHED;
+                break;
+            }
+
+            bool odom_at_home = Algorithm::Tracker::check_arrival(
+                RETURN_HOME_TARGET, TuningDefaults::DEFAULT_REACH_RADIUS_MIN);
+
+            if (!odom_at_home || !App::g_state.physical.is_stopped || !yaw_aligned) {
+                break;
+            }
+
+            if (has_return_vision) {
+                Subsystem::PoseEstimator::set_position(vision_pose.x, vision_pose.y, pos.yaw);
+                start_return_home_tracking();
             }
             break;
         }
