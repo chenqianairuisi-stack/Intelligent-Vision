@@ -18,6 +18,8 @@ namespace {
     constexpr float VISION_ASSIST_MIN_SEGMENT_CM = 15.0f;
     constexpr float VISION_ASSIST_TARGET_FREEZE_RADIUS_CM = 10.0f;
     constexpr float FINAL_LOCK_RADIUS_CM = 1.5f;
+    constexpr float FINISH_WITHOUT_STOP_RADIUS_CM = 0.2f;
+    constexpr float PUSH_EXTRA_REACH_RADIUS_CM = 0.05f;
     constexpr float DEFAULT_WAYPOINT_REACH_RADIUS_CM = 0.3f;
     constexpr float MAX_WAYPOINT_REACH_RADIUS_CM = 1.0f;
     constexpr float DEFAULT_CORNER_SWITCH_WINDOW_CM = 0.0f;
@@ -26,7 +28,8 @@ namespace {
     constexpr float MAX_CORNER_LINE_TOLERANCE_CM = 0.7f;
     constexpr float STOP_SETTLE_RELEASE_RADIUS_CM = 1.0f;
     DTCM_DATA float s_box_push_final_press_cm = DEFAULT_BOX_PUSH_FINAL_PRESS_CM;
-    DTCM_DATA bool s_stop_at_every_waypoint = true;
+    DTCM_DATA bool s_stop_at_every_waypoint = false;
+    DTCM_DATA bool s_finish_without_stop = false;
     DTCM_DATA bool s_force_vision_assist_current_segment = false;
     DTCM_DATA bool s_stop_settle_active = false;
     DTCM_DATA uint16_t s_stop_settle_wp_idx = 0U;
@@ -154,13 +157,126 @@ namespace {
 
     [[gnu::always_inline]] inline bool is_force_stop_waypoint(uint16_t idx) {
         const auto& plan = App::g_state.planning;
-        return idx < plan.force_stop_at_wp.size() && plan.force_stop_at_wp[idx] != 0U;
+        return idx < plan.force_stop_at_wp.size() && plan.force_stop_at_wp[idx] == 1U;
+    }
+
+    [[gnu::always_inline]] inline bool is_push_extra_waypoint(uint16_t idx) {
+        const auto& plan = App::g_state.planning;
+        return idx < plan.force_stop_at_wp.size() && plan.force_stop_at_wp[idx] == 2U;
     }
 
     [[gnu::always_inline]] inline void force_stop_all_waypoints() {
         auto& plan = App::g_state.planning;
         for (int i = 0; i < plan.force_stop_at_wp.size(); ++i) {
             plan.force_stop_at_wp[i] = 1U;
+        }
+    }
+
+    [[gnu::always_inline]] inline int find_box_at(const SokobanLevel& level, point p) {
+        for (int i = 0; i < level.box_count; ++i) {
+            if (level.boxes[i] == p) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    [[gnu::always_inline]] inline bool is_unit_grid_step(point delta) {
+        int dx = delta.x;
+        int dy = delta.y;
+        if (dx < 0) dx = -dx;
+        if (dy < 0) dy = -dy;
+        return dx + dy == 1;
+    }
+
+    [[gnu::always_inline]] inline bool insert_push_extra_waypoint(int idx, Point2D extra_phys) {
+        auto& plan = App::g_state.planning;
+        if (idx < 0 ||
+            idx >= plan.physical_path.size() ||
+            plan.physical_path.size() >= MAX_PATH_LENGTH ||
+            plan.grid_path.size() >= MAX_PATH_LENGTH ||
+            plan.force_stop_at_wp.size() >= MAX_PATH_LENGTH) {
+            return false;
+        }
+
+        int insert_idx = idx + 1;
+
+        plan.physical_path.push_back(plan.physical_path.back());
+        for (int i = plan.physical_path.size() - 1; i > insert_idx; --i) {
+            plan.physical_path[i] = plan.physical_path[i - 1];
+        }
+        plan.physical_path[insert_idx] = extra_phys;
+
+        plan.grid_path.push_back(plan.grid_path.back());
+        for (int i = plan.grid_path.size() - 1; i > insert_idx; --i) {
+            plan.grid_path[i] = plan.grid_path[i - 1];
+        }
+        plan.grid_path[insert_idx] = plan.grid_path[idx];
+
+        plan.force_stop_at_wp.push_back(plan.force_stop_at_wp.back());
+        for (int i = plan.force_stop_at_wp.size() - 1; i > insert_idx; --i) {
+            plan.force_stop_at_wp[i] = plan.force_stop_at_wp[i - 1];
+        }
+        plan.force_stop_at_wp[insert_idx] = 2U;
+        return true;
+    }
+
+    void apply_box_push_extra_from_raw_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
+                                            point start_grid,
+                                            const SokobanLevel& level) {
+        auto& plan = App::g_state.planning;
+        if (raw_path.empty() || plan.grid_path.empty() || plan.physical_path.empty()) {
+            return;
+        }
+
+        float press = clamp_float(s_box_push_final_press_cm,
+                                  MIN_BOX_PUSH_FINAL_PRESS_CM,
+                                  MAX_BOX_PUSH_FINAL_PRESS_CM);
+        if (press <= 0.0f || !valid_grid(start_grid)) {
+            return;
+        }
+
+        SokobanLevel work = level;
+        point car = start_grid;
+        int plan_idx = 0;
+
+        for (int i = 0; i < raw_path.size(); ++i) {
+            point next = raw_path[i];
+
+            if (next == car) {
+                if (plan_idx < plan.grid_path.size() && plan.grid_path[plan_idx] == next) {
+                    ++plan_idx;
+                }
+                continue;
+            }
+
+            point delta = next - car;
+            if (!is_unit_grid_step(delta)) {
+                car = next;
+                continue;
+            }
+
+            int box_idx = find_box_at(work, next);
+            bool inserted_extra = false;
+            if (box_idx >= 0) {
+                Point2D unit = grid_delta_to_physical_unit(delta);
+                if (plan_idx < plan.grid_path.size() && plan.grid_path[plan_idx] == next) {
+                    Point2D extra_phys = plan.physical_path[plan_idx];
+                    extra_phys.x += unit.x * press;
+                    extra_phys.y += unit.y * press;
+                    inserted_extra = insert_push_extra_waypoint(plan_idx, extra_phys);
+                }
+
+                point pushed_to = next + delta;
+                if (valid_grid(pushed_to)) {
+                    work.boxes[box_idx] = pushed_to;
+                }
+            }
+
+            car = next;
+            if (plan_idx < plan.grid_path.size() && plan.grid_path[plan_idx] == next) {
+                plan_idx += inserted_extra ? 2 : 1;
+            }
         }
     }
 
@@ -247,6 +363,7 @@ static void load_path_impl(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
     plan.physical_path.clear();
     plan.force_stop_at_wp.clear();
     clear_stop_settle();
+    s_finish_without_stop = false;
     ctrl.tracker_state = TrackerState::FINISHED;
     reset_vision_assist(current_pose_point());
 
@@ -306,36 +423,31 @@ void load_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path, point start_
     load_path_impl(raw_path, true, start_grid);
 }
 
+void load_sokoban_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
+                       point start_grid,
+                       const SokobanLevel& level) {
+    load_path_impl(raw_path, true, start_grid);
+    s_finish_without_stop = true;
+    apply_box_push_extra_from_raw_path(raw_path, start_grid, level);
+}
+
 void load_box_push_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
                         point start_grid,
                         point,
-                        point box_target,
-                        const SokobanLevel&) {
+                        point,
+                        const SokobanLevel& level) {
     load_path_impl(raw_path, true, start_grid);
-    force_stop_all_waypoints();
-
-    auto& plan = App::g_state.planning;
-    if (plan.physical_path.empty() || raw_path.size() < 2) {
-        return;
-    }
-
-    point final_car_grid = raw_path.back();
-    point push_dir = box_target - final_car_grid;
-    Point2D unit = grid_delta_to_physical_unit(push_dir);
-    float press = clamp_float(s_box_push_final_press_cm,
-                              MIN_BOX_PUSH_FINAL_PRESS_CM,
-                              MAX_BOX_PUSH_FINAL_PRESS_CM);
-
-    plan.physical_path[plan.physical_path.size() - 1].x += unit.x * press;
-    plan.physical_path[plan.physical_path.size() - 1].y += unit.y * press;
-
+    s_finish_without_stop = true;
+    apply_box_push_extra_from_raw_path(raw_path, start_grid, level);
 }
 
 void load_bomb_push_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
                          point start_grid,
-                         point bomb_target) {
+                         point bomb_target,
+                         const SokobanLevel& level) {
     load_path_impl(raw_path, true, start_grid);
     force_stop_all_waypoints();
+    apply_box_push_extra_from_raw_path(raw_path, start_grid, level);
 
     auto& plan = App::g_state.planning;
     if (plan.physical_path.empty() || raw_path.size() == 0) {
@@ -441,10 +553,16 @@ __attribute__((section(".ramfunc"))) void update_target() {
 
     bool is_last_point = (plan.current_wp_idx == plan.physical_path.size() - 1);
     bool force_stop_wp = is_force_stop_waypoint(plan.current_wp_idx);
+    bool push_extra_wp = is_push_extra_waypoint(plan.current_wp_idx);
     Point2D target_phys = plan.physical_path[plan.current_wp_idx];
-    bool must_stop_at_wp = is_last_point || force_stop_wp || s_stop_at_every_waypoint;
+    bool finish_without_stop_at_last = is_last_point && s_finish_without_stop;
+    bool must_stop_at_wp = (!finish_without_stop_at_last && is_last_point) ||
+                           force_stop_wp ||
+                           s_stop_at_every_waypoint;
 
-    if (is_last_point && check_arrival(target_phys, FINAL_LOCK_RADIUS_CM)) {
+    if (!finish_without_stop_at_last &&
+        is_last_point &&
+        check_arrival(target_phys, FINAL_LOCK_RADIUS_CM)) {
         Point2D hold = current_pose_point();
         ctrl.current_target.x = hold.x;
         ctrl.current_target.y = hold.y;
@@ -460,6 +578,11 @@ __attribute__((section(".ramfunc"))) void update_target() {
     float current_radius = must_stop_at_wp ?
         terminal_reach_radius() :
         waypoint_reach_radius();
+    if (push_extra_wp) {
+        current_radius = PUSH_EXTRA_REACH_RADIUS_CM;
+    } else if (finish_without_stop_at_last) {
+        current_radius = FINISH_WITHOUT_STOP_RADIUS_CM;
+    }
     // 非终点航点允许提前切换，终点必须按更小半径进入并停稳
     bool arrived = false;
 
@@ -505,7 +628,7 @@ __attribute__((section(".ramfunc"))) void update_target() {
     } else {
         update_vision_assist(target_phys);
         arrived = check_arrival(target_phys, current_radius) ||
-                  check_corner_switch(plan.vision_segment_start, target_phys);
+                  (!push_extra_wp && check_corner_switch(plan.vision_segment_start, target_phys));
     }
 
     if (arrived) {
@@ -515,12 +638,14 @@ __attribute__((section(".ramfunc"))) void update_target() {
             plan.current_wp_idx++;
             clear_stop_settle();
             target_phys = plan.physical_path[plan.current_wp_idx];
-        } else if (App::g_state.physical.is_stopped) {
+        } else if (finish_without_stop_at_last || App::g_state.physical.is_stopped) {
             ctrl.tracker_state = TrackerState::FINISHED;
             clear_stop_settle();
             reset_vision_assist(current_pose_point());
-            target_phys = current_pose_point();
-            ctrl.current_target.yaw = App::g_state.physical.pose.yaw;
+            if (!finish_without_stop_at_last) {
+                target_phys = current_pose_point();
+                ctrl.current_target.yaw = App::g_state.physical.pose.yaw;
+            }
         }
     }
 
@@ -542,6 +667,7 @@ void track_point_impl(const Pose2D& target, bool force_vision_assist) {
     plan.physical_path.clear();
     plan.force_stop_at_wp.clear();
     clear_stop_settle();
+    s_finish_without_stop = false;
     reset_vision_assist(current_pose_point(), force_vision_assist);
 
     ctrl.current_target = target;

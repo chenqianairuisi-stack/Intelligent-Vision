@@ -9,6 +9,9 @@ namespace Algorithm::Tracker {
     void load_path(const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& raw_path);
     // 载入网格路径，并用真实逻辑起点辅助首段压缩
     void load_path(const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& raw_path, point start_grid);
+    void load_sokoban_path(const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& raw_path,
+                           point start_grid,
+                           const SokobanLevel& level);
     void load_box_push_path(const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& raw_path,
                             point start_grid,
                             point box_start,
@@ -16,7 +19,8 @@ namespace Algorithm::Tracker {
                             const SokobanLevel& level);
     void load_bomb_push_path(const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& raw_path,
                              point start_grid,
-                             point bomb_target);
+                             point bomb_target,
+                             const SokobanLevel& level);
     void set_box_push_final_press_cm(float press_cm);
     float get_box_push_final_press_cm();
 
