@@ -142,6 +142,9 @@ namespace Subsystem::PoseEstimator {
                                       uint32_t& last_consumed_seq,
                                       bool allow_near_target_correction = false);
 
+    // 主循环在每个稳定视觉帧上调用，喂入帧间位移以驱动视觉侧拐点检测与实时延时估计
+    void notify_vision_inflection(float dx, float dy, uint32_t gap_ms);
+
     struct VisionLatencyDebug {
         Pose2D raw_pose;
         Pose2D compensated_pose;
@@ -152,6 +155,14 @@ namespace Subsystem::PoseEstimator {
         uint32_t receive_tick_ms;
         uint32_t capture_tick_ms;
         bool valid;
+
+        // 拐点对齐实时延时估计 (foundation 阶段新增)
+        float est_raw_l_ms;             // 最近一次成功配对得到的原始 L
+        float est_filt_l_ms;            // 滤波后的 L
+        float used_l_ms;                // 本帧补偿实际采用的 L（回退梯结果）
+        uint32_t est_last_match_tick_ms;// 最近一次成功配对的时刻
+        uint8_t  est_pending_count;     // 待配对编码器拐点数
+        bool est_locked;               // 是否已锁定过有效 L
     };
 
     const VisionLatencyDebug& get_vision_latency_debug();

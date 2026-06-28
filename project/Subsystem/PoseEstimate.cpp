@@ -79,7 +79,7 @@ namespace {
     constexpr float VISION_LATERAL_MAX_STEP_CM = 0.45f;
     constexpr float VISION_LATERAL_CORRECTION_GAIN = 0.70f;
     constexpr float VISION_ENCODER_RESET_THRESHOLD_CM = 12.0f;
-    constexpr float VISION_TARGET_FREEZE_RADIUS_CM = 10.0f;
+    [[maybe_unused]] constexpr float VISION_TARGET_FREEZE_RADIUS_CM = 10.0f;
 
     // 快速逆平方根函数，供 Mahony 算法使用
     [[gnu::always_inline]] inline float fast_inv_sqrt(float x) {
@@ -122,38 +122,288 @@ namespace {
         return dx * dx + dy * dy;
     }
 
+    // =========================================================================
+    // 拐点对齐的实时视觉延时估计 (foundation 阶段新增)
+    // 思路：方向突变时编码器速度矢量在 T_enc 转向，视觉速度矢量在收到帧的
+    //       T_vis 才转向，L ≈ T_vis − T_enc。直接测物理延时再做 tick 查表补偿。
+    // 并发：编码器拐点在 20ms PIT 中断里入 FIFO；视觉拐点在主循环里配对并写 L。
+    //       FIFO 消费者(主循环)用 PRIMASK 临界区屏蔽中断，生产者(中断)无需加锁。
+    // =========================================================================
+    constexpr uint8_t L_MEDIAN_WIN   = 5;     // L 中值窗口
+    constexpr uint8_t PENDING_FIFO_CAP = 3;   // 待配对编码器拐点容量
+    constexpr float   INFLECT_SLEW_ALPHA = 0.15f; // ref 航向跟踪渐变曲率的慢速系数
+
+    [[gnu::always_inline]] inline float clampf(float v, float lo, float hi) {
+        return v < lo ? lo : (v > hi ? hi : v);
+    }
+
+    // 将角度收敛到 [-pi, pi]（输入差值范围 [-2pi, 2pi]，单次校正即可）
+    [[gnu::always_inline]] inline float wrap_pi(float a) {
+        if (a > PI)       a -= 2.0f * PI;
+        else if (a < -PI) a += 2.0f * PI;
+        return a;
+    }
+
+    // 短暂屏蔽中断的 RAII 临界区，保护与 20ms 中断共享的 FIFO
+    struct IrqLock {
+        uint32_t primask;
+        IrqLock()  { primask = __get_PRIMASK(); __disable_irq(); }
+        ~IrqLock() { __set_PRIMASK(primask); }
+    };
+
+    // 速度矢量拐点边沿检测器：比较新航向与"当前段参考航向"，跨阈值即触发，
+    // 渐变曲率被慢速跟踪掉、原地旋转/静止被速度门挡掉
+    struct InflectionDetector {
+        float    ref_heading = 0.0f;     // 当前直线段速度朝向
+        bool     has_ref = false;
+        uint32_t prev_fast_tick = 0;     // 上一个过速度门样本的时刻（用于锚定拐点中点）
+        uint32_t last_inflect_tick = 0;
+
+        void reset() { has_ref = false; ref_heading = 0.0f; prev_fast_tick = 0; last_inflect_tick = 0; }
+
+        // 喂入一帧速度矢量 (vx,vy 为该周期位移即可，朝向与量纲无关)；
+        // 触发拐点时返回 true，并输出拐点中点时刻与带符号转角
+        bool feed(float vx, float vy, uint32_t tick, float v_min, float thresh_rad,
+                  uint32_t refractory_ms, uint32_t& out_tick, float& out_dtheta) {
+            float speed_sq = vx * vx + vy * vy;
+            if (speed_sq < v_min * v_min) {
+                return false;  // 慢速：保持 ref 与 prev_fast_tick（跨过弯角速度凹陷）
+            }
+            float h = atan2f(vy, vx);
+            if (!has_ref) {
+                ref_heading = h; has_ref = true; prev_fast_tick = tick;
+                return false;
+            }
+            float dtheta = wrap_pi(h - ref_heading);
+            bool fired = false;
+            if (std::abs(dtheta) >= thresh_rad &&
+                (uint32_t)(tick - last_inflect_tick) > refractory_ms) {
+                // 拐点发生在 prev_fast_tick 与 tick 之间，取中点对齐（两流对称）
+                out_tick = prev_fast_tick + ((uint32_t)(tick - prev_fast_tick) >> 1);
+                out_dtheta = dtheta;
+                last_inflect_tick = tick;
+                ref_heading = h;             // 锁定到新段方向
+                fired = true;
+            } else {
+                ref_heading = wrap_pi(ref_heading + INFLECT_SLEW_ALPHA * dtheta);
+            }
+            prev_fast_tick = tick;
+            return fired;
+        }
+    };
+
+    struct PendingCorner {
+        uint32_t enc_tick;
+        float    enc_dtheta;
+        uint32_t expiry_tick;
+    };
+
+    DTCM_DATA InflectionDetector s_enc_det;
+    DTCM_DATA InflectionDetector s_vis_det;
+    DTCM_DATA PendingCorner s_pending[PENDING_FIFO_CAP];
+    DTCM_DATA uint8_t  s_pending_count = 0;
+
+    DTCM_DATA float    s_L_filt = TuningDefaults::DEFAULT_VISION_LATENCY_MS;
+    DTCM_DATA bool     s_L_locked = false;
+    DTCM_DATA uint32_t s_L_last_update_tick = 0;
+    DTCM_DATA float    s_L_median[L_MEDIAN_WIN] = {0};
+    DTCM_DATA uint8_t  s_L_med_count = 0;
+    DTCM_DATA uint8_t  s_L_med_idx = 0;
+
+    // 清空估计器状态。full=true 连同已学到的 L 一起清（开机用）；
+    // full=false 只清检测器与 FIFO（位姿硬重置/瞬移时用，延时本身不变）
+    void reset_latency_estimator(bool full) {
+        s_enc_det.reset();
+        s_vis_det.reset();
+        s_pending_count = 0;
+        if (full) {
+            s_L_filt = TuningDefaults::DEFAULT_VISION_LATENCY_MS;
+            s_L_locked = false;
+            s_L_last_update_tick = 0;
+            s_L_med_count = 0;
+            s_L_med_idx = 0;
+        }
+    }
+
+    [[gnu::always_inline]] inline float median_of(const float* buf, uint8_t n) {
+        float tmp[L_MEDIAN_WIN];
+        for (uint8_t i = 0; i < n; ++i) tmp[i] = buf[i];
+        for (uint8_t i = 1; i < n; ++i) {     // 插入排序，n<=5
+            float key = tmp[i];
+            int8_t j = (int8_t)i - 1;
+            while (j >= 0 && tmp[j] > key) { tmp[j + 1] = tmp[j]; --j; }
+            tmp[j + 1] = key;
+        }
+        return tmp[n / 2];
+    }
+
+    // 当前补偿采用的延时（回退梯）：锁定且未过期用滤波 L，否则用调参默认值
+    float current_L() {
+        float fallback = tune.latency.vision_latency_ms;
+        if (!std::isfinite(fallback)) {
+            fallback = TuningDefaults::DEFAULT_VISION_LATENCY_MS;
+        }
+        if (tune.latency.enable_estimation && s_L_locked) {
+            uint32_t now = Core::Scheduler::get_sys_tick_ms();
+            if ((uint32_t)(now - s_L_last_update_tick) <= (uint32_t)tune.latency.l_stale_ms) {
+                s_vision_latency_debug.used_l_ms = s_L_filt;
+                return s_L_filt;
+            }
+        }
+        s_vision_latency_debug.used_l_ms = fallback;
+        return fallback;
+    }
+
+    // 丢弃已过期的待配对拐点（now 超过 expiry）
+    void pending_sweep(uint32_t now) {
+        uint8_t w = 0;
+        for (uint8_t r = 0; r < s_pending_count; ++r) {
+            if ((int32_t)(now - s_pending[r].expiry_tick) < 0) {
+                s_pending[w++] = s_pending[r];
+            }
+        }
+        s_pending_count = w;
+    }
+
+    // 生产者(20ms 中断)：编码器拐点入队，满则丢最旧
+    void push_pending_corner(uint32_t enc_tick, float dtheta, uint32_t now, float l_max) {
+        pending_sweep(now);
+        if (s_pending_count >= PENDING_FIFO_CAP) {
+            for (uint8_t i = 1; i < s_pending_count; ++i) s_pending[i - 1] = s_pending[i];
+            --s_pending_count;
+        }
+        s_pending[s_pending_count].enc_tick = enc_tick;
+        s_pending[s_pending_count].enc_dtheta = dtheta;
+        s_pending[s_pending_count].expiry_tick = enc_tick + (uint32_t)l_max;
+        ++s_pending_count;
+        s_vision_latency_debug.est_pending_count = s_pending_count;
+    }
+
+    // 消费者(主循环)：视觉拐点按时间序配对编码器拐点，命中返回 L=T_vis−T_enc
+    bool match_vision_corner(uint32_t vis_tick, float vis_dtheta, uint32_t now,
+                             float l_min, float l_max, float dtheta_tol_rad, float& out_L) {
+        IrqLock lk;  // 临界区：屏蔽 20ms 中断，独占访问 FIFO
+        pending_sweep(now);
+        int found = -1;
+        for (uint8_t i = 0; i < s_pending_count; ++i) {     // 最旧在前，L 由大到小
+            int32_t L = (int32_t)(vis_tick - s_pending[i].enc_tick);
+            if (L > (int32_t)l_max) continue;               // 太旧（理论已被 sweep 清掉）
+            if (L < (int32_t)l_min) break;                  // 此项及更新的都太近，无匹配
+            float e = s_pending[i].enc_dtheta;
+            if ((e > 0.0f) != (vis_dtheta > 0.0f)) continue;             // 转向符号须一致
+            if (std::abs(std::abs(vis_dtheta) - std::abs(e)) > dtheta_tol_rad) continue; // 量级须相近
+            out_L = (float)L;
+            found = (int)i;
+            break;
+        }
+        if (found < 0) {
+            s_vision_latency_debug.est_pending_count = s_pending_count;
+            return false;
+        }
+        // 消费命中项及其之前所有未配对的旧拐点，防后续误配
+        uint8_t w = 0;
+        for (uint8_t i = (uint8_t)found + 1; i < s_pending_count; ++i) s_pending[w++] = s_pending[i];
+        s_pending_count = w;
+        s_vision_latency_debug.est_pending_count = s_pending_count;
+        return true;
+    }
+
+    // 命中后更新 L：clamp → 中值 → 慢速低通
+    void update_L_filter(float raw_L, uint32_t now) {
+        raw_L = clampf(raw_L, tune.latency.l_min_ms, tune.latency.l_max_ms);
+        s_L_median[s_L_med_idx] = raw_L;
+        s_L_med_idx = (uint8_t)((s_L_med_idx + 1) % L_MEDIAN_WIN);
+        if (s_L_med_count < L_MEDIAN_WIN) ++s_L_med_count;
+        float med = median_of(s_L_median, s_L_med_count);
+        float a = clampf(tune.latency.lowpass_alpha, 0.0f, 1.0f);
+        if (!s_L_locked) { s_L_filt = med; s_L_locked = true; }
+        else             { s_L_filt = (1.0f - a) * s_L_filt + a * med; }
+        s_L_last_update_tick = now;
+        s_vision_latency_debug.est_raw_l_ms = raw_L;
+        s_vision_latency_debug.est_filt_l_ms = s_L_filt;
+        s_vision_latency_debug.est_last_match_tick_ms = now;
+        s_vision_latency_debug.est_locked = true;
+    }
+
+    // 编码器侧：在 20ms 中断里喂入全局位移矢量，触发拐点则入队
+    void feed_encoder_sample(float vx, float vy, uint32_t now) {
+        if (!tune.latency.enable_estimation) return;
+        uint32_t ftick; float fdtheta;
+        if (s_enc_det.feed(vx, vy, now, tune.latency.enc_v_min,
+                           tune.latency.turn_thresh_deg * SystemConfig::DEG_TO_RAD,
+                           (uint32_t)tune.latency.refractory_ms, ftick, fdtheta)) {
+            push_pending_corner(ftick, fdtheta, now, tune.latency.l_max_ms);
+        }
+    }
+
+    // 视觉侧：在主循环里喂入帧间位移矢量，触发拐点则配对并更新 L
+    void feed_vision_sample(float vx, float vy, uint32_t now) {
+        if (!tune.latency.enable_estimation) return;
+        uint32_t ftick; float fdtheta;
+        if (s_vis_det.feed(vx, vy, now, tune.latency.vis_v_min,
+                           tune.latency.turn_thresh_deg * SystemConfig::DEG_TO_RAD,
+                           (uint32_t)tune.latency.refractory_ms, ftick, fdtheta)) {
+            float rawL;
+            if (match_vision_corner(ftick, fdtheta, now,
+                                    tune.latency.l_min_ms, tune.latency.l_max_ms,
+                                    tune.latency.dtheta_tol_deg * SystemConfig::DEG_TO_RAD, rawL)) {
+                update_L_filter(rawL, now);
+            }
+        }
+    }
+
+    // 按时间查表估计视觉帧的"采集时刻"对应的编码器位姿：
+    //   target = receive_tick − current_L()，在编码器历史里取该 tick 的样本（相邻两点线性插值）。
+    // 比旧的"按 XY 距离找最近点"更可靠：XY 匹配恰在拐点处歧义/出错，而 tick 查表无歧义、
+    // 用的是直测物理延时；s_odom_history 已存 tick_ms，无需新结构。
     bool match_vision_pose_to_odom_history(const Pose2D& delayed_vision_pose,
                                            uint32_t receive_tick_ms,
                                            Pose2D& out_odom_pose,
                                            uint32_t& out_capture_tick_ms) {
-        // Estimate the capture time by matching the delayed vision pose to encoder-only history.
-        const OdomPoseSample* best = nullptr;
-        float best_dist_sq = 0.0f;
+        (void)delayed_vision_pose;  // 不再用视觉 XY 匹配，仅按时间查表
+        constexpr int32_t SINGLE_SIDED_TOL_MS = 2 * (int32_t)SystemConfig::PIT_CH1_PERIOD_MS;
+
+        uint32_t target_tick = receive_tick_ms - (uint32_t)current_L();
+
+        // 用带符号差（值都在 ~1s 窗口内）安全跨越无符号回绕：
+        //   delta = sample.tick − target，<0 表示样本在 target 之前
+        const OdomPoseSample* before = nullptr;  // delta<=0 中最接近 0 的
+        const OdomPoseSample* after  = nullptr;  // delta>=0 中最接近 0 的
+        int32_t best_before = INT32_MIN;
+        int32_t best_after  = INT32_MAX;
 
         for (const auto& sample : s_odom_history) {
-            if (!sample.valid) {
-                continue;
-            }
-
-            uint32_t age_ms = receive_tick_ms - sample.tick_ms;
-            if (age_ms > ODOM_HISTORY_LOOKBACK_MS) {
-                continue;
-            }
-
-            float dist_sq = pose_distance_sq_xy(delayed_vision_pose, sample.pose);
-            if (best == nullptr || dist_sq < best_dist_sq) {
-                best = &sample;
-                best_dist_sq = dist_sq;
-            }
+            if (!sample.valid) continue;
+            int32_t delta = (int32_t)(sample.tick_ms - target_tick);
+            if (delta <= 0 && delta > best_before) { best_before = delta; before = &sample; }
+            if (delta >= 0 && delta < best_after)  { best_after  = delta; after  = &sample; }
         }
 
-        if (best == nullptr) {
-            return false;
+        if (before != nullptr && after != nullptr) {
+            uint32_t span = after->tick_ms - before->tick_ms;
+            if (span == 0U) {
+                out_odom_pose = before->pose;
+            } else {
+                float t = (float)(int32_t)(target_tick - before->tick_ms) / (float)span;
+                out_odom_pose.x   = before->pose.x   + (after->pose.x   - before->pose.x)   * t;
+                out_odom_pose.y   = before->pose.y   + (after->pose.y   - before->pose.y)   * t;
+                out_odom_pose.yaw = after->pose.yaw;  // yaw 仅供调试，取较新值
+            }
+            out_capture_tick_ms = target_tick;
+            return true;
         }
-
-        out_odom_pose = best->pose;
-        out_capture_tick_ms = best->tick_ms;
-        return true;
+        // 只有单侧样本：在容差内就近取用，否则放弃（历史未覆盖该时刻）
+        if (before != nullptr && (-best_before) <= SINGLE_SIDED_TOL_MS) {
+            out_odom_pose = before->pose;
+            out_capture_tick_ms = before->tick_ms;
+            return true;
+        }
+        if (after != nullptr && best_after <= SINGLE_SIDED_TOL_MS) {
+            out_odom_pose = after->pose;
+            out_capture_tick_ms = after->tick_ms;
+            return true;
+        }
+        return false;
     }
 
     bool odom_delta_since_matched_vision_pose(const Pose2D& delayed_vision_pose,
@@ -231,7 +481,7 @@ namespace {
         return true;
     }
 
-    [[gnu::always_inline]] inline bool apply_projected_lateral_correction(const Pose2D& vision_pose,
+    [[maybe_unused]] [[gnu::always_inline]] inline bool apply_projected_lateral_correction(const Pose2D& vision_pose,
                                                                           Pose2D& odom_pose,
                                                                           float segment_dx,
                                                                           float segment_dy,
@@ -258,6 +508,28 @@ namespace {
         return true;
     }
 
+    // 纯视觉全 2D 纠偏：X/Y 两轴各自限步收敛（替代只修横向），
+    // 每帧每轴限步避免控制环抖动；粗差由上层 reset 阈值兜底
+    [[gnu::always_inline]] inline bool apply_full_2d_correction(const Pose2D& vision_pose,
+                                                               Pose2D& odom_pose) {
+        constexpr float FULL_MAX_STEP_CM = 1.5f;  // 每帧每轴最大纠偏步长（30Hz 全闭环）
+        float step_x = 0.0f, step_y = 0.0f;
+        bool any = false;
+        if (calc_smoothed_correction_step(vision_pose.x - odom_pose.x,
+                                          VISION_LATERAL_DEADBAND_CM, FULL_MAX_STEP_CM,
+                                          VISION_LATERAL_CORRECTION_GAIN,
+                                          tune.tracker.vision_reject_dist, step_x)) {
+            odom_pose.x += step_x; any = true;
+        }
+        if (calc_smoothed_correction_step(vision_pose.y - odom_pose.y,
+                                          VISION_LATERAL_DEADBAND_CM, FULL_MAX_STEP_CM,
+                                          VISION_LATERAL_CORRECTION_GAIN,
+                                          tune.tracker.vision_reject_dist, step_y)) {
+            odom_pose.y += step_y; any = true;
+        }
+        return any;
+    }
+
 }
 
 
@@ -271,6 +543,7 @@ void init() {
     is_calibrated = false;
     q0 = 0.70710678f; q1 = 0.0f; q2 = 0.0f; q3 = 0.70710678f;  // 初始化四元数 (Yaw = 90度)
     reset_odom_history(App::g_state.physical.pose, 0);
+    reset_latency_estimator(true);  // 开机全清，包括已学到的 L
     imu_icm42688.init();  // ICM42688 IMU 初始化 (spi)
 }
 
@@ -294,6 +567,7 @@ void set_position(float x, float y, float yaw_deg) {
     // 3. 同步状态树
     App::g_state.physical.pose.yaw = yaw_deg;
     reset_odom_history(App::g_state.physical.pose, Core::Scheduler::get_sys_tick_ms());
+    reset_latency_estimator(false);  // 瞬移/硬重置：清检测器与 FIFO，保留已学 L（延时本身不变）
 }
 
 
@@ -555,7 +829,12 @@ void update_position_20ms_tick(const int16_t* encoder_counts, float current_yaw_
     s_encoder_pose.x += dx_global;
     s_encoder_pose.y += dy_global;
     s_encoder_pose.yaw = current_yaw_deg;
-    push_odom_history(Core::Scheduler::get_sys_tick_ms(), s_encoder_pose);
+
+    uint32_t now = Core::Scheduler::get_sys_tick_ms();
+    push_odom_history(now, s_encoder_pose);
+
+    // 用本周期的全局位移矢量驱动编码器侧拐点检测（实时延时估计）
+    feed_encoder_sample(dx_global, dy_global, now);
 }
 
 
@@ -563,26 +842,20 @@ void update_position_20ms_tick(const int16_t* encoder_counts, float current_yaw_
 // 模块 4: 视觉标定与坐标修正
 // =============================================================================
 
-/// \brief 根据最新视觉位姿修正当前直线段的坐标
-/// \param segment_start 当前直线段起点
-/// \param segment_end 当前直线段终点
+/// \brief 用最新视觉位姿对全局坐标做纯视觉全 2D 闭环修正
 /// \param last_consumed_seq 外层保存的最后一帧已处理视觉序号
 /// \return 成功应用视觉修正时返回 true
 ///
 /// \details
-/// 先用编码器纯积分补偿视觉管线延时；离目标 100cm 外只修垂直于运动方向的误差，进入 100cm 内修正 X/Y 两轴
-/// 按视觉帧序号消费新数据，不清 art1_pose_updated，避免与标定/调试流程抢同一个 bool 标志
+/// 纯视觉方案：先用编码器纯积分补偿视觉管线延时(tick 查表 + 实时 L)，再对 X/Y 两轴
+/// 各自限步收敛(不再只修横向、不再近终点冻结)；与编码器积分偏离过大时硬贴合并重置历史。
+/// segment_start/segment_end/allow_near_target_correction 仅为兼容旧接口保留，已不参与轴向判定。
+/// 按视觉帧序号消费新数据，不清 art1_pose_updated，避免与标定/调试流程抢同一个 bool 标志。
 ///
 bool apply_vision_axis_correction(const Point2D& segment_start, const Point2D& segment_end,
                                   uint32_t& last_consumed_seq,
                                   bool allow_near_target_correction) {
-    float dx = segment_end.x - segment_start.x;
-    float dy = segment_end.y - segment_start.y;
-    float segment_len_sq = dx * dx + dy * dy;
-    if (segment_len_sq < 1.0f) {
-        // 段长过短时无法可靠判断主轴和横向轴
-        return false;
-    }
+    (void)segment_start; (void)segment_end; (void)allow_near_target_correction;
 
     auto& vision_data = App::g_state.vision;
     uint32_t seq = vision_data.art1_pose_seq;
@@ -607,6 +880,7 @@ bool apply_vision_axis_correction(const Point2D& segment_start, const Point2D& s
     }
 
     auto& pose = App::g_state.physical.pose;
+    // 粗差跳变保护：与编码器纯积分偏离过大时直接硬贴合并重置历史
     float encoder_err_x = vision_pose.x - s_encoder_pose.x;
     float encoder_err_y = vision_pose.y - s_encoder_pose.y;
     float encoder_err_sq = encoder_err_x * encoder_err_x + encoder_err_y * encoder_err_y;
@@ -621,21 +895,24 @@ bool apply_vision_axis_correction(const Point2D& segment_start, const Point2D& s
         return true;
     }
 
-    float remain_x = segment_end.x - pose.x;
-    float remain_y = segment_end.y - pose.y;
-    float remain_sq = remain_x * remain_x + remain_y * remain_y;
-    if (!allow_near_target_correction &&
-        remain_sq <= VISION_TARGET_FREEZE_RADIUS_CM * VISION_TARGET_FREEZE_RADIUS_CM) {
-        return false;
-    }
-
+    // 纯视觉：X/Y 两轴全闭环限步纠偏（替代只修横向）
     float before_x = pose.x;
     float before_y = pose.y;
-    bool applied = apply_projected_lateral_correction(vision_pose, pose, dx, dy, segment_len_sq);
+    bool applied = apply_full_2d_correction(vision_pose, pose);
 
     s_vision_latency_debug.correction_x = pose.x - before_x;
     s_vision_latency_debug.correction_y = pose.y - before_y;
     return applied;
+}
+
+/// \brief 主循环在每个稳定视觉帧上喂入帧间位移，驱动视觉侧拐点检测与延时配对
+/// \param dx 相对上一帧的 X 位移 cm
+/// \param dy 相对上一帧的 Y 位移 cm
+/// \param gap_ms 与上一帧的时间间隔 ms
+__attribute__((section(".ramfunc")))
+void notify_vision_inflection(float dx, float dy, uint32_t gap_ms) {
+    if (gap_ms == 0U) return;  // 防止零间隔（同一帧重复）
+    feed_vision_sample(dx, dy, Core::Scheduler::get_sys_tick_ms());
 }
 
 void reset_async_calibrate() {

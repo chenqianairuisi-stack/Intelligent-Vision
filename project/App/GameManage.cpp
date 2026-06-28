@@ -22,6 +22,8 @@ constexpr float INV_GRID_SIZE_CM = 1.0f / SystemConfig::GRID_SIZE_CM;
 namespace {
     constexpr Point2D RETURN_HOME_TARGET = {SystemConfig::ENTRY_X, SystemConfig::ENTRY_Y};
     constexpr float RETURN_HOME_YAW = SystemConfig::ENTRY_YAW;
+    // 返航到家判定半径：放宽到比小车停车散布更大一圈，避免在过严的点位上反复蹭/挪
+    constexpr float RETURN_HOME_REACH_RADIUS_CM = 1.5f;
     constexpr float RETURN_FINAL_YAW_TOLERANCE_DEG = 2.0f;
     constexpr uint32_t RETURN_POSE_RECENT_MS = 300U;
     constexpr uint32_t RETURN_POSE_REQUEST_INTERVAL_MS = 150U;
@@ -29,6 +31,49 @@ namespace {
     DTCM_DATA uint32_t s_return_pose_request_tick_ms = 0U;
     DTCM_DATA uint32_t s_return_pose_start_seq = 0U;
     DTCM_DATA bool s_return_tracking_started = false;
+
+    // 炸弹按需等待爆炸：记录最近推入的被炸墙格，下一条路径若穿过它才等爆炸
+    DTCM_DATA point s_pending_blast_wall = {-1, -1};   // {-1,-1} = 无待处理炸弹
+    DTCM_DATA bool s_explosion_wait_active = false;    // 当前是否正在等爆炸
+    DTCM_DATA uint32_t s_explosion_wait_start_ms = 0U; // 等待起始时刻
+
+    [[gnu::always_inline]] inline bool segment_contains(
+        const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& seg, point cell) {
+        for (int i = 0; i < seg.size(); ++i) {
+            if (seg[i] == cell) return true;
+        }
+        return false;
+    }
+
+    // 路径加载前调用：刚推的炸弹墙若在即将执行的路径段 seg 上，则先原地等爆炸。
+    // 返回 true = 仍需等待（调用方应保持原地、暂不加载路径）；false = 可放行加载。
+    [[gnu::always_inline]] inline bool gate_explosion_before_path(
+        const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& seg) {
+        if (s_pending_blast_wall.x < 0) return false;  // 无待处理炸弹
+
+        if (!s_explosion_wait_active) {
+            if (!segment_contains(seg, s_pending_blast_wall)) {
+                s_pending_blast_wall = {-1, -1};       // 不穿墙：不等，直奔目标
+                return false;
+            }
+            s_explosion_wait_active = true;            // 需穿墙：启动固定时长等待
+            s_explosion_wait_start_ms = Core::Scheduler::get_sys_tick_ms();
+            // 等待期间锁住当前位置，避免车继续往墙冲
+            Algorithm::Tracker::track_point(
+                {App::g_state.physical.pose.x, App::g_state.physical.pose.y, App::g_state.physical.pose.yaw});
+            // 爆炸闪光会污染视觉坐标，等待窗口内屏蔽视觉修正，只靠锁位+里程计扛过
+            Algorithm::Tracker::set_vision_correction_suppressed(true);
+        }
+
+        uint32_t wait_ms = (uint32_t)tune.bomb.explosion_wait_ms;
+        if (Core::Scheduler::get_sys_tick_ms() - s_explosion_wait_start_ms >= wait_ms) {
+            s_explosion_wait_active = false;
+            s_pending_blast_wall = {-1, -1};
+            Algorithm::Tracker::set_vision_correction_suppressed(false);  // 闪光过去，恢复视觉修正
+            return false;  // 等待结束，放行加载
+        }
+        return true;  // 仍在等待
+    }
 
     [[gnu::always_inline]] inline float yaw_error_abs_deg(float target, float current) {
         float diff = target - current;
@@ -152,6 +197,11 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             vision_data.art1_pose_stable_count = 0U;
             Subsystem::PoseEstimator::set_position(ENTRY_X, ENTRY_Y, ENTRY_YAW);
             Algorithm::Tracker::track_point({OUT_TARGET_X, OUT_TARGET_Y, ENTRY_YAW});
+
+            // 复位炸弹爆炸等待与视觉抑制，防止上一局异常中断后抑制标志卡死导致视觉永久失效
+            s_pending_blast_wall = {-1, -1};
+            s_explosion_wait_active = false;
+            Algorithm::Tracker::set_vision_correction_suppressed(false);
 
             game.phase = GamePhase::EXIT_START_ZONE;
             break;
@@ -286,6 +336,8 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     StaticArray<point, MAX_PATH_LENGTH> segment;
                     BombTask bomb = make_bomb_task(task.param.bomb_push);
                     if (PlanningCommon::get_bomb_push_path(logical_level, logical_level.player_start, bomb, segment)) {
+                        // 上一颗炸弹墙若在本段路径上，先原地等爆炸再加载
+                        if (gate_explosion_before_path(segment)) break;
                         // 传入真实逻辑起点，避免路径首点缺失时 Tracker 误判第一段方向
                         Algorithm::Tracker::load_bomb_push_path(segment,
                                                                logical_level.player_start,
@@ -304,6 +356,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     BoxPushTask box_push = make_box_push_task(task.param.box_push);
 
                     if (PlanningCommon::append_box_push_path(probe, probe_player, box_push, segment)) {
+                        if (gate_explosion_before_path(segment)) break;
                         // 推箱路径可能从下一格开始，逻辑起点用于 Tracker 压缩首段
                         Algorithm::Tracker::load_box_push_path(segment, logical_level.player_start,
                                                                box_push.box_start,
@@ -317,10 +370,16 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 }
                 case TaskType::LOAD_PATH_OBS: {
                     StaticArray<point, MAX_PATH_LENGTH> segment;
-                    
+
                     if (PlanningCommon::get_grid_time_path(logical_level, logical_level.player_start, task.param.target_grid, segment)) {
+                        if (gate_explosion_before_path(segment)) break;
                         // 观察移动同样保留逻辑起点，保证第一段航向和视觉校正基准一致
                         Algorithm::Tracker::load_path(segment, logical_level.player_start);
+                        // 提前转向：观测目标航向在路径加载时就写入，保持 AUTO_TRACKING，
+                        // 让底盘边平移边把朝向转好，到点即拍，不再到点后原地阻塞转。
+                        if (current_macro_action.kind == MacroActionKind::OBSERVE) {
+                            ctrl.current_target.yaw = current_macro_action.observe.view.target_yaw;
+                        }
                         task_done = true;
                     } else {
                         game.error_stage = 4; game.phase = GamePhase::ERROR_OCCURRED;
@@ -332,15 +391,18 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     break;
                 }
                 case TaskType::ALIGN_YAW: {
+                    // 提前转向后到点时航向通常已基本对齐，这里只做非阻塞最终校验：
+                    // 锁住当前位置、把目标航向交给底盘 YawProfiled 收尾，误差进容差即放行。
                     ctrl.current_target.yaw = task.param.target_yaw;
-                    ctrl.mode = ControlMode::POINT_TRACKING; // 停止循迹，仅执行角度对齐
+                    ctrl.mode = ControlMode::POINT_TRACKING; // 锁住位置，仅收尾航向
 
                     // 无分支纯浮点 Yaw 包裹算法
                     float diff = ctrl.current_target.yaw - pos.yaw;
                     float err_yaw = std::abs(diff - 360.0f * std::roundf(diff * INV_360));
 
-                    // 结合物理底盘是否停稳做决策
-                    if (err_yaw < 1.0f && App::g_state.physical.is_stopped) {
+                    // 放宽到拍照可接受的角度容差即放行，不再强制等到完全停稳
+                    constexpr float ALIGN_YAW_DONE_DEG = 2.0f;
+                    if (err_yaw < ALIGN_YAW_DONE_DEG) {
                         task_done = true;
                     }
                     break;
@@ -388,7 +450,11 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     if (!App::g_state.planning.grid_path.empty()) {
                         logical_level.player_start = App::g_state.planning.grid_path.back();
                     }
-                    
+
+                    // 记录被炸墙格：下一条路径若穿过它才等爆炸，否则直奔下一目标（避免视觉污染）
+                    s_pending_blast_wall = task.param.bomb_push.blast_wall;
+                    s_explosion_wait_active = false;
+
                     task_done = true;
                     break;
                 }
@@ -510,6 +576,9 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 }
 
                 Subsystem::PoseEstimator::set_position(vision_pose.x, vision_pose.y, pos.yaw);
+                // 返航只在出发瞬间用一次视觉坐标校准里程计，之后全程靠编码器回出发点，
+                // 不再让持续推流的视觉帧介入控制（避免临近终点被视觉反复拉扯/抖动）。
+                Algorithm::Tracker::set_vision_correction_suppressed(true);
                 start_return_home_tracking();
                 s_return_tracking_started = true;
                 break;
@@ -518,7 +587,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             bool yaw_aligned =
                 yaw_error_abs_deg(RETURN_HOME_YAW, pos.yaw) <= RETURN_FINAL_YAW_TOLERANCE_DEG;
             bool odom_at_home = Algorithm::Tracker::check_arrival(
-                RETURN_HOME_TARGET, TuningDefaults::DEFAULT_REACH_RADIUS_MIN);
+                RETURN_HOME_TARGET, RETURN_HOME_REACH_RADIUS_CM);
 
             if (odom_at_home && App::g_state.physical.is_stopped && yaw_aligned) {
                 game.phase = GamePhase::FINISHED;

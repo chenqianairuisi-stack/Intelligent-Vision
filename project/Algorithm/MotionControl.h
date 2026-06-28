@@ -11,23 +11,48 @@ namespace Algorithm::Motion {
 // ==========================================
 class Trajectory {
 public:
-    inline void reset() { current_v = 0.0f; current_a = 0.0f; final_cap_blend = 0.0f; }
+    inline void reset() { current_v = 0.0f; current_a = 0.0f; }
     // 生成平滑平移速度，end_speed 用于拐角不停顿通过
     Speed2D velocity_planning_1d(float dx, float dy, float dt, float end_speed = 0.0f);
 private:
-    float current_v = 0.0f;  
-    float current_a = 0.0f; 
-    float final_cap_blend = 0.0f;
+    float current_v = 0.0f;
+    float current_a = 0.0f;
 };
 
 
 class YawProfiled {
 public:
-    void reset() { current_vw = 0.0f; }
+    void reset() { current_vw = 0.0f; settled = false; }
     float calculate(float err, float dt, bool is_translating);
 
 private:
     float current_vw = 0.0f;
+    bool settled = false;   // 死区迟滞锁存：进死区判稳后，需误差涨过再触发阈值才重新给力
+};
+
+
+// ==========================================
+// 1b. Stanley 式平移横向纠偏（贴路径线跟踪）
+// ==========================================
+// 把"朝目标点收敛"改成"沿路径线行驶 + 横向 Stanley 纠偏"：
+// 沿轨方向用梯形规划器出主速度，垂直方向用 Stanley atan 律压回路径线。
+// 全向底盘下横纠表现为垂直于段方向的平移速度分量，不改逆运动学。
+class PathLineFollower {
+public:
+    inline void reset() { planner.reset(); }
+
+    /// \brief 计算沿路径线跟踪的全局期望速度
+    /// \param px,py 当前全局位置 cm
+    /// \param sx,sy 当前直线段起点 cm
+    /// \param tx,ty 当前段目标点 cm
+    /// \param dt 控制周期 s
+    /// \param end_speed 段末保留速度（拐点不停顿时>0）
+    /// \return 全局期望速度 (vx,vy) cm/s
+    Speed2D follow(float px, float py, float sx, float sy,
+                   float tx, float ty, float dt, float end_speed = 0.0f);
+
+private:
+    Trajectory planner;
 };
 
 
@@ -107,7 +132,8 @@ public:
 
         float err = target - current;
 
-        i_out += params.ki * err;
+        // 积分按快环节拍缩放，保持原 20ms 整定的 ki 等效（快环每秒调用更多次）
+        i_out += params.ki * err * SystemConfig::SPEED_LOOP_KI_SCALE;
 
         // 积分抗饱和
         i_out = std::clamp(i_out, -20.0f, 20.0f);

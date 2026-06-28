@@ -145,7 +145,44 @@ void send_wave_data() {
             tx_packet.data_5 = (probes.acc_norm - 1.0f) * 10.0f; 
 
             // 附带监控我们最关心的 Yaw，看看它有没有漂移
-            tx_packet.data_6 = cur_pose.yaw;         
+            tx_packet.data_6 = cur_pose.yaw;
+        }
+        else if (App::g_state.debug.telemetry_mode == 3) {
+            // 【模式 3】：视觉延时估计 & 纯视觉定位监控
+            const auto& lat = Subsystem::PoseEstimator::get_vision_latency_debug();
+            const auto& cur_pose = App::g_state.physical.pose;
+
+            tx_packet.data_1 = lat.est_raw_l_ms;    // 通道1: 单次配对原始 L (ms)
+            tx_packet.data_2 = lat.est_filt_l_ms;   // 通道2: 滤波后 L (ms)
+            tx_packet.data_3 = lat.used_l_ms;       // 通道3: 本帧实际采用 L (回退梯结果)
+            // 通道4: 待配对编码器拐点数 (放大10倍便于和 L 同图区分)
+            tx_packet.data_4 = (float)lat.est_pending_count * 10.0f;
+            // 通道5/6: 补偿后视觉 X/Y 与当前 pose X/Y 的偏差，看纯视觉闭环贴合程度
+            tx_packet.data_5 = lat.compensated_pose.x - cur_pose.x;
+            tx_packet.data_6 = lat.compensated_pose.y - cur_pose.y;
+        }
+        else if (App::g_state.debug.telemetry_mode == 4) {
+            // 【模式 4】：Stanley 横纠贴线监控
+            const auto& pose = App::g_state.physical.pose;
+            const auto& ctrl = App::g_state.control;
+            float sx = ctrl.segment_start.x, sy = ctrl.segment_start.y;
+            float dx = ctrl.current_target.x - sx;
+            float dy = ctrl.current_target.y - sy;
+            float len = sqrtf(dx * dx + dy * dy);
+            float e_ct = 0.0f, s_rem = 0.0f;
+            if (len > 1e-3f) {
+                float ax = dx / len, ay = dy / len;       // 沿轨单位向量
+                float nx = -ay, ny = ax;                  // 法向
+                e_ct = (pose.x - sx) * nx + (pose.y - sy) * ny;          // 横向偏差 cm
+                s_rem = (ctrl.current_target.x - pose.x) * ax +
+                        (ctrl.current_target.y - pose.y) * ay;           // 沿轨剩余 cm
+            }
+            tx_packet.data_1 = e_ct;                  // 通道1: 横向偏差 (压线目标=0)
+            tx_packet.data_2 = s_rem;                 // 通道2: 沿轨剩余距离
+            tx_packet.data_3 = pose.x;                // 通道3: pose X
+            tx_packet.data_4 = pose.y;                // 通道4: pose Y
+            tx_packet.data_5 = ctrl.current_target.x; // 通道5: 目标 X
+            tx_packet.data_6 = ctrl.current_target.y; // 通道6: 目标 Y
         }
         wireless_uart_send_buffer((uint8*)&tx_packet, sizeof(VofaJustFloat));
     }
@@ -363,6 +400,16 @@ namespace {
                         else if (value == 2) Subsystem::Vision::request_pose_ART1();
                         break;
                     }
+                    case 'E': {
+                        // !V E 1 开启实时延时估计，!V E 0 关闭(回退固定 vision_latency_ms)
+                        tune.latency.enable_estimation = (value > 0.5f);
+                        wireless_uart_send_buffer(
+                            tune.latency.enable_estimation ?
+                                (uint8_t*)"[SYS] Latency Est: ON\r\n" :
+                                (uint8_t*)"[SYS] Latency Est: OFF\r\n",
+                            tune.latency.enable_estimation ? 23 : 24);
+                        break;
+                    }
                     case 'G': {
                         // !V G 1 开启监测，!V G 0 关闭监测
                         if (value > 0.5f) {
@@ -380,9 +427,36 @@ namespace {
                 }
                 break;
 
+            case 'L':  // 拐点延时估计调参指令 (latency estimator)
+                switch (sub) {
+                    case 'T': tune.latency.turn_thresh_deg = value; break;  // 拐点触发转角阈值 deg
+                    case 'E': tune.latency.enc_v_min = value; break;        // 编码器速度门 cm/20ms
+                    case 'V': tune.latency.vis_v_min = value; break;        // 视觉速度门 cm/frame
+                    case 'R': tune.latency.refractory_ms = value; break;    // 去抖间隔 ms
+                    case 'N': tune.latency.l_min_ms = value; break;         // L 接受下限 ms
+                    case 'X': tune.latency.l_max_ms = value; break;         // L 接受上限 ms
+                    case 'D': tune.latency.dtheta_tol_deg = value; break;   // 转角量级容差 deg
+                    case 'A': tune.latency.lowpass_alpha = value; break;    // L 低通系数
+                    case 'S': tune.latency.l_stale_ms = value; break;       // L 过期时间 ms
+                    default: return;
+                }
+                break;
+
+            case 'T':  // 运动控制调参（Stanley横纠 / 拐点略停 / 炸弹等待）
+                switch (sub) {
+                    case 'E': tune.stanley.enable = (value > 0.5f); break;  // Stanley 开关
+                    case 'K': tune.stanley.k_ct = value; break;            // 横向误差增益
+                    case 'F': tune.stanley.k_soft = value; break;          // 软化速度 cm/s
+                    case 'L': tune.stanley.v_lat_max = value; break;       // 横纠速度上限 cm/s
+                    case 'P': tune.tracker.corner_pause_speed = value; break; // 拐点略停阈值 cm/s
+                    case 'B': tune.bomb.explosion_wait_ms = value; break;  // 炸弹引信等待 ms
+                    default: return;
+                }
+                break;
+
             case 'P': { // 多点路径下发指令
                 auto& plan = App::g_state.planning;
-                if (sub == 'C') { 
+                if (sub == 'C') {
                     // !P C -> 清空航点列表
                     plan.physical_path.clear();
                     plan.force_stop_at_wp.clear();

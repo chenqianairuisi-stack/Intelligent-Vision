@@ -29,6 +29,8 @@ namespace Algorithm::Tracker {
 
     // 运动中的视觉辅助，POINT_TRACKING 也可复用
     void update_vision_assist(const Point2D& target);
+    // 炸弹爆炸窗口期屏蔽视觉修正：闪光会污染视觉坐标，此期间只靠锁位+里程计扛过
+    void set_vision_correction_suppressed(bool suppressed);
     void track_point(const Pose2D& target);
     void track_point_with_vision_assist(const Pose2D& target);
     // 直接追踪单个物理目标点

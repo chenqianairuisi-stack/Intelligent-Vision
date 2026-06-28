@@ -2,6 +2,7 @@
 #include "RobotState.h"
 #include "system_config.h"
 #include "CoreScheduler.h"
+#include "PoseEstimate.h"
 
 #include <string.h> 
 #include <array>
@@ -55,9 +56,9 @@ namespace {
     ///
     constexpr uint32_t ART1_POSE_STABLE_MAX_GAP_MS = 300U;
     constexpr float ART1_POSE_STABLE_MAX_STEP_CM = 60.0f;
-    constexpr float ART1_POSE_STABLE_MAX_YAW_STEP_DEG = 60.0f;
+    [[maybe_unused]] constexpr float ART1_POSE_STABLE_MAX_YAW_STEP_DEG = 60.0f;
 
-    [[gnu::always_inline]] inline float abs_yaw_delta_deg(float a, float b) {
+    [[maybe_unused]] [[gnu::always_inline]] inline float abs_yaw_delta_deg(float a, float b) {
         float delta = std::fabs(a - b);
         if (delta > 180.0f) {
             delta = 360.0f - delta;
@@ -138,8 +139,10 @@ namespace {
             uint8_t write_idx = vis.art1_pose_publish_idx ^ 1U;
             Pose2D& next_pose = vis.art1_pose_buffer[write_idx];
 
-            memcpy(&next_pose.x, &parser_art1.payload_buf[0], 4);
-            memcpy(&next_pose.y, &parser_art1.payload_buf[4], 4);
+            // 摄像头协议的 x/y 字段顺序与本机坐标系相反：payload[0..3] 实为物理 y、payload[4..7] 实为物理 x。
+            // 上车实测：车放在物理 x≈124 / y≈14 处时，旧解析把 x/y 装反，视觉一介入位姿就错乱→四处飘→斜冲出赛道。
+            memcpy(&next_pose.y, &parser_art1.payload_buf[0], 4);
+            memcpy(&next_pose.x, &parser_art1.payload_buf[4], 4);
             memcpy(&next_pose.yaw, &parser_art1.payload_buf[8], 4);
 
             // seq 和 tick 给标定/循迹校正判断新帧与时效性
@@ -157,10 +160,15 @@ namespace {
                 float dx = next_pose.x - vis.art1_pose.x;
                 float dy = next_pose.y - vis.art1_pose.y;
                 float step_sq = dx * dx + dy * dy;
+                // 纯视觉只用 x/y：帧稳定判定不再依赖视觉姿态角（航向全交陀螺仪）
                 stable_frame =
                     gap_ms <= ART1_POSE_STABLE_MAX_GAP_MS &&
-                    step_sq <= ART1_POSE_STABLE_MAX_STEP_CM * ART1_POSE_STABLE_MAX_STEP_CM &&
-                    abs_yaw_delta_deg(next_pose.yaw, vis.art1_pose.yaw) <= ART1_POSE_STABLE_MAX_YAW_STEP_DEG;
+                    step_sq <= ART1_POSE_STABLE_MAX_STEP_CM * ART1_POSE_STABLE_MAX_STEP_CM;
+
+                // 仅在稳定帧上喂入帧间位移，驱动视觉侧拐点检测（实时延时估计）
+                if (stable_frame) {
+                    Subsystem::PoseEstimator::notify_vision_inflection(dx, dy, gap_ms);
+                }
             }
 
             if (stable_frame) {

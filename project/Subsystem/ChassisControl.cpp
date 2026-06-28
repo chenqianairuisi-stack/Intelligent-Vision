@@ -31,8 +31,10 @@ __attribute__((section(".dtcm_data"))) static Algorithm::Motion::Speed_PosPid pi
 
 // __attribute__((section(".dtcm_data"))) static Algorithm::Motion::Angle_PosPid pid_pos_yaw(tune.pid_yaw);
 
-__attribute__((section(".dtcm_data"))) static Algorithm::Motion::Trajectory velocity_planner;
+__attribute__((section(".dtcm_data"))) static Algorithm::Motion::PathLineFollower path_follower;
 __attribute__((section(".dtcm_data"))) static Algorithm::Motion::YawProfiled yaw_controller;
+// 慢环(20ms)产出、快环(5ms)消费的四轮目标速度。两段同在 PIT 中断、不并发，无需加锁。
+__attribute__((section(".dtcm_data"))) static WheelSpeed4 s_target_wheel_speeds = {0.0f, 0.0f, 0.0f, 0.0f};
 __attribute__((section(".dtcm_data"))) static bool control_history_ready = false;
 __attribute__((section(".dtcm_data"))) static ControlMode last_control_mode = ControlMode::AUTO_TRACKING;
 __attribute__((section(".dtcm_data"))) static TrackerState last_tracker_state = TrackerState::NONE;
@@ -49,11 +51,19 @@ namespace {
 
     __attribute__((always_inline)) inline float smooth_sign(float val) {
         // 0.5f 决定了过渡带的陡峭程度，值越小越接近阶跃，但不突变
-        return val / (std::abs(val) + 0.5f); 
+        return val / (std::abs(val) + 0.5f);
+    }
+
+    // 静摩擦前馈：轮子接近静止、要启动时给满 ka 破静摩擦（动作干脆）；轮子转起来后
+    // 动摩擦更小，按实测轮速衰减 ka，避免低速/换向段被常量 ka 过量驱动 → 极限环啸叫。
+    __attribute__((always_inline)) inline float friction_ff(float target, float current) {
+        constexpr float KA_FADE_V = 6.0f;  // cm/s：轮速超过此量级后静摩擦补偿基本退场
+        float fade = KA_FADE_V / (std::abs(current) + KA_FADE_V);  // current≈0→1，高速→~0
+        return smooth_sign(target) * tune.ff.ka * fade;
     }
 
     __attribute__((always_inline)) inline void reset_motion_residue() {
-        velocity_planner.reset();
+        path_follower.reset();
         yaw_controller.reset();
         for (auto& pid : pid_wheels) {
             pid.reset();
@@ -123,11 +133,11 @@ namespace {
         const auto& current_speeds = App::g_state.physical.current_wheel_speed;
         const auto& Kv = tune.ff.kv;
 
-        // 计算前馈占空比 (简单的线性模型)，并加入符号判断实现静摩擦补偿
-        float ff_lf = targets.lf * Kv + smooth_sign(targets.lf) * tune.ff.ka;
-        float ff_lb = targets.lb * Kv + smooth_sign(targets.lb) * tune.ff.ka;
-        float ff_rf = targets.rf * Kv + smooth_sign(targets.rf) * tune.ff.ka;
-        float ff_rb = targets.rb * Kv + smooth_sign(targets.rb) * tune.ff.ka;
+        // 计算前馈占空比 (简单的线性模型)，静摩擦补偿按轮速衰减（见 friction_ff）
+        float ff_lf = targets.lf * Kv + friction_ff(targets.lf, current_speeds.lf);
+        float ff_lb = targets.lb * Kv + friction_ff(targets.lb, current_speeds.lb);
+        float ff_rf = targets.rf * Kv + friction_ff(targets.rf, current_speeds.rf);
+        float ff_rb = targets.rb * Kv + friction_ff(targets.rb, current_speeds.rb);
 
         // 速度环位置式 PID + 前馈计算占空比输出
         float duty_lf = ff_lf + pid_wheels[0].calculate(targets.lf, current_speeds.lf);
@@ -177,16 +187,19 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick() {
 
     guard_motion_residue(App::g_state);
 
-    // 计算全局误差
-    float err_global_x = ctrl.current_target.x - posi.x;
-    float err_global_y = ctrl.current_target.y - posi.y;
     float err_yaw = normalize_angle(ctrl.current_target.yaw - yaw);
 
-    float target_end_speed = 0.0f;
+    // 过弯不停顿：末速度由 Tracker 按"当前航点是否需要停稳"写入。
+    // 拐点（非终点、非强停）给非零保留速度让车直接带速切向；需停稳处为 0 按停车规划。
+    float target_end_speed = ctrl.segment_end_speed;
 
-    // 平移速度规划
-    Speed2D expected_global_vel = velocity_planner.velocity_planning_1d(
-        err_global_x, err_global_y, SystemConfig::PIT_CH1_DT_S, target_end_speed);
+    // 沿路径线跟踪 + Stanley 横向纠偏：贴着 segment_start→current_target 这条线走，
+    // 而不是只朝目标点收敛。段长过短或 Stanley 关闭时内部自动退化为纯朝点。
+    Speed2D expected_global_vel = path_follower.follow(
+        posi.x, posi.y,
+        ctrl.segment_start.x, ctrl.segment_start.y,
+        ctrl.current_target.x, ctrl.current_target.y,
+        SystemConfig::PIT_CH1_DT_S, target_end_speed);
 
     // 将全局期望速度投影到小车自身的局部坐标系
     float current_yaw_rad = yaw * SystemConfig::DEG_TO_RAD;  // 转换为弧度
@@ -202,10 +215,19 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick() {
 
 
     // 逆运动学解算：将期望的底盘全向速度分配给 4 个轮子，得到每个轮子的目标转速 (v1, v2, v3, v4)
-    WheelSpeed4 target_wheel_speeds = Algorithm::Motion::Kinematics::inverse(expected_local_vx, expected_local_vy, expected_local_vw);
+    // 只产出目标速度，交给 5ms 快环闭环；本慢环不再直接驱动电机。
+    s_target_wheel_speeds = Algorithm::Motion::Kinematics::inverse(expected_local_vx, expected_local_vy, expected_local_vw);
+}
 
-    // 速度内环控制
-    run_speed_loop(target_wheel_speeds);
+
+/// \brief 5ms 轮速内环（200Hz 快环）
+///
+/// \details
+/// 消费慢环(20ms)最近一次产出的四轮目标速度，配合 5ms 新测得的轮速跑 PID+前馈出占空比。
+/// 内环提速到 200Hz 后才能在高速/急刹下紧跟目标，不再因 50Hz 跟不上而过冲互顶（啸叫根因）。
+///
+__attribute__((section(".ramfunc"))) void update_speed_loop_5ms() {
+    run_speed_loop(s_target_wheel_speeds);
 }
 
 

@@ -4,6 +4,7 @@
 #include "PoseEstimate.h"
 #include "CoreScheduler.h"
 #include "Vision.h"
+#include "MotionControl.h"
 #include <algorithm>
 #include <cmath>
 
@@ -15,22 +16,23 @@ namespace {
     constexpr float DEFAULT_BOX_PUSH_FINAL_PRESS_CM = 0.2f;
     constexpr float MIN_BOX_PUSH_FINAL_PRESS_CM = 0.0f;
     constexpr float MAX_BOX_PUSH_FINAL_PRESS_CM = 1.0f;
-    constexpr float VISION_ASSIST_MIN_SEGMENT_CM = 15.0f;
-    constexpr float VISION_ASSIST_TARGET_FREEZE_RADIUS_CM = 10.0f;
+    [[maybe_unused]] constexpr float VISION_ASSIST_MIN_SEGMENT_CM = 15.0f;
+    [[maybe_unused]] constexpr float VISION_ASSIST_TARGET_FREEZE_RADIUS_CM = 10.0f;
     constexpr float FINAL_LOCK_RADIUS_CM = 1.5f;
     constexpr float FINISH_WITHOUT_STOP_RADIUS_CM = 0.2f;
     constexpr float PUSH_EXTRA_REACH_RADIUS_CM = 0.05f;
     constexpr float DEFAULT_WAYPOINT_REACH_RADIUS_CM = 0.3f;
     constexpr float MAX_WAYPOINT_REACH_RADIUS_CM = 1.0f;
-    constexpr float DEFAULT_CORNER_SWITCH_WINDOW_CM = 0.0f;
-    constexpr float MAX_CORNER_SWITCH_WINDOW_CM = 0.0f;
+    constexpr float DEFAULT_CORNER_SWITCH_WINDOW_CM = 0.0f;   // 异常回退：宁可不提前切也不乱切
+    constexpr float MAX_CORNER_SWITCH_WINDOW_CM = 8.0f;       // 提前切换窗口上限：现场用 !SN 在 0~8cm 间调
     constexpr float DEFAULT_CORNER_LINE_TOLERANCE_CM = 0.5f;
-    constexpr float MAX_CORNER_LINE_TOLERANCE_CM = 0.7f;
+    constexpr float MAX_CORNER_LINE_TOLERANCE_CM = 2.0f;     // 横向容差上限：放开以配合激进过弯调参
     constexpr float STOP_SETTLE_RELEASE_RADIUS_CM = 1.0f;
     DTCM_DATA float s_box_push_final_press_cm = DEFAULT_BOX_PUSH_FINAL_PRESS_CM;
     DTCM_DATA bool s_stop_at_every_waypoint = false;
     DTCM_DATA bool s_finish_without_stop = false;
     DTCM_DATA bool s_force_vision_assist_current_segment = false;
+    DTCM_DATA bool s_vision_correction_suppressed = false;  // 炸弹爆炸窗口期屏蔽视觉修正
     DTCM_DATA bool s_stop_settle_active = false;
     DTCM_DATA uint16_t s_stop_settle_wp_idx = 0U;
     DTCM_DATA Point2D s_stop_settle_target = {0.0f, 0.0f};
@@ -87,9 +89,11 @@ namespace {
         plan.vision_last_correction_seq = App::g_state.vision.art1_pose_seq;
         plan.vision_last_request_tick_ms = 0U;
         s_force_vision_assist_current_segment = force_vision_assist;
+        // 同步给底盘 Stanley 贴线用：段起点随切段一起更新
+        App::g_state.control.segment_start = segment_start;
     }
 
-    [[gnu::always_inline]] inline bool has_trackable_segment(Point2D segment_start, Point2D target) {
+    [[maybe_unused]] [[gnu::always_inline]] inline bool has_trackable_segment(Point2D segment_start, Point2D target) {
         float dx = target.x - segment_start.x;
         float dy = target.y - segment_start.y;
         return (dx * dx + dy * dy) >
@@ -286,6 +290,31 @@ namespace {
         s_stop_settle_target = {0.0f, 0.0f};
     }
 
+    // 当前底盘合速度大小 cm/s（由四轮反馈正运动学求出）
+    [[gnu::always_inline]] inline float current_speed_mag() {
+        const auto& w = App::g_state.physical.current_wheel_speed;
+        Velocity2D v = Algorithm::Motion::Kinematics::forward(w.lf, w.lb, w.rf, w.rb);
+        return std::sqrt(v.vx * v.vx + v.vy * v.vy);
+    }
+
+    // 拐点略停切换阈值 cm/s：合速度低于此即可切下一段（替代等完全停稳）
+    [[gnu::always_inline]] inline float corner_pause_speed() {
+        float s = tune.tracker.corner_pause_speed;
+        if (!std::isfinite(s) || s < 0.0f) {
+            return TuningDefaults::DEFAULT_CORNER_PAUSE_SPEED;
+        }
+        return s;
+    }
+
+    // 过弯保留速度 cm/s：拐点不停顿时喂给速度规划器的段末速度，>0 即带速切向下一段
+    [[gnu::always_inline]] inline float corner_pass_speed() {
+        float s = tune.tracker.corner_pass_speed;
+        if (!std::isfinite(s) || s < 0.0f) {
+            return 0.0f;
+        }
+        return std::min(s, tune.dynamics.max_vel);
+    }
+
     [[gnu::always_inline]] inline void push_unique_grid_waypoint(
         StaticArray<point, MAX_PATH_LENGTH>& path,
         point waypoint) {
@@ -479,9 +508,19 @@ float get_box_push_final_press_cm() {
     return s_box_push_final_press_cm;
 }
 
+/// \brief 设置/清除视觉修正抑制（炸弹爆炸窗口期用）
+void set_vision_correction_suppressed(bool suppressed) {
+    s_vision_correction_suppressed = suppressed;
+}
+
 /// \brief 运动中的视觉辅助：周期请求 ART1，并在速度规划前应用延时补偿后的视觉修正
 __attribute__((section(".ramfunc"))) void update_vision_assist(const Point2D& target) {
     if (!TRACKING_VISION_ASSIST_ENABLED) {
+        return;
+    }
+
+    // 炸弹爆炸闪光会污染视觉坐标，等待窗口内不让视觉修正进入控制环（只锁位+里程计）
+    if (s_vision_correction_suppressed) {
         return;
     }
 
@@ -493,31 +532,14 @@ __attribute__((section(".ramfunc"))) void update_vision_assist(const Point2D& ta
     const Point2D segment_start = plan.vision_segment_start;
     uint32_t now = Core::Scheduler::get_sys_tick_ms();
 
+    // 摄像头连续推流：保留按需请求作为兜底，不依赖它
     if (s_force_vision_assist_current_segment) {
         request_forced_vision_pose(now);
     }
 
-    if (!has_trackable_segment(segment_start, target)) {
-        return;
-    }
-
-    const auto& pose = App::g_state.physical.pose;
-    float target_dx = target.x - pose.x;
-    float target_dy = target.y - pose.y;
-    if (!s_force_vision_assist_current_segment &&
-        target_dx * target_dx + target_dy * target_dy <=
-        VISION_ASSIST_TARGET_FREEZE_RADIUS_CM * VISION_ASSIST_TARGET_FREEZE_RADIUS_CM) {
-        return;
-    }
-
-    // 只在仍有平移运动时参与，避免终点停车后视觉噪声继续拉扯底盘。
-    // 靠近终点但尚未停稳时仍允许最后几帧视觉修正，防止估计位姿先进入半径后提前刹停。
-    if (!s_force_vision_assist_current_segment && App::g_state.physical.is_stopped) {
-        return;
-    }
-
-    bool pose_recent = art1_pose_recent(now);
-    if (!pose_recent) {
+    // 纯视觉：不再按段长/近终点/是否停稳设门，只要有近期稳定视觉帧就
+    // 全程持续做全 2D 纠偏（轴向/冻结判定已下沉到 PoseEstimate，这里不再拦截）
+    if (!art1_pose_recent(now)) {
         return;
     }
 
@@ -525,7 +547,7 @@ __attribute__((section(".ramfunc"))) void update_vision_assist(const Point2D& ta
         segment_start,
         target,
         plan.vision_last_correction_seq,
-        s_force_vision_assist_current_segment
+        true
     );
 }
 
@@ -540,6 +562,9 @@ __attribute__((section(".ramfunc"))) void update_target() {
     auto& ctrl = App::g_state.control;
 
     if (ctrl.tracker_state != TrackerState::TRACKING) return;
+
+    // 默认按停车规划；只有确认是"过弯不停顿"的拐点才在下面改成保留速度
+    ctrl.segment_end_speed = 0.0f;
 
     if (plan.physical_path.empty() || plan.current_wp_idx >= plan.physical_path.size()) {
         clear_stop_settle();
@@ -587,6 +612,13 @@ __attribute__((section(".ramfunc"))) void update_target() {
     bool arrived = false;
 
     if (must_stop_at_wp) {
+        // 中间拐点（force-stop 但非终点、非推箱补点）只需略停顿：合速度低于阈值即可切；
+        // 真正终点/推箱补点仍要求完全停稳，保证精度不变。
+        bool brief_pause_corner = !is_last_point && !push_extra_wp && !finish_without_stop_at_last;
+        bool settled = brief_pause_corner ?
+            (current_speed_mag() < corner_pause_speed()) :
+            App::g_state.physical.is_stopped;
+
         if (s_stop_settle_active && s_stop_settle_wp_idx != plan.current_wp_idx) {
             clear_stop_settle();
         }
@@ -594,7 +626,7 @@ __attribute__((section(".ramfunc"))) void update_target() {
         if (s_stop_settle_active) {
             if (!check_arrival(s_stop_settle_target, STOP_SETTLE_RELEASE_RADIUS_CM)) {
                 clear_stop_settle();
-            } else if (!App::g_state.physical.is_stopped) {
+            } else if (!settled) {
                 Point2D hold = current_pose_point();
                 ctrl.current_target.x = hold.x;
                 ctrl.current_target.y = hold.y;
@@ -612,7 +644,7 @@ __attribute__((section(".ramfunc"))) void update_target() {
             update_vision_assist(target_phys);
 
             if (check_arrival(target_phys, current_radius)) {
-                if (!App::g_state.physical.is_stopped) {
+                if (!settled) {
                     s_stop_settle_active = true;
                     s_stop_settle_wp_idx = plan.current_wp_idx;
                     s_stop_settle_target = target_phys;
@@ -626,6 +658,11 @@ __attribute__((section(".ramfunc"))) void update_target() {
             }
         }
     } else {
+        // 纯过弯航点（非终点、非强停、非推箱补点）：给速度规划器一个非零段末速度，
+        // 让车带速直接切向下一段，不再减速停车。推箱补点/不停顿终点仍按停车规划。
+        if (!push_extra_wp && !finish_without_stop_at_last) {
+            ctrl.segment_end_speed = corner_pass_speed();
+        }
         update_vision_assist(target_phys);
         arrived = check_arrival(target_phys, current_radius) ||
                   (!push_extra_wp && check_corner_switch(plan.vision_segment_start, target_phys));
@@ -671,6 +708,7 @@ void track_point_impl(const Pose2D& target, bool force_vision_assist) {
     reset_vision_assist(current_pose_point(), force_vision_assist);
 
     ctrl.current_target = target;
+    ctrl.segment_end_speed = 0.0f;   // 锁点/收尾一律按停车规划
     ctrl.mode = ControlMode::POINT_TRACKING;
 }
 

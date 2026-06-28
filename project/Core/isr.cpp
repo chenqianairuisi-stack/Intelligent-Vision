@@ -12,33 +12,41 @@
 
 extern "C" void PIT_IRQHandler(void) {
 
-    // PIT_CH0 ¶¨Ê±Æ÷ÖÐ¶Ï£¨ÖÜÆÚÓÉ SystemConfig::PIT_CH0_PERIOD_MS ÅäÖÃ£©£¬ÓÃÓÚÍÓÂÝÒÇÊý¾Ý¶ÁÈ¡Óë»ý·Ö
+    // PIT_CH0 ï¿½ï¿½Ê±ï¿½ï¿½ï¿½Ð¶Ï£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ SystemConfig::PIT_CH0_PERIOD_MS ï¿½ï¿½ï¿½Ã£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ý¶ï¿½È¡ï¿½ï¿½ï¿½ï¿½ï¿½
     if(pit_flag_get(PIT_CH0)) 
     {
         pit_flag_clear(PIT_CH0);
 
-        // ÍÓÂÝÒÇÊý¾Ý¶ÁÈ¡Óë×ª»»
+        // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ý¶ï¿½È¡ï¿½ï¿½×ªï¿½ï¿½
         imu_icm42688.update_all();  
 
-        // yaw Öá½Ç¶È¸üÐÂ
-        Subsystem::PoseEstimator::update_yaw_1ms_tick();  
+        // yaw ï¿½ï¿½Ç¶È¸ï¿½ï¿½ï¿½
+        Subsystem::PoseEstimator::update_yaw_1ms_tick();
+
+        // è½®é€Ÿå†…çŽ¯å¿«çŽ¯ï¼š1ms å®šæ—¶å™¨åˆ†é¢‘åˆ° 5ms(200Hz)ï¼Œå…ˆæµ‹é€Ÿå†è·‘é€Ÿåº¦ PID å‡ºå ç©ºæ¯”
+        static uint8_t s_speed_loop_div = 0;
+        if (++s_speed_loop_div >= SystemConfig::SPEED_LOOP_PERIOD_MS) {
+            s_speed_loop_div = 0;
+            encoders.update_speed_5ms_tick();
+            Subsystem::Chassis::update_speed_loop_5ms();
+        }
     }
     
-    // PIT_CH1 ¶¨Ê±Æ÷ÖÐ¶Ï£¨ÖÜÆÚÓÉ SystemConfig::PIT_CH1_PERIOD_MS ÅäÖÃ£©£¬ÓÃÓÚµ×ÅÌ¿ØÖÆËã·¨¸üÐÂºÍÀï³Ì¼ÆÍÆËã
+    // PIT_CH1 ï¿½ï¿½Ê±ï¿½ï¿½ï¿½Ð¶Ï£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ SystemConfig::PIT_CH1_PERIOD_MS ï¿½ï¿½ï¿½Ã£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Úµï¿½ï¿½Ì¿ï¿½ï¿½ï¿½ï¿½ã·¨ï¿½ï¿½ï¿½Âºï¿½ï¿½ï¿½Ì¼ï¿½ï¿½ï¿½ï¿½ï¿½
     if(pit_flag_get(PIT_CH1)) 
     {
         pit_flag_clear(PIT_CH1);
 
-        // ±àÂëÆ÷¼ÆÊý¸üÐÂ
+        // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
         encoders.update_encoders_20ms_tick();
 
-        // ¸üÐÂµ×ÅÌÊÇ·ñÍêÈ«Í£Ö¹µÄ×´Ì¬
+        // ï¿½ï¿½ï¿½Âµï¿½ï¿½ï¿½ï¿½Ç·ï¿½ï¿½ï¿½È«Í£Ö¹ï¿½ï¿½×´Ì¬
         Subsystem::Chassis::check_is_stopped(); 
 
-        // È«¾Ö¶¨Î»Àï³Ì¼ÆÍÆËã 
+        // È«ï¿½Ö¶ï¿½Î»ï¿½ï¿½Ì¼ï¿½ï¿½ï¿½ï¿½ï¿½ 
         Subsystem::PoseEstimator::update_position_20ms_tick(encoders.getAllCounts(), App::g_state.physical.pose.yaw);
 
-        // µ×ÅÌ¿ØÖÆËã·¨¸üÐÂ
+        // ï¿½ï¿½ï¿½Ì¿ï¿½ï¿½ï¿½ï¿½ã·¨ï¿½ï¿½ï¿½ï¿½
         Subsystem::Chassis::update_20ms_tick();      
     }
     
@@ -60,75 +68,75 @@ extern "C" void LPUART1_IRQHandler(void)
 {
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART1))
     {
-        // ½ÓÊÕÖÐ¶Ï´¥·¢£ºµ÷ÓÃ uart_cam1 µÄÖÐ¶Ï·þÎñº¯Êý
+        // ï¿½ï¿½ï¿½ï¿½ï¿½Ð¶Ï´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ uart_cam1 ï¿½ï¿½ï¿½Ð¶Ï·ï¿½ï¿½ï¿½ï¿½ï¿½
         uart_cam2.rxisr();
         
 
-    // #if DEBUG_UART_USE_INTERRUPT                        // Èç¹û¿ªÆô debug ´®¿ÚÖÐ¶Ï
-    //     debug_interrupr_handler();                      // µ÷ÓÃ debug ´®¿Ú½ÓÊÕ´¦Àíº¯Êý Êý¾Ý»á±» debug »·ÐÎ»º³åÇø¶ÁÈ¡
-    // #endif                                              // Èç¹ûÐÞ¸ÄÁË DEBUG_UART_INDEX ÄÇÕâ¶Î´úÂëÐèÒª·Åµ½¶ÔÓ¦µÄ´®¿ÚÖÐ¶ÏÈ¥
+    // #if DEBUG_UART_USE_INTERRUPT                        // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ debug ï¿½ï¿½ï¿½ï¿½ï¿½Ð¶ï¿½
+    //     debug_interrupr_handler();                      // ï¿½ï¿½ï¿½ï¿½ debug ï¿½ï¿½ï¿½Ú½ï¿½ï¿½Õ´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½Ý»á±» debug ï¿½ï¿½ï¿½Î»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¡
+    // #endif                                              // ï¿½ï¿½ï¿½ï¿½Þ¸ï¿½ï¿½ï¿½ DEBUG_UART_INDEX ï¿½ï¿½ï¿½ï¿½Î´ï¿½ï¿½ï¿½ï¿½ï¿½Òªï¿½Åµï¿½ï¿½ï¿½Ó¦ï¿½Ä´ï¿½ï¿½ï¿½ï¿½Ð¶ï¿½È¥
     }
         
-    LPUART_ClearStatusFlags(LPUART1, kLPUART_RxOverrunFlag);    // ²»ÔÊÐíÉ¾³ý
+    LPUART_ClearStatusFlags(LPUART1, kLPUART_RxOverrunFlag);    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½É¾ï¿½ï¿½
 }
 
 void LPUART2_IRQHandler(void)
 {
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART2))
     {
-        // ½ÓÊÕÖÐ¶Ï
+        // ï¿½ï¿½ï¿½ï¿½ï¿½Ð¶ï¿½
         
     }
         
-    LPUART_ClearStatusFlags(LPUART2, kLPUART_RxOverrunFlag);    // ²»ÔÊÐíÉ¾³ý
+    LPUART_ClearStatusFlags(LPUART2, kLPUART_RxOverrunFlag);    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½É¾ï¿½ï¿½
 }
 
 void LPUART3_IRQHandler(void)
 {
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART3))
     {
-        // ½ÓÊÕÖÐ¶Ï
+        // ï¿½ï¿½ï¿½ï¿½ï¿½Ð¶ï¿½
         
     }
         
-    LPUART_ClearStatusFlags(LPUART3, kLPUART_RxOverrunFlag);    // ²»ÔÊÐíÉ¾³ý
+    LPUART_ClearStatusFlags(LPUART3, kLPUART_RxOverrunFlag);    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½É¾ï¿½ï¿½
 }
 
 extern "C" void LPUART4_IRQHandler(void)
 {
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART4))
     {
-        // ½ÓÊÕÖÐ¶Ï´¥·¢£ºµ÷ÓÃ uart_cam2 µÄÖÐ¶Ï·þÎñº¯Êý
+        // ï¿½ï¿½ï¿½ï¿½ï¿½Ð¶Ï´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ uart_cam2 ï¿½ï¿½ï¿½Ð¶Ï·ï¿½ï¿½ï¿½ï¿½ï¿½
         uart_cam1.rxisr();
 
-        // ½ÓÊÕÖÐ¶Ï 
+        // ï¿½ï¿½ï¿½ï¿½ï¿½Ð¶ï¿½ 
         // flexio_camera_uart_handler();
         // gnss_uart_callback();
     }
         
-    LPUART_ClearStatusFlags(LPUART4, kLPUART_RxOverrunFlag);    // ²»ÔÊÐíÉ¾³ý
+    LPUART_ClearStatusFlags(LPUART4, kLPUART_RxOverrunFlag);    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½É¾ï¿½ï¿½
 }
 
 void LPUART5_IRQHandler(void)
 {
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART5))
     {
-        // ½ÓÊÕÖÐ¶Ï
+        // ï¿½ï¿½ï¿½ï¿½ï¿½Ð¶ï¿½
         camera_uart_handler();
     }
         
-    LPUART_ClearStatusFlags(LPUART5, kLPUART_RxOverrunFlag);    // ²»ÔÊÐíÉ¾³ý
+    LPUART_ClearStatusFlags(LPUART5, kLPUART_RxOverrunFlag);    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½É¾ï¿½ï¿½
 }
 
 void LPUART6_IRQHandler(void)
 {
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART6))
     {
-        // ½ÓÊÕÖÐ¶Ï
+        // ï¿½ï¿½ï¿½ï¿½ï¿½Ð¶ï¿½
         
     }
         
-    LPUART_ClearStatusFlags(LPUART6, kLPUART_RxOverrunFlag);    // ²»ÔÊÐíÉ¾³ý
+    LPUART_ClearStatusFlags(LPUART6, kLPUART_RxOverrunFlag);    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½É¾ï¿½ï¿½
 }
 
 
@@ -136,14 +144,14 @@ extern "C" void LPUART8_IRQHandler(void)
 {
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART8))
     {
-        // ½ÓÊÕÖÐ¶Ï
+        // ï¿½ï¿½ï¿½ï¿½ï¿½Ð¶ï¿½
         if(NULL != wireless_module_uart_handler)
         {
             wireless_module_uart_handler();
         }
     }
         
-    LPUART_ClearStatusFlags(LPUART8, kLPUART_RxOverrunFlag);    // ²»ÔÊÐíÉ¾³ý
+    LPUART_ClearStatusFlags(LPUART8, kLPUART_RxOverrunFlag);    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½É¾ï¿½ï¿½
 }
 
 
@@ -151,7 +159,7 @@ void GPIO1_Combined_0_15_IRQHandler(void)
 {
     if(exti_flag_get(B0))
     {
-        exti_flag_clear(B0);// Çå³ýÖÐ¶Ï±êÖ¾Î»
+        exti_flag_clear(B0);// ï¿½ï¿½ï¿½ï¿½Ð¶Ï±ï¿½Ö¾Î»
     }
     
 }
@@ -162,7 +170,7 @@ void GPIO1_Combined_16_31_IRQHandler(void)
     wireless_module_spi_handler();
     if(exti_flag_get(B16))
     {
-        exti_flag_clear(B16); // Çå³ýÖÐ¶Ï±êÖ¾Î»
+        exti_flag_clear(B16); // ï¿½ï¿½ï¿½ï¿½Ð¶Ï±ï¿½Ö¾Î»
     }
 
     
@@ -174,20 +182,20 @@ void GPIO2_Combined_0_15_IRQHandler(void)
     
     if(exti_flag_get(C0))
     {
-        exti_flag_clear(C0);// Çå³ýÖÐ¶Ï±êÖ¾Î»
+        exti_flag_clear(C0);// ï¿½ï¿½ï¿½ï¿½Ð¶Ï±ï¿½Ö¾Î»
     }
 
 }
 
 void GPIO2_Combined_16_31_IRQHandler(void)
 {
-    // -----------------* ToF INT ¸üÐÂÖÐ¶Ï Ô¤ÖÃÖÐ¶Ï´¦Àíº¯Êý *-----------------
+    // -----------------* ToF INT ï¿½ï¿½ï¿½ï¿½ï¿½Ð¶ï¿½ Ô¤ï¿½ï¿½ï¿½Ð¶Ï´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ *-----------------
     tof_module_exti_handler();
-    // -----------------* ToF INT ¸üÐÂÖÐ¶Ï Ô¤ÖÃÖÐ¶Ï´¦Àíº¯Êý *-----------------
+    // -----------------* ToF INT ï¿½ï¿½ï¿½ï¿½ï¿½Ð¶ï¿½ Ô¤ï¿½ï¿½ï¿½Ð¶Ï´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ *-----------------
     
     if(exti_flag_get(C16))
     {
-        exti_flag_clear(C16); // Çå³ýÖÐ¶Ï±êÖ¾Î»
+        exti_flag_clear(C16); // ï¿½ï¿½ï¿½ï¿½Ð¶Ï±ï¿½Ö¾Î»
     }
     
 }
@@ -200,7 +208,7 @@ void GPIO3_Combined_0_15_IRQHandler(void)
 
     if(exti_flag_get(D4))
     {
-        exti_flag_clear(D4);// Çå³ýÖÐ¶Ï±êÖ¾Î»
+        exti_flag_clear(D4);// ï¿½ï¿½ï¿½ï¿½Ð¶Ï±ï¿½Ö¾Î»
     }
 }
 
@@ -208,8 +216,8 @@ void GPIO3_Combined_0_15_IRQHandler(void)
 
 void CSI_IRQHandler(void)
 {
-    CSI_DriverIRQHandler();     // µ÷ÓÃSDK×Ô´øµÄÖÐ¶Ïº¯Êý Õâ¸öº¯Êý×îºó»áµ÷ÓÃÎÒÃÇÉèÖÃµÄ»Øµ÷º¯Êý
-    __DSB();                    // Êý¾ÝÍ¬²½¸ôÀë
+    CSI_DriverIRQHandler();     // ï¿½ï¿½ï¿½ï¿½SDKï¿½Ô´ï¿½ï¿½ï¿½ï¿½Ð¶Ïºï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÃµÄ»Øµï¿½ï¿½ï¿½ï¿½ï¿½
+    __DSB();                    // ï¿½ï¿½ï¿½ï¿½Í¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 }
 
 
@@ -217,14 +225,14 @@ void CSI_IRQHandler(void)
 
 
 /*
-ÖÐ¶Ïº¯ÊýÃû³Æ£¬ÓÃÓÚÉèÖÃ¶ÔÓ¦¹¦ÄÜµÄÖÐ¶Ïº¯Êý
-Sample usage:µ±Ç°ÆôÓÃÁËÖÜÆÚ¶¨Ê±Æ÷ÖÐ¶Ï
+ï¿½Ð¶Ïºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Æ£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã¶ï¿½Ó¦ï¿½ï¿½ï¿½Üµï¿½ï¿½Ð¶Ïºï¿½ï¿½ï¿½
+Sample usage:ï¿½ï¿½Ç°ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ú¶ï¿½Ê±ï¿½ï¿½ï¿½Ð¶ï¿½
 void PIT_IRQHandler(void)
 {
-    //Îñ±ØÇå³ý±êÖ¾Î»
+    //ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¾Î»
     __DSB();
 }
-¼ÇµÃ½øÈëÖÐ¶ÏºóÇå³ý±êÖ¾Î»
+ï¿½ÇµÃ½ï¿½ï¿½ï¿½ï¿½Ð¶Ïºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¾Î»
 CTI0_ERROR_IRQHandler
 CTI1_ERROR_IRQHandler
 CORE_IRQHandler

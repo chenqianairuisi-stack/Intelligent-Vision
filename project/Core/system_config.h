@@ -19,6 +19,13 @@ namespace SystemConfig {
     static constexpr float PIT_CH0_DT_S = static_cast<float>(PIT_CH0_PERIOD_MS) * 0.001f;  // 转换为秒
     static constexpr float PIT_CH1_DT_S = static_cast<float>(PIT_CH1_PERIOD_MS) * 0.001f;  // 转换为秒
 
+    // 轮速内环(快环)：跑在 1ms 定时器里分频，规划/yaw 仍在 20ms 慢环
+    static constexpr uint32_t SPEED_LOOP_PERIOD_MS = 5U;          // 快环周期 ms（200Hz）
+    static constexpr float SPEED_LOOP_DT_S = static_cast<float>(SPEED_LOOP_PERIOD_MS) * 0.001f;
+    // 速度环积分按节拍缩放：原本按 20ms 整定的 ki 数值在快环下保持等效，免重调
+    static constexpr float SPEED_LOOP_KI_SCALE =
+        static_cast<float>(SPEED_LOOP_PERIOD_MS) / static_cast<float>(PIT_CH1_PERIOD_MS);
+
     // 机械参数
     static constexpr float WHEEL_RADIUS = 3.15f;                // 轮子半径，单位：厘米
     static constexpr float HALF_X_AXIS = 9.0f;                  // x 轴半轴距，单位：厘米

@@ -70,6 +70,8 @@ struct RobotState {
     // 4. 控制层 (Tracker 写入，底盘 Chassis 读取)
     struct {
         Pose2D current_target = {0.0f, 0.0f, SystemConfig::ENTRY_YAW};   // 当前目标位姿 (Chassis 直接追这个)
+        Point2D segment_start = {0.0f, 0.0f};                            // 当前直线段起点，供底盘 Stanley 横纠贴线
+        float segment_end_speed = 0.0f;                                  // 当前段末保留速度 cm/s（过弯不停顿>0，需停稳处=0）
         TrackerState tracker_state = TrackerState::NONE;                 // 当前 Tracker 状态
         ControlMode mode = ControlMode::AUTO_TRACKING;                   // 当前控制模式 (默认自动循迹)
     } control;

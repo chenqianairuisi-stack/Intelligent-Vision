@@ -40,7 +40,16 @@ struct TuningConfig {
         float vision_request_interval_ms; // Reserved: ART1 pose stream is requested once, then consumed continuously
         float vision_reject_dist;     // 视觉轴向校正最大接受误差 cm
         float ang_tolerance;          // 航向角死区 rad
+        float corner_pause_speed;     // 拐点略停切换阈值 cm/s（合速度低于此即切下一段，替代等完全停稳）
     } tracker;
+
+    // Stanley 式平移横向纠偏（贴路径线跟踪，运动控制阶段新增）
+    struct {
+        bool  enable;        // 总开关：false 则退回纯朝目标点收敛
+        float k_ct;          // 横向误差增益
+        float k_soft;        // 软化速度 cm/s（防静止除零、低速平滑）
+        float v_lat_max;     // 横纠速度上限 cm/s
+    } stanley;
 
     struct {
         float mahony_kp;  // Mahony 姿态融合比例系数
@@ -55,25 +64,72 @@ struct TuningConfig {
 
     struct {
         float encoder_latency_gain; // Encoder odometry latency compensation gain
-        float vision_latency_ms;    // Vision pose pipeline latency estimate ms
+        float vision_latency_ms;    // Vision pose pipeline latency estimate ms (估计失效时的回退默认值)
+
+        // 拐点对齐的实时视觉延时估计 (foundation 阶段新增)
+        bool  enable_estimation;    // 总开关：false 则固定使用 vision_latency_ms
+        float turn_thresh_deg;      // 拐点触发：速度矢量转角阈值 deg
+        float enc_v_min;            // 编码器速度门 cm/20ms-tick（低于此判为静止/原地旋转）
+        float vis_v_min;            // 视觉速度门 cm/frame
+        float refractory_ms;        // 同一拐点去抖最小间隔 ms
+        float l_min_ms;             // 估计延时接受下限 ms
+        float l_max_ms;             // 估计延时接受上限 ms
+        float dtheta_tol_deg;       // 编码器/视觉转角量级一致性容差 deg
+        float lowpass_alpha;        // L 低通系数 (0~1)
+        float l_stale_ms;           // L 过期时间，超时回退默认 ms
     } latency;
+
+    // 炸弹推入后按需等待爆炸（运动控制阶段新增）
+    struct {
+        float explosion_wait_ms;    // 引信时长：仅当下一步需穿过被炸墙时等待 ms（上车实测标定）
+    } bomb;
 };
 
 namespace TuningDefaults {
     inline constexpr float DEFAULT_REACH_RADIUS_MIN = 0.20f;
-    inline constexpr float DEFAULT_CORNER_PASS_SPEED = 0.0f;
+    inline constexpr float DEFAULT_CORNER_PASS_SPEED = 30.0f;  // 过弯保留速度 cm/s（>0 才能真正不停顿过弯）
     inline constexpr float DEFAULT_BRAKE_LIMIT = 0.85f;
     inline constexpr float DEFAULT_ENCODER_LATENCY_GAIN = 1.00f;
     inline constexpr float DEFAULT_VISION_LATENCY_MS = 300.0f;
     inline constexpr float DEFAULT_VISION_REQUEST_INTERVAL_MS = 100.0f;
     inline constexpr float DEFAULT_VISION_REJECT_DIST = 3.0f;
 
+    // 拐点对齐实时延时估计默认参数
+    inline constexpr bool  DEFAULT_LATENCY_EST_ENABLE = true;
+    inline constexpr float DEFAULT_TURN_THRESH_DEG    = 45.0f;
+    inline constexpr float DEFAULT_ENC_V_MIN          = 0.30f;   // cm/20ms ≈ 15 cm/s
+    inline constexpr float DEFAULT_VIS_V_MIN          = 0.50f;   // cm/frame
+    inline constexpr float DEFAULT_REFRACTORY_MS      = 100.0f;
+    inline constexpr float DEFAULT_L_MIN_MS           = 50.0f;
+    inline constexpr float DEFAULT_L_MAX_MS           = 400.0f;
+    inline constexpr float DEFAULT_DTHETA_TOL_DEG     = 30.0f;
+    inline constexpr float DEFAULT_L_LOWPASS_ALPHA    = 0.30f;
+    inline constexpr float DEFAULT_L_STALE_MS         = 5000.0f;
+
+    // 运动控制阶段默认参数
+    inline constexpr float DEFAULT_CORNER_PAUSE_SPEED = 12.0f;  // cm/s
+    inline constexpr bool  DEFAULT_STANLEY_ENABLE     = true;
+    inline constexpr float DEFAULT_STANLEY_K_CT       = 1.2f;
+    inline constexpr float DEFAULT_STANLEY_K_SOFT     = 20.0f;  // cm/s
+    inline constexpr float DEFAULT_STANLEY_V_LAT_MAX  = 40.0f;  // cm/s
+    inline constexpr float DEFAULT_EXPLOSION_WAIT_MS  = 1500.0f;
+
+    inline constexpr float MIN_BRAKE_LIMIT = 0.0f;
+    inline constexpr float MAX_BRAKE_LIMIT = 1.0f;
     inline constexpr float MIN_REACH_RADIUS_MIN = 0.10f;
     inline constexpr float MAX_REACH_RADIUS_MIN = 3.0f;
     inline constexpr float MIN_CORNER_PASS_SPEED = 0.0f;
-    inline constexpr float MAX_CORNER_PASS_SPEED = 0.0f;
-    inline constexpr float MIN_BRAKE_LIMIT = 0.10f;
-    inline constexpr float MAX_BRAKE_LIMIT = 2.0f;
+    inline constexpr float MAX_CORNER_PASS_SPEED = 80.0f;
+    inline constexpr float MIN_CORNER_PAUSE_SPEED = 0.0f;
+    inline constexpr float MAX_CORNER_PAUSE_SPEED = 50.0f;
+    inline constexpr float MIN_STANLEY_K_CT = 0.0f;
+    inline constexpr float MAX_STANLEY_K_CT = 10.0f;
+    inline constexpr float MIN_STANLEY_K_SOFT = 0.1f;
+    inline constexpr float MAX_STANLEY_K_SOFT = 200.0f;
+    inline constexpr float MIN_STANLEY_V_LAT_MAX = 0.0f;
+    inline constexpr float MAX_STANLEY_V_LAT_MAX = 200.0f;
+    inline constexpr float MIN_EXPLOSION_WAIT_MS = 0.0f;
+    inline constexpr float MAX_EXPLOSION_WAIT_MS = 10000.0f;
     inline constexpr float MIN_ENCODER_LATENCY_GAIN = 0.01f;
     inline constexpr float MAX_ENCODER_LATENCY_GAIN = 2.00f;
     inline constexpr float MIN_VISION_LATENCY_MS = 0.0f;
@@ -139,6 +195,28 @@ namespace TuningDefaults {
                                    MAX_VISION_LATENCY_MS,
                                    DEFAULT_VISION_LATENCY_MS) || changed;
 
+        // 运动控制阶段参数修复
+        changed = clamp_if_outside(config.tracker.corner_pause_speed,
+                                   MIN_CORNER_PAUSE_SPEED,
+                                   MAX_CORNER_PAUSE_SPEED,
+                                   DEFAULT_CORNER_PAUSE_SPEED) || changed;
+        changed = clamp_if_outside(config.stanley.k_ct,
+                                   MIN_STANLEY_K_CT,
+                                   MAX_STANLEY_K_CT,
+                                   DEFAULT_STANLEY_K_CT) || changed;
+        changed = clamp_if_outside(config.stanley.k_soft,
+                                   MIN_STANLEY_K_SOFT,
+                                   MAX_STANLEY_K_SOFT,
+                                   DEFAULT_STANLEY_K_SOFT) || changed;
+        changed = clamp_if_outside(config.stanley.v_lat_max,
+                                   MIN_STANLEY_V_LAT_MAX,
+                                   MAX_STANLEY_V_LAT_MAX,
+                                   DEFAULT_STANLEY_V_LAT_MAX) || changed;
+        changed = clamp_if_outside(config.bomb.explosion_wait_ms,
+                                   MIN_EXPLOSION_WAIT_MS,
+                                   MAX_EXPLOSION_WAIT_MS,
+                                   DEFAULT_EXPLOSION_WAIT_MS) || changed;
+
         return changed;
     }
 }
@@ -162,11 +240,18 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
         0.3f,    // reach_radius
         TuningDefaults::DEFAULT_REACH_RADIUS_MIN,   // reach_radius_min
         TuningDefaults::DEFAULT_CORNER_PASS_SPEED,  // corner_pass_speed
-        0.0f,    // corner_switch_window
+        3.0f,    // corner_switch_window —— 提前切换过弯起步值 cm（保守，现场用 !SN 加大，上限 8cm）
         0.5f,    // corner_line_tolerance
         TuningDefaults::DEFAULT_VISION_REQUEST_INTERVAL_MS,  // vision_request_interval_ms
         3.0f,    // vision_reject_dist
-        0.006f   // ang_tolerance
+        0.006f,  // ang_tolerance
+        TuningDefaults::DEFAULT_CORNER_PAUSE_SPEED  // corner_pause_speed
+    },
+    {
+        false,                                     // stanley.enable —— 暂关：本底盘横移会跑偏，持续横纠会正反馈冲出赛道；退回纯朝点全向
+        TuningDefaults::DEFAULT_STANLEY_K_CT,       // stanley.k_ct
+        TuningDefaults::DEFAULT_STANLEY_K_SOFT,     // stanley.k_soft
+        TuningDefaults::DEFAULT_STANLEY_V_LAT_MAX   // stanley.v_lat_max
     },
     {
         1.0f,    // mahony_kp
@@ -179,6 +264,19 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
     },
     {
         TuningDefaults::DEFAULT_ENCODER_LATENCY_GAIN,  // encoder_latency_gain
-        TuningDefaults::DEFAULT_VISION_LATENCY_MS      // vision_latency_ms
+        TuningDefaults::DEFAULT_VISION_LATENCY_MS,     // vision_latency_ms
+        TuningDefaults::DEFAULT_LATENCY_EST_ENABLE,    // enable_estimation
+        TuningDefaults::DEFAULT_TURN_THRESH_DEG,       // turn_thresh_deg
+        TuningDefaults::DEFAULT_ENC_V_MIN,             // enc_v_min
+        TuningDefaults::DEFAULT_VIS_V_MIN,             // vis_v_min
+        TuningDefaults::DEFAULT_REFRACTORY_MS,         // refractory_ms
+        TuningDefaults::DEFAULT_L_MIN_MS,              // l_min_ms
+        TuningDefaults::DEFAULT_L_MAX_MS,              // l_max_ms
+        TuningDefaults::DEFAULT_DTHETA_TOL_DEG,        // dtheta_tol_deg
+        TuningDefaults::DEFAULT_L_LOWPASS_ALPHA,       // lowpass_alpha
+        TuningDefaults::DEFAULT_L_STALE_MS             // l_stale_ms
+    },
+    {
+        TuningDefaults::DEFAULT_EXPLOSION_WAIT_MS      // bomb.explosion_wait_ms
     }
 };
