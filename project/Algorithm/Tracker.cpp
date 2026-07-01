@@ -133,7 +133,10 @@ namespace {
     }
 
     [[gnu::always_inline]] inline float terminal_reach_radius() {
-        return FINAL_LOCK_RADIUS_CM;
+        if (!std::isfinite(tune.tracker.reach_radius_min) || tune.tracker.reach_radius_min < 0.0f) {
+            return FINAL_LOCK_RADIUS_CM;  // 降级默认值
+        }
+        return tune.tracker.reach_radius_min;
     }
 
     [[gnu::always_inline]] inline float waypoint_reach_radius() {
@@ -587,7 +590,7 @@ __attribute__((section(".ramfunc"))) void update_target() {
 
     if (!finish_without_stop_at_last &&
         is_last_point &&
-        check_arrival(target_phys, FINAL_LOCK_RADIUS_CM)) {
+        check_arrival(target_phys, terminal_reach_radius())) {
         Point2D hold = current_pose_point();
         ctrl.current_target.x = hold.x;
         ctrl.current_target.y = hold.y;
