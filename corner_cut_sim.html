@@ -1,0 +1,1330 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>切向过弯模拟</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f6f8;
+      --panel: #ffffff;
+      --ink: #17202a;
+      --muted: #5f6c7b;
+      --line: #d8dee6;
+      --grid: #e7ecf1;
+      --track: #2f3640;
+      --blue: #1665d8;
+      --cyan: #159a9c;
+      --green: #138a45;
+      --amber: #c47a13;
+      --red: #c84036;
+      --violet: #7b4cc2;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: "Microsoft YaHei", "Segoe UI", Arial, sans-serif;
+      letter-spacing: 0;
+    }
+
+    button,
+    input,
+    select {
+      font: inherit;
+    }
+
+    .app {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 340px;
+      gap: 18px;
+      width: min(1440px, 100%);
+      min-height: 100vh;
+      margin: 0 auto;
+      padding: 18px;
+    }
+
+    .stage {
+      position: relative;
+      min-height: 620px;
+      border: 1px solid var(--line);
+      background: #fbfcfd;
+      overflow: hidden;
+    }
+
+    #scene {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+
+    .panel {
+      display: grid;
+      grid-template-rows: auto auto auto 1fr;
+      gap: 14px;
+      min-width: 0;
+    }
+
+    .block {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      padding: 14px;
+    }
+
+    .title {
+      margin: 0 0 10px;
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    .subtitle {
+      margin: -4px 0 12px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .toolbar {
+      display: grid;
+      grid-template-columns: 1fr 42px 42px;
+      gap: 8px;
+    }
+
+    .btn {
+      height: 38px;
+      border: 1px solid #b8c2cf;
+      background: #f9fafb;
+      color: var(--ink);
+      cursor: pointer;
+      border-radius: 6px;
+    }
+
+    .btn.primary {
+      background: var(--blue);
+      color: #fff;
+      border-color: var(--blue);
+      font-weight: 700;
+    }
+
+    .btn:focus-visible,
+    input:focus-visible,
+    select:focus-visible {
+      outline: 2px solid rgba(22, 101, 216, 0.35);
+      outline-offset: 2px;
+    }
+
+    .segmented {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      border: 1px solid #b8c2cf;
+      border-radius: 6px;
+      overflow: hidden;
+    }
+
+    .segmented button {
+      height: 34px;
+      border: 0;
+      border-right: 1px solid #b8c2cf;
+      background: #f7f9fb;
+      cursor: pointer;
+      color: var(--ink);
+      white-space: nowrap;
+      font-size: 13px;
+    }
+
+    .segmented button:last-child {
+      border-right: 0;
+    }
+
+    .segmented button.active {
+      background: #e8f0fe;
+      color: var(--blue);
+      font-weight: 700;
+    }
+
+    .form {
+      display: grid;
+      gap: 12px;
+    }
+
+    .field {
+      display: grid;
+      gap: 6px;
+    }
+
+    .label-row,
+    .readout-row {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .label-row span,
+    .readout-row span {
+      min-width: 0;
+    }
+
+    .value {
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--blue);
+    }
+
+    select {
+      width: 100%;
+      height: 36px;
+      border: 1px solid #b8c2cf;
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      padding: 0 10px;
+    }
+
+    .toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--ink);
+      line-height: 1.4;
+    }
+
+    .toggle input {
+      width: 16px;
+      height: 16px;
+      accent-color: var(--blue);
+    }
+
+    .readouts {
+      display: grid;
+      gap: 7px;
+      font-size: 13px;
+    }
+
+    .readout-row {
+      border-bottom: 1px solid #edf1f5;
+      padding-bottom: 6px;
+    }
+
+    .readout-row:last-child {
+      border-bottom: 0;
+      padding-bottom: 0;
+    }
+
+    #chart {
+      width: 100%;
+      height: 150px;
+      display: block;
+      border: 1px solid var(--line);
+      background: #fbfcfd;
+    }
+
+    .legend {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px 10px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.3;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-width: 0;
+    }
+
+    .swatch {
+      width: 18px;
+      height: 3px;
+      border-radius: 2px;
+      background: var(--blue);
+      flex: 0 0 auto;
+    }
+
+    .swatch.amber {
+      background: var(--amber);
+    }
+
+    .swatch.red {
+      background: var(--red);
+    }
+
+    .swatch.green {
+      background: var(--green);
+    }
+
+    .swatch.violet {
+      background: var(--violet);
+    }
+
+    @media (max-width: 980px) {
+      .app {
+        grid-template-columns: 1fr;
+        padding: 12px;
+      }
+
+      .stage {
+        min-height: 540px;
+      }
+
+      .panel {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 560px) {
+      .stage {
+        min-height: 430px;
+      }
+
+      .toolbar {
+        grid-template-columns: 1fr 38px 38px;
+      }
+
+      .segmented {
+        grid-template-columns: 1fr;
+      }
+
+      .segmented button {
+        border-right: 0;
+        border-bottom: 1px solid #b8c2cf;
+      }
+
+      .segmented button:last-child {
+        border-bottom: 0;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <section class="stage" aria-label="切向过弯俯视模拟">
+      <canvas id="scene"></canvas>
+    </section>
+
+    <aside class="panel">
+      <section class="block">
+        <h1 class="title">切向过弯模拟</h1>
+        <div class="toolbar">
+          <button id="play" class="btn primary" type="button" title="播放或暂停">暂停</button>
+          <button id="step" class="btn" type="button" title="单步推进">步</button>
+          <button id="reset" class="btn" type="button" title="复位">↺</button>
+        </div>
+      </section>
+
+      <section class="block form">
+        <div class="field">
+          <div class="label-row">
+            <span>模式</span>
+          </div>
+          <div class="segmented" id="preset">
+            <button type="button" data-preset="current" class="active">当前配置</button>
+            <button type="button" data-preset="carry">带速切向</button>
+            <button type="button" data-preset="stop">逐点停车</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <label class="label-row" for="pathSelect">
+            <span>路径</span>
+          </label>
+          <select id="pathSelect">
+            <option value="l">L 形拐角</option>
+            <option value="z">连续切向</option>
+            <option value="u">回形折返</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label class="label-row" for="cornerSpeed">
+            <span>过弯保留速度</span>
+            <span class="value" id="cornerSpeedOut">0 cm/s</span>
+          </label>
+          <input id="cornerSpeed" type="range" min="0" max="80" step="1" value="0">
+        </div>
+
+        <div class="field">
+          <label class="label-row" for="switchWindow">
+            <span>提前切换窗口</span>
+            <span class="value" id="switchWindowOut">0.0 cm</span>
+          </label>
+          <input id="switchWindow" type="range" min="0" max="8" step="0.1" value="0">
+        </div>
+
+        <div class="field">
+          <label class="label-row" for="lineTolerance">
+            <span>横向允许误差</span>
+            <span class="value" id="lineToleranceOut">0.5 cm</span>
+          </label>
+          <input id="lineTolerance" type="range" min="0.1" max="2" step="0.1" value="0.5">
+        </div>
+
+        <label class="toggle">
+          <input id="stanleyToggle" type="checkbox">
+          <span>Stanley 贴线横纠</span>
+        </label>
+
+        <label class="toggle">
+          <input id="ghostToggle" type="checkbox" checked>
+          <span>显示逐点停车对照</span>
+        </label>
+      </section>
+
+      <section class="block readouts">
+        <div class="readout-row"><span>当前航点</span><span class="value" id="wpRead">1 / 3</span></div>
+        <div class="readout-row"><span>剩余距离</span><span class="value" id="remainRead">0.0 cm</span></div>
+        <div class="readout-row"><span>速度大小</span><span class="value" id="speedRead">0.0 cm/s</span></div>
+        <div class="readout-row"><span>指令方向</span><span class="value" id="dirRead">0 deg</span></div>
+        <div class="readout-row"><span>切段次数</span><span class="value" id="switchRead">0</span></div>
+      </section>
+
+      <section class="block">
+        <canvas id="chart"></canvas>
+        <div class="legend" style="margin-top: 10px;">
+          <div class="legend-item"><span class="swatch"></span><span>当前轨迹</span></div>
+          <div class="legend-item"><span class="swatch red"></span><span>停车对照</span></div>
+          <div class="legend-item"><span class="swatch amber"></span><span>提前切段窗口</span></div>
+          <div class="legend-item"><span class="swatch green"></span><span>当前目标点</span></div>
+          <div class="legend-item"><span class="swatch violet"></span><span>速度曲线</span></div>
+        </div>
+      </section>
+    </aside>
+  </main>
+
+  <script>
+    const cfg = {
+      dt: 0.02,
+      gridSize: 20,
+      offsetX: 10,
+      offsetY: 10,
+      mapW: 12,
+      mapH: 16,
+      maxVel: 150,
+      maxAcc: 65,
+      brakeLimit: 0.85,
+      reachRadius: 0.3,
+      reachRadiusMin: 1.0,
+      cornerPauseSpeed: 2,
+      maxSwitchWindow: 8,
+      halfAxisSum: 19,
+      yawDeg: 90,
+      stanley: {
+        kCt: 1.2,
+        kSoft: 20,
+        vLatMax: 40
+      }
+    };
+
+    const paths = {
+      l: {
+        start: { x: 2, y: 2 },
+        waypoints: [{ x: 2, y: 8 }, { x: 8, y: 8 }]
+      },
+      z: {
+        start: { x: 2, y: 2 },
+        waypoints: [{ x: 2, y: 7 }, { x: 8, y: 7 }, { x: 8, y: 12 }]
+      },
+      u: {
+        start: { x: 3, y: 3 },
+        waypoints: [{ x: 3, y: 11 }, { x: 8, y: 11 }, { x: 8, y: 5 }, { x: 5, y: 5 }]
+      }
+    };
+
+    const canvas = document.getElementById("scene");
+    const ctx = canvas.getContext("2d");
+    const chart = document.getElementById("chart");
+    const chartCtx = chart.getContext("2d");
+    const playBtn = document.getElementById("play");
+    const stepBtn = document.getElementById("step");
+    const resetBtn = document.getElementById("reset");
+    const pathSelect = document.getElementById("pathSelect");
+    const cornerSpeed = document.getElementById("cornerSpeed");
+    const switchWindow = document.getElementById("switchWindow");
+    const lineTolerance = document.getElementById("lineTolerance");
+    const stanleyToggle = document.getElementById("stanleyToggle");
+    const ghostToggle = document.getElementById("ghostToggle");
+    const preset = document.getElementById("preset");
+
+    const cornerSpeedOut = document.getElementById("cornerSpeedOut");
+    const switchWindowOut = document.getElementById("switchWindowOut");
+    const lineToleranceOut = document.getElementById("lineToleranceOut");
+    const wpRead = document.getElementById("wpRead");
+    const remainRead = document.getElementById("remainRead");
+    const speedRead = document.getElementById("speedRead");
+    const dirRead = document.getElementById("dirRead");
+    const switchRead = document.getElementById("switchRead");
+
+    let running = true;
+    let lastTime = performance.now();
+    let accumulator = 0;
+    let activePreset = "current";
+    let mainSim;
+    let ghostSim;
+
+    function clamp(v, lo, hi) {
+      return Math.max(lo, Math.min(hi, v));
+    }
+
+    function hypot(x, y) {
+      return Math.hypot(x, y);
+    }
+
+    function gridToPhysical(p) {
+      return {
+        x: p.x * cfg.gridSize + cfg.offsetX,
+        y: p.y * cfg.gridSize + cfg.offsetY
+      };
+    }
+
+    function copyPoint(p) {
+      return { x: p.x, y: p.y };
+    }
+
+    function angleDeg(vx, vy) {
+      const deg = Math.atan2(vy, vx) * 180 / Math.PI;
+      return deg < 0 ? deg + 360 : deg;
+    }
+
+    function makeParams(overrides = {}) {
+      return {
+        cornerPassSpeed: Number(cornerSpeed.value),
+        cornerSwitchWindow: Number(switchWindow.value),
+        cornerLineTolerance: Number(lineTolerance.value),
+        stanleyEnabled: stanleyToggle.checked,
+        // 固件默认 s_stop_at_every_waypoint=true：当前配置=逐点停车跑直线
+        stopEveryWaypoint: activePreset === "stop" || activePreset === "current",
+        responseTau: 0.1,
+        ...overrides
+      };
+    }
+
+    class Planner {
+      constructor() {
+        this.currentV = 0;
+      }
+
+      reset() {
+        this.currentV = 0;
+      }
+
+      velocityPlanning1d(dx, dy, endSpeed) {
+        const distance = hypot(dx, dy);
+        const maxSpeed = cfg.maxVel;
+        const maxAcc = cfg.maxAcc;
+        const brakeAcc = maxAcc * cfg.brakeLimit;
+        const targetEndSpeed = clamp(endSpeed, 0, maxSpeed);
+
+        if (distance < 0.001) {
+          this.currentV = 0;
+          return { vx: 0, vy: 0 };
+        }
+
+        let brakeDist = (maxSpeed * maxSpeed - targetEndSpeed * targetEndSpeed) / (2 * brakeAcc);
+        brakeDist = Math.max(0, brakeDist);
+
+        let targetV = maxSpeed;
+        if (distance <= brakeDist) {
+          targetV = Math.sqrt(targetEndSpeed * targetEndSpeed + 2 * brakeAcc * distance);
+          if (targetEndSpeed > 0.1 && targetV < targetEndSpeed) {
+            targetV = targetEndSpeed;
+          }
+        }
+
+        const maxDvAcc = maxAcc * cfg.dt;
+        const maxDvDec = brakeAcc * cfg.dt;
+        if (targetV > this.currentV) {
+          this.currentV = Math.min(this.currentV + maxDvAcc, targetV);
+        } else {
+          this.currentV = Math.max(this.currentV - maxDvDec, targetV);
+        }
+
+        const invDist = 1 / distance;
+        return {
+          vx: this.currentV * dx * invDist,
+          vy: this.currentV * dy * invDist
+        };
+      }
+    }
+
+    class Sim {
+      constructor(pathKey, params) {
+        this.pathKey = pathKey;
+        this.params = params;
+        this.planner = new Planner();
+        this.reset();
+      }
+
+      reset() {
+        const def = paths[this.pathKey];
+        this.startGrid = copyPoint(def.start);
+        this.start = gridToPhysical(def.start);
+        this.physicalPath = def.waypoints.map(gridToPhysical);
+        this.wpIdx = 0;
+        this.segmentStart = copyPoint(this.start);
+        this.target = copyPoint(this.physicalPath[0]);
+        this.pose = { x: this.start.x, y: this.start.y, yaw: cfg.yawDeg };
+        this.commandVel = { vx: 0, vy: 0 };
+        this.actualVel = { vx: 0, vy: 0 };
+        this.localVel = { vx: 0, vy: 0, vw: 0 };
+        this.wheels = { lf: 0, lb: 0, rf: 0, rb: 0 };
+        this.segmentEndSpeed = 0;
+        this.finished = false;
+        this.stopSettling = false;
+        this.stopHold = null;
+        this.finalLock = false;
+        this.prevOut = { vx: 0, vy: 0 };
+        this.hasPrev = false;
+        this.switches = [];
+        this.trail = [{ x: this.pose.x, y: this.pose.y }];
+        this.history = [];
+        this.time = 0;
+        this.planner.reset();
+      }
+
+      speedMag() {
+        return hypot(this.actualVel.vx, this.actualVel.vy);
+      }
+
+      remainingToTarget() {
+        if (!this.target) return 0;
+        return hypot(this.target.x - this.pose.x, this.target.y - this.pose.y);
+      }
+
+      checkArrival(target, radius) {
+        const dx = target.x - this.pose.x;
+        const dy = target.y - this.pose.y;
+        return dx * dx + dy * dy <= radius * radius;
+      }
+
+      checkCornerSwitch(segmentStart, target) {
+        const sx = target.x - segmentStart.x;
+        const sy = target.y - segmentStart.y;
+        const absSx = Math.abs(sx);
+        const absSy = Math.abs(sy);
+        const switchWindowCm = clamp(this.params.cornerSwitchWindow, 0, cfg.maxSwitchWindow);
+        const lineTol = this.params.cornerLineTolerance;
+
+        if (absSx >= absSy && absSx > 0.001) {
+          const dir = sx >= 0 ? 1 : -1;
+          const remaining = (target.x - this.pose.x) * dir;
+          const lateralErr = Math.abs(target.y - this.pose.y);
+          return remaining <= switchWindowCm && lateralErr <= lineTol;
+        }
+
+        if (absSy > 0.001) {
+          const dir = sy >= 0 ? 1 : -1;
+          const remaining = (target.y - this.pose.y) * dir;
+          const lateralErr = Math.abs(target.x - this.pose.x);
+          return remaining <= switchWindowCm && lateralErr <= lineTol;
+        }
+
+        return false;
+      }
+
+      updateTarget() {
+        if (this.finished || this.wpIdx >= this.physicalPath.length) {
+          this.finished = true;
+          return;
+        }
+
+        this.segmentEndSpeed = 0;
+        let targetPhys = this.physicalPath[this.wpIdx];
+        const isLast = this.wpIdx === this.physicalPath.length - 1;
+
+        // 终点粘滞锁（对应固件 Tracker s_final_lock_active）：一旦进过终点半径就锁死，
+        // 之后每拍把 target 重设成"当前位姿"(dx≈0→规划器输出0)纯刹车、绝不再反追 targetPhys。
+        // 解决"reachRadiusMin 窗口 < 单拍滑行 → 惯性滑出后 velocityPlanning1d 速度矢量翻180°反向追点"的末端震荡。
+        if (isLast) {
+          const armRadius = Math.max(cfg.reachRadiusMin, 0.8);  // 窗口下限，保证至少一拍落进来把锁 arm 上
+          if (!this.finalLock && this.checkArrival(targetPhys, armRadius)) {
+            this.finalLock = true;
+          }
+          if (this.finalLock) {
+            if (!this.checkArrival(targetPhys, 5.0)) {
+              this.finalLock = false;  // 被大幅推离(远超惯性滑行)才解锁重新接管
+            } else {
+              this.target = copyPoint(this.pose);  // 每拍 hold 当前位姿 → 纯刹车不反追
+              if (this.speedMag() < 1) this.finished = true;
+              return;
+            }
+          }
+          this.target = copyPoint(targetPhys);  // 尚未进锁：正常朝终点收敛
+          return;
+        }
+
+        const mustStopAtWp = isLast || this.params.stopEveryWaypoint;
+        let arrived = false;
+
+        if (mustStopAtWp) {
+          const radius = isLast ? cfg.reachRadiusMin : cfg.reachRadius;
+          const settled = this.speedMag() < (isLast ? 1 : cfg.cornerPauseSpeed);
+
+          if (this.stopSettling) {
+            if (!settled) {
+              this.target = this.stopHold || copyPoint(this.pose);
+              this.segmentEndSpeed = 0;
+              return;
+            }
+            arrived = this.checkArrival(targetPhys, Math.max(radius, cfg.reachRadius));
+          } else if (this.checkArrival(targetPhys, radius)) {
+            if (!settled) {
+              this.stopSettling = true;
+              this.stopHold = copyPoint(this.pose);
+              this.target = copyPoint(this.pose);
+              this.segmentEndSpeed = 0;
+              return;
+            }
+            arrived = true;
+          }
+        } else {
+          this.segmentEndSpeed = clamp(this.params.cornerPassSpeed, 0, cfg.maxVel);
+          arrived = this.checkArrival(targetPhys, cfg.reachRadius) ||
+            this.checkCornerSwitch(this.segmentStart, targetPhys);
+        }
+
+        if (arrived) {
+          if (!isLast) {
+            this.switches.push({
+              x: this.pose.x,
+              y: this.pose.y,
+              t: this.time,
+              speed: this.speedMag(),
+              from: this.wpIdx
+            });
+            this.segmentStart = copyPoint(targetPhys);
+            this.wpIdx += 1;
+            this.stopSettling = false;
+            this.stopHold = null;
+            targetPhys = this.physicalPath[this.wpIdx];
+          } else if (this.speedMag() < 1.2) {
+            this.finished = true;
+          }
+        }
+
+        this.target = copyPoint(targetPhys);
+      }
+
+      followPathLine(target) {
+        const px = this.pose.x;
+        const py = this.pose.y;
+        const sx = this.segmentStart.x;
+        const sy = this.segmentStart.y;
+        const tx = target.x;
+        const ty = target.y;
+        const segDx = tx - sx;
+        const segDy = ty - sy;
+        const segLenSq = segDx * segDx + segDy * segDy;
+
+        if (!this.params.stanleyEnabled || segLenSq < 9) {
+          return this.limitOutputSlew(this.planner.velocityPlanning1d(tx - px, ty - py, this.segmentEndSpeed));
+        }
+
+        const invLen = 1 / Math.sqrt(segLenSq);
+        const alongX = segDx * invLen;
+        const alongY = segDy * invLen;
+        const perpX = -alongY;
+        const perpY = alongX;
+        const sRemain = (tx - px) * alongX + (ty - py) * alongY;
+        const alongVel = this.planner.velocityPlanning1d(
+          alongX * sRemain,
+          alongY * sRemain,
+          this.segmentEndSpeed
+        );
+        const vAlongMag = alongVel.vx * alongX + alongVel.vy * alongY;
+        const eCt = (px - sx) * perpX + (py - sy) * perpY;
+        const denom = Math.abs(vAlongMag) + cfg.stanley.kSoft;
+        const stanley = Math.atan(cfg.stanley.kCt * eCt / denom) * (2 / Math.PI);
+        const vPerp = -stanley * cfg.stanley.vLatMax;
+        return this.limitOutputSlew({
+          vx: alongVel.vx + perpX * vPerp,
+          vy: alongVel.vy + perpY * vPerp
+        });
+      }
+
+      // 各向异性输出矢量斜率限幅（对应固件 PathLineFollower::limit_output_slew）：
+      // 沿旧速度方向分解 Δv：切向(大小)用 maxAcc 限不拖慢直道，垂直(方向)用更小的 CORNER_TURN_ACC
+      // 限、把直角磨成圆弧且与 maxAcc 解耦。旧速度≈0 时退化为整体 maxAcc 限。
+      limitOutputSlew(target) {
+        if (!this.hasPrev) {
+          this.prevOut = { vx: target.vx, vy: target.vy };
+          this.hasPrev = true;
+          return { vx: target.vx, vy: target.vy };
+        }
+        const dvx = target.vx - this.prevOut.vx;
+        const dvy = target.vy - this.prevOut.vy;
+        const CORNER_TURN_ACC = 90;
+        const maxTang = cfg.maxAcc * cfg.dt;
+        const maxPerp = CORNER_TURN_ACC * cfg.dt;
+        const prevMag = Math.hypot(this.prevOut.vx, this.prevOut.vy);
+        if (prevMag > 1e-3) {
+          const ux = this.prevOut.vx / prevMag;
+          const uy = this.prevOut.vy / prevMag;
+          const dTang = dvx * ux + dvy * uy;
+          let tx = dTang * ux, ty = dTang * uy;
+          let px = dvx - tx, py = dvy - ty;
+          const tMag = Math.abs(dTang);
+          if (tMag > maxTang) { const s = maxTang / tMag; tx *= s; ty *= s; }
+          const pMag = Math.hypot(px, py);
+          if (pMag > maxPerp && pMag > 1e-6) { const s = maxPerp / pMag; px *= s; py *= s; }
+          this.prevOut = { vx: this.prevOut.vx + tx + px, vy: this.prevOut.vy + ty + py };
+        } else {
+          const dv = Math.hypot(dvx, dvy);
+          if (dv > maxTang && dv > 1e-6) {
+            const s = maxTang / dv;
+            this.prevOut = { vx: this.prevOut.vx + dvx * s, vy: this.prevOut.vy + dvy * s };
+          } else {
+            this.prevOut = { vx: target.vx, vy: target.vy };
+          }
+        }
+        return { vx: this.prevOut.vx, vy: this.prevOut.vy };
+      }
+
+      updateKinematics() {
+        const yawRad = this.pose.yaw * Math.PI / 180;
+        const cosTheta = Math.cos(yawRad);
+        const sinTheta = Math.sin(yawRad);
+        const vx = this.commandVel.vx * sinTheta - this.commandVel.vy * cosTheta;
+        const vy = this.commandVel.vx * cosTheta + this.commandVel.vy * sinTheta;
+        const vw = 0;
+        this.localVel = { vx, vy, vw };
+        this.wheels = {
+          lf: vy + vx - vw * cfg.halfAxisSum,
+          lb: vy - vx - vw * cfg.halfAxisSum,
+          rf: vy - vx + vw * cfg.halfAxisSum,
+          rb: vy + vx + vw * cfg.halfAxisSum
+        };
+      }
+
+      tick() {
+        if (this.finished) {
+          this.commandVel = { vx: 0, vy: 0 };
+          this.actualVel.vx *= 0.85;
+          this.actualVel.vy *= 0.85;
+          return;
+        }
+
+        this.updateTarget();
+        const targetForPlanner = this.target || copyPoint(this.pose);
+        this.commandVel = this.followPathLine(targetForPlanner);
+        const alpha = cfg.dt / (this.params.responseTau + cfg.dt);
+        this.actualVel.vx += (this.commandVel.vx - this.actualVel.vx) * alpha;
+        this.actualVel.vy += (this.commandVel.vy - this.actualVel.vy) * alpha;
+        this.pose.x += this.actualVel.vx * cfg.dt;
+        this.pose.y += this.actualVel.vy * cfg.dt;
+        this.updateKinematics();
+        this.time += cfg.dt;
+
+        if (this.trail.length === 0 || hypot(this.pose.x - this.trail[this.trail.length - 1].x, this.pose.y - this.trail[this.trail.length - 1].y) > 0.35) {
+          this.trail.push({ x: this.pose.x, y: this.pose.y });
+          if (this.trail.length > 1200) this.trail.shift();
+        }
+
+        this.history.push({
+          t: this.time,
+          speed: this.speedMag(),
+          commanded: hypot(this.commandVel.vx, this.commandVel.vy),
+          wp: this.wpIdx,
+          switchCount: this.switches.length
+        });
+        if (this.history.length > 650) this.history.shift();
+      }
+    }
+
+    function createSims() {
+      const mainParams = makeParams();
+      mainSim = new Sim(pathSelect.value, mainParams);
+      ghostSim = new Sim(pathSelect.value, makeParams({
+        cornerPassSpeed: 0,
+        cornerSwitchWindow: 0,
+        cornerLineTolerance: Number(lineTolerance.value),
+        stanleyEnabled: stanleyToggle.checked,
+        stopEveryWaypoint: true,
+        responseTau: 0.1
+      }));
+      updateOutputs();
+      drawAll();
+    }
+
+    function updateOutputs() {
+      cornerSpeedOut.textContent = `${Number(cornerSpeed.value).toFixed(0)} cm/s`;
+      switchWindowOut.textContent = `${Number(switchWindow.value).toFixed(1)} cm`;
+      lineToleranceOut.textContent = `${Number(lineTolerance.value).toFixed(1)} cm`;
+      if (!mainSim) return;
+      wpRead.textContent = `${Math.min(mainSim.wpIdx + 1, mainSim.physicalPath.length)} / ${mainSim.physicalPath.length}`;
+      remainRead.textContent = `${mainSim.remainingToTarget().toFixed(1)} cm`;
+      speedRead.textContent = `${mainSim.speedMag().toFixed(1)} cm/s`;
+      const cmdAngle = hypot(mainSim.commandVel.vx, mainSim.commandVel.vy) > 0.1 ?
+        angleDeg(mainSim.commandVel.vx, mainSim.commandVel.vy).toFixed(0) : "0";
+      dirRead.textContent = `${cmdAngle} deg`;
+      switchRead.textContent = `${mainSim.switches.length}`;
+    }
+
+    function resizeCanvas(c, context) {
+      const rect = c.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const w = Math.max(1, Math.round(rect.width * dpr));
+      const h = Math.max(1, Math.round(rect.height * dpr));
+      if (c.width !== w || c.height !== h) {
+        c.width = w;
+        c.height = h;
+      }
+      context.setTransform(dpr, 0, 0, dpr, 0, 0);
+      return { w: rect.width, h: rect.height };
+    }
+
+    function sceneTransform(size) {
+      const worldW = cfg.mapW * cfg.gridSize;
+      const worldH = cfg.mapH * cfg.gridSize;
+      const pad = Math.min(54, Math.max(24, size.w * 0.045));
+      const scale = Math.min((size.w - pad * 2) / worldW, (size.h - pad * 2) / worldH);
+      const ox = (size.w - worldW * scale) / 2;
+      const oy = (size.h + worldH * scale) / 2;
+      return {
+        scale,
+        ox,
+        oy,
+        toScreen(p) {
+          return {
+            x: ox + p.x * scale,
+            y: oy - p.y * scale
+          };
+        },
+        len(v) {
+          return v * scale;
+        }
+      };
+    }
+
+    function drawGrid(t, size) {
+      const worldW = cfg.mapW * cfg.gridSize;
+      const worldH = cfg.mapH * cfg.gridSize;
+      ctx.clearRect(0, 0, size.w, size.h);
+      ctx.fillStyle = "#fbfcfd";
+      ctx.fillRect(0, 0, size.w, size.h);
+
+      ctx.save();
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--grid").trim();
+      for (let x = 0; x <= worldW; x += cfg.gridSize) {
+        const a = t.toScreen({ x, y: 0 });
+        const b = t.toScreen({ x, y: worldH });
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+      }
+      for (let y = 0; y <= worldH; y += cfg.gridSize) {
+        const a = t.toScreen({ x: 0, y });
+        const b = t.toScreen({ x: worldW, y });
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+      }
+
+      const a = t.toScreen({ x: 0, y: 0 });
+      const b = t.toScreen({ x: worldW, y: worldH });
+      ctx.strokeStyle = "#aab4c0";
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(a.x, b.y, b.x - a.x, a.y - b.y);
+      ctx.restore();
+    }
+
+    function drawPolyline(points, t, style) {
+      if (points.length < 2) return;
+      ctx.save();
+      ctx.strokeStyle = style.color;
+      ctx.lineWidth = style.width;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      if (style.dash) ctx.setLineDash(style.dash);
+      ctx.beginPath();
+      const first = t.toScreen(points[0]);
+      ctx.moveTo(first.x, first.y);
+      for (let i = 1; i < points.length; i += 1) {
+        const p = t.toScreen(points[i]);
+        ctx.lineTo(p.x, p.y);
+      }
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawPath(sim, t) {
+      const pathPts = [sim.start, ...sim.physicalPath];
+      drawPolyline(pathPts, t, { color: "#2f3640", width: 4 });
+
+      ctx.save();
+      pathPts.forEach((p, i) => {
+        const s = t.toScreen(p);
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, i === 0 ? 5 : 6, 0, Math.PI * 2);
+        ctx.fillStyle = i === 0 ? "#17202a" : "#ffffff";
+        ctx.fill();
+        ctx.strokeStyle = "#2f3640";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      });
+      ctx.restore();
+    }
+
+    function drawSwitchWindow(sim, t) {
+      if (!sim.target || sim.finished || sim.params.stopEveryWaypoint) return;
+      const sx = sim.target.x - sim.segmentStart.x;
+      const sy = sim.target.y - sim.segmentStart.y;
+      const win = clamp(sim.params.cornerSwitchWindow, 0, cfg.maxSwitchWindow);
+      const tol = sim.params.cornerLineTolerance;
+      if (win <= 0) return;
+
+      ctx.save();
+      ctx.fillStyle = "rgba(196, 122, 19, 0.18)";
+      ctx.strokeStyle = "rgba(196, 122, 19, 0.70)";
+      ctx.lineWidth = 1.5;
+
+      if (Math.abs(sx) >= Math.abs(sy) && Math.abs(sx) > 0.001) {
+        const dir = sx >= 0 ? 1 : -1;
+        const x0 = sim.target.x - dir * win;
+        const x1 = sim.target.x;
+        const y0 = sim.target.y - tol;
+        const y1 = sim.target.y + tol;
+        fillWorldRect(t, Math.min(x0, x1), y0, Math.abs(x1 - x0), y1 - y0);
+      } else if (Math.abs(sy) > 0.001) {
+        const dir = sy >= 0 ? 1 : -1;
+        const y0 = sim.target.y - dir * win;
+        const y1 = sim.target.y;
+        const x0 = sim.target.x - tol;
+        const x1 = sim.target.x + tol;
+        fillWorldRect(t, x0, Math.min(y0, y1), x1 - x0, Math.abs(y1 - y0));
+      }
+      ctx.restore();
+    }
+
+    function fillWorldRect(t, x, y, w, h) {
+      const a = t.toScreen({ x, y });
+      const b = t.toScreen({ x: x + w, y: y + h });
+      ctx.beginPath();
+      ctx.rect(a.x, b.y, b.x - a.x, a.y - b.y);
+      ctx.fill();
+      ctx.stroke();
+    }
+
+    function drawTarget(sim, t) {
+      if (!sim.target) return;
+      const p = t.toScreen(sim.target);
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 9, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(19, 138, 69, 0.15)";
+      ctx.fill();
+      ctx.strokeStyle = "#138a45";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawSwitchMarks(sim, t, color) {
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      sim.switches.forEach(sw => {
+        const p = t.toScreen(sw);
+        ctx.beginPath();
+        ctx.moveTo(p.x - 6, p.y - 6);
+        ctx.lineTo(p.x + 6, p.y + 6);
+        ctx.moveTo(p.x + 6, p.y - 6);
+        ctx.lineTo(p.x - 6, p.y + 6);
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      });
+      ctx.restore();
+    }
+
+    function drawArrow(from, vx, vy, t, style) {
+      const mag = hypot(vx, vy);
+      if (mag < 0.1) return;
+      const scale = style.scale || 0.35;
+      const end = { x: from.x + vx * scale, y: from.y + vy * scale };
+      const a = t.toScreen(from);
+      const b = t.toScreen(end);
+      const ang = Math.atan2(b.y - a.y, b.x - a.x);
+      const head = style.head || 9;
+
+      ctx.save();
+      ctx.strokeStyle = style.color;
+      ctx.fillStyle = style.color;
+      ctx.lineWidth = style.width || 2;
+      if (style.dash) ctx.setLineDash(style.dash);
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(b.x, b.y);
+      ctx.lineTo(b.x - head * Math.cos(ang - 0.45), b.y - head * Math.sin(ang - 0.45));
+      ctx.lineTo(b.x - head * Math.cos(ang + 0.45), b.y - head * Math.sin(ang + 0.45));
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawCar(sim, t, color, ghost = false) {
+      const p = t.toScreen(sim.pose);
+      const yaw = -sim.pose.yaw * Math.PI / 180;
+      const w = t.len(18);
+      const h = t.len(20);
+
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(yaw);
+      ctx.fillStyle = ghost ? "rgba(200, 64, 54, 0.18)" : "rgba(22, 101, 216, 0.18)";
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.rect(-w / 2, -h / 2, w, h);
+      ctx.fill();
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(0, -h * 0.47);
+      ctx.lineTo(-w * 0.22, -h * 0.18);
+      ctx.lineTo(w * 0.22, -h * 0.18);
+      ctx.closePath();
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.restore();
+
+      if (!ghost) {
+        drawArrow(sim.pose, sim.actualVel.vx, sim.actualVel.vy, t, { color, width: 3, scale: 0.22, head: 10 });
+        drawArrow(sim.pose, sim.commandVel.vx, sim.commandVel.vy, t, { color: "#159a9c", width: 2, scale: 0.20, head: 8, dash: [5, 4] });
+      }
+    }
+
+    function drawWheelBars(sim, size) {
+      const labels = ["LF", "LB", "RF", "RB"];
+      const vals = [sim.wheels.lf, sim.wheels.lb, sim.wheels.rf, sim.wheels.rb];
+      const x = size.w - 176;
+      const y = 20;
+      const rowH = 19;
+      const maxAbs = Math.max(30, ...vals.map(v => Math.abs(v)));
+      ctx.save();
+      ctx.fillStyle = "rgba(255, 255, 255, 0.88)";
+      ctx.strokeStyle = "#d8dee6";
+      ctx.lineWidth = 1;
+      ctx.fillRect(x - 12, y - 12, 166, 102);
+      ctx.strokeRect(x - 12, y - 12, 166, 102);
+      ctx.font = "12px Microsoft YaHei, Segoe UI, Arial";
+      ctx.fillStyle = "#17202a";
+      ctx.fillText("四轮目标速度", x, y);
+      vals.forEach((v, i) => {
+        const yy = y + 20 + i * rowH;
+        ctx.fillStyle = "#5f6c7b";
+        ctx.fillText(labels[i], x, yy + 4);
+        ctx.strokeStyle = "#d8dee6";
+        ctx.beginPath();
+        ctx.moveTo(x + 48, yy);
+        ctx.lineTo(x + 132, yy);
+        ctx.stroke();
+        const len = 40 * Math.abs(v) / maxAbs;
+        ctx.fillStyle = v >= 0 ? "#1665d8" : "#c84036";
+        ctx.fillRect(x + 90 + (v < 0 ? -len : 0), yy - 4, len, 8);
+      });
+      ctx.restore();
+    }
+
+    function drawStatusText(sim, size) {
+      ctx.save();
+      ctx.fillStyle = "rgba(255, 255, 255, 0.88)";
+      ctx.strokeStyle = "#d8dee6";
+      ctx.lineWidth = 1;
+      ctx.fillRect(18, 18, 226, 84);
+      ctx.strokeRect(18, 18, 226, 84);
+      ctx.font = "13px Microsoft YaHei, Segoe UI, Arial";
+      ctx.fillStyle = "#17202a";
+      const currentMode = Number(cornerSpeed.value) === 0 ? "当前配置" : "带速切向";
+      const mode = sim.finished ? "完成" : currentMode;
+      ctx.fillText(`状态: ${mode}`, 32, 42);
+      ctx.fillText(`切段窗口: ${Number(switchWindow.value).toFixed(1)} cm`, 32, 64);
+      ctx.fillText(`过弯末速: ${Number(cornerSpeed.value).toFixed(0)} cm/s`, 32, 86);
+      ctx.restore();
+    }
+
+    function drawChart() {
+      const size = resizeCanvas(chart, chartCtx);
+      chartCtx.clearRect(0, 0, size.w, size.h);
+      chartCtx.fillStyle = "#fbfcfd";
+      chartCtx.fillRect(0, 0, size.w, size.h);
+      chartCtx.strokeStyle = "#d8dee6";
+      chartCtx.lineWidth = 1;
+      for (let i = 1; i < 4; i += 1) {
+        const y = size.h * i / 4;
+        chartCtx.beginPath();
+        chartCtx.moveTo(0, y);
+        chartCtx.lineTo(size.w, y);
+        chartCtx.stroke();
+      }
+      if (!mainSim || mainSim.history.length < 2) return;
+
+      const hist = mainSim.history;
+      const maxSpeed = Math.max(80, ...hist.map(h => h.speed), ...hist.map(h => h.commanded));
+      const startT = hist[0].t;
+      const endT = hist[hist.length - 1].t;
+      const span = Math.max(0.001, endT - startT);
+      const xFor = h => ((h.t - startT) / span) * size.w;
+      const yFor = v => size.h - (v / maxSpeed) * (size.h - 18) - 8;
+
+      chartCtx.save();
+      chartCtx.strokeStyle = "#159a9c";
+      chartCtx.lineWidth = 1.5;
+      chartCtx.setLineDash([5, 4]);
+      chartCtx.beginPath();
+      hist.forEach((h, i) => {
+        const x = xFor(h);
+        const y = yFor(h.commanded);
+        if (i === 0) chartCtx.moveTo(x, y);
+        else chartCtx.lineTo(x, y);
+      });
+      chartCtx.stroke();
+      chartCtx.setLineDash([]);
+
+      chartCtx.strokeStyle = "#7b4cc2";
+      chartCtx.lineWidth = 2;
+      chartCtx.beginPath();
+      hist.forEach((h, i) => {
+        const x = xFor(h);
+        const y = yFor(h.speed);
+        if (i === 0) chartCtx.moveTo(x, y);
+        else chartCtx.lineTo(x, y);
+      });
+      chartCtx.stroke();
+
+      chartCtx.fillStyle = "#c47a13";
+      mainSim.switches.forEach(sw => {
+        const x = ((sw.t - startT) / span) * size.w;
+        if (x >= 0 && x <= size.w) {
+          chartCtx.fillRect(x - 1, 0, 2, size.h);
+        }
+      });
+
+      chartCtx.fillStyle = "#5f6c7b";
+      chartCtx.font = "12px Microsoft YaHei, Segoe UI, Arial";
+      chartCtx.fillText(`${maxSpeed.toFixed(0)} cm/s`, 8, 14);
+      chartCtx.fillText("0", 8, size.h - 8);
+      chartCtx.restore();
+    }
+
+    function drawAll() {
+      const size = resizeCanvas(canvas, ctx);
+      const t = sceneTransform(size);
+      drawGrid(t, size);
+      if (!mainSim) return;
+
+      drawSwitchWindow(mainSim, t);
+      drawPath(mainSim, t);
+      if (ghostToggle.checked && ghostSim) {
+        drawPolyline(ghostSim.trail, t, { color: "#c84036", width: 2, dash: [6, 5] });
+        drawSwitchMarks(ghostSim, t, "#c84036");
+        drawCar(ghostSim, t, "#c84036", true);
+      }
+      drawPolyline(mainSim.trail, t, { color: "#1665d8", width: 3 });
+      drawSwitchMarks(mainSim, t, "#c47a13");
+      drawTarget(mainSim, t);
+      drawCar(mainSim, t, "#1665d8");
+      drawWheelBars(mainSim, size);
+      drawStatusText(mainSim, size);
+      drawChart();
+    }
+
+    function tickFrame(now) {
+      const elapsed = Math.min(0.1, (now - lastTime) / 1000);
+      lastTime = now;
+      if (running) {
+        accumulator += elapsed;
+        while (accumulator >= cfg.dt) {
+          mainSim.tick();
+          if (ghostSim) ghostSim.tick();
+          accumulator -= cfg.dt;
+        }
+        updateOutputs();
+      }
+      drawAll();
+      requestAnimationFrame(tickFrame);
+    }
+
+    function setPreset(name) {
+      activePreset = name;
+      [...preset.querySelectorAll("button")].forEach(btn => {
+        btn.classList.toggle("active", btn.dataset.preset === name);
+      });
+
+      if (name === "current") {
+        cornerSpeed.value = "0";
+        switchWindow.value = "0";
+        lineTolerance.value = "0.5";
+        stanleyToggle.checked = false;
+      } else if (name === "carry") {
+        cornerSpeed.value = "35";
+        switchWindow.value = "5";
+        lineTolerance.value = "0.7";
+        stanleyToggle.checked = false;
+      } else {
+        cornerSpeed.value = "0";
+        switchWindow.value = "0";
+        lineTolerance.value = "0.5";
+        stanleyToggle.checked = false;
+      }
+      createSims();
+    }
+
+    playBtn.addEventListener("click", () => {
+      running = !running;
+      playBtn.textContent = running ? "暂停" : "播放";
+    });
+
+    stepBtn.addEventListener("click", () => {
+      running = false;
+      playBtn.textContent = "播放";
+      mainSim.tick();
+      if (ghostSim) ghostSim.tick();
+      updateOutputs();
+      drawAll();
+    });
+
+    resetBtn.addEventListener("click", () => {
+      createSims();
+    });
+
+    [pathSelect, cornerSpeed, switchWindow, lineTolerance, stanleyToggle, ghostToggle].forEach(el => {
+      el.addEventListener("input", () => {
+        createSims();
+      });
+      el.addEventListener("change", () => {
+        createSims();
+      });
+    });
+
+    preset.addEventListener("click", event => {
+      const btn = event.target.closest("button[data-preset]");
+      if (btn) setPreset(btn.dataset.preset);
+    });
+
+    window.addEventListener("resize", drawAll);
+
+    createSims();
+    requestAnimationFrame(tickFrame);
+  </script>
+</body>
+</html>

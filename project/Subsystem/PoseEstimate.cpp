@@ -79,6 +79,9 @@ namespace {
     constexpr float VISION_LATERAL_MAX_STEP_CM = 0.45f;
     constexpr float VISION_LATERAL_CORRECTION_GAIN = 0.70f;
     constexpr float VISION_ENCODER_RESET_THRESHOLD_CM = 12.0f;
+    // 延时外推封顶余量：指令位移(合速度模) × 该系数为外推矢量模上限。1.0=严格按指令；
+    // >1 给运动学增益/yaw 投影误差留裕度。取 1.5 兼顾"匀速不误伤、刹车能夹掉打滑虚增"。
+    constexpr float VISION_LATENCY_CMD_CLAMP_MARGIN = 1.5f;
     [[maybe_unused]] constexpr float VISION_TARGET_FREEZE_RADIUS_CM = 10.0f;
 
     // 快速逆平方根函数，供 Mahony 算法使用
@@ -426,6 +429,32 @@ namespace {
         float gain = encoder_latency_gain();
         out_dx = (s_encoder_pose.x - odom_at_capture.x) * gain;
         out_dy = (s_encoder_pose.y - odom_at_capture.y) * gain;
+
+        // 打滑封顶：编码器在延时窗口 L 内积分出的位移，末尾刹车/打滑时会比真实多，
+        // 直接把外推量甩过头→过冲。用规划器指令速度(无打滑)算出该窗口物理上能走的
+        // 最大位移做封顶。按**合速度矢量模**封顶(不逐轴)：过弯不停顿时速度大小≈Turn_V
+        // 不变、只方向转→bound 大不触发、切向照切；真正停车时速度大小才趋 0→夹掉虚增。
+        // 只缩放外推矢量、保方向，比逐轴归零更准。
+        float L_sec = current_L() * 0.001f;
+        const Speed2D cmd = App::g_state.control.commanded_vel;
+        if (L_sec > 0.0f && std::isfinite(cmd.vx) && std::isfinite(cmd.vy)) {
+            float cmd_speed = __builtin_sqrtf(cmd.vx * cmd.vx + cmd.vy * cmd.vy);
+            // 末尾刹车时 commanded_vel→0，只用它封顶会把"真实滑行位移"也夹掉→上报位姿滞后
+            // →到点判定晚一格→过冲。用编码器实测合速度兜底：滑行(编码器无打滑地反映真实速度)
+            // 时按真速度放行，不再滞后；再以 max_vel 封顶，挡住加速打滑时编码器虚增的那部分。
+            const auto& w = App::g_state.physical.current_wheel_speed;
+            Velocity2D enc_v = Algorithm::Motion::Kinematics::forward(w.lf, w.lb, w.rf, w.rb);
+            float enc_speed = __builtin_sqrtf(enc_v.vx * enc_v.vx + enc_v.vy * enc_v.vy);
+            float bound_speed = enc_speed > cmd_speed ? enc_speed : cmd_speed;
+            bound_speed = clampf(bound_speed, 0.0f, tune.dynamics.max_vel);
+            float bound = bound_speed * L_sec * VISION_LATENCY_CMD_CLAMP_MARGIN;
+            float delta_sq = out_dx * out_dx + out_dy * out_dy;
+            if (delta_sq > bound * bound && delta_sq > 1e-6f) {
+                float scale = bound / __builtin_sqrtf(delta_sq);
+                out_dx *= scale;
+                out_dy *= scale;
+            }
+        }
         return true;
     }
 

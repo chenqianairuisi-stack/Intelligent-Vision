@@ -72,6 +72,7 @@ struct RobotState {
         Pose2D current_target = {0.0f, 0.0f, SystemConfig::ENTRY_YAW};   // 当前目标位姿 (Chassis 直接追这个)
         Point2D segment_start = {0.0f, 0.0f};                            // 当前直线段起点，供底盘 Stanley 横纠贴线
         float segment_end_speed = 0.0f;                                  // 当前段末保留速度 cm/s（过弯不停顿>0，需停稳处=0）
+        Speed2D commanded_vel = {0.0f, 0.0f};                            // 本拍规划器输出的全局期望速度 cm/s（无打滑，供延时补偿封顶）
         TrackerState tracker_state = TrackerState::NONE;                 // 当前 Tracker 状态
         ControlMode mode = ControlMode::AUTO_TRACKING;                   // 当前控制模式 (默认自动循迹)
     } control;

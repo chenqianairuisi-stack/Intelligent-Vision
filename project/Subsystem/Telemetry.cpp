@@ -367,7 +367,13 @@ namespace {
                     case 'O': tune.ff.k_stiction = value; break;
                     
                     case 'A': tune.dynamics.max_duty = value; break;
-                    case 'S': tune.dynamics.max_vel = value; break;
+                    case 'S':
+                        tune.dynamics.max_vel = value;
+                        (void)TuningDefaults::clamp_if_outside(tune.dynamics.max_vel,
+                                                                TuningDefaults::MIN_DYNAMICS_MAX_VEL,
+                                                                TuningDefaults::MAX_DYNAMICS_MAX_VEL,
+                                                                TuningDefaults::DEFAULT_DYNAMICS_MAX_VEL);
+                        break;
                     case 'D': tune.dynamics.max_acc = value; break;
                     case 'F': tune.dynamics.max_ang_vel = value; break;
                     case 'H': tune.dynamics.max_ang_acc = value; break;
@@ -450,6 +456,8 @@ namespace {
                     case 'L': tune.stanley.v_lat_max = value; break;       // 横纠速度上限 cm/s
                     case 'P': tune.tracker.corner_pause_speed = value; break; // 拐点略停阈值 cm/s
                     case 'B': tune.bomb.explosion_wait_ms = value; break;  // 炸弹引信等待 ms
+                    case 'G': tune.feel.brake_hold_gain = value; break;    // 主动刹车前馈增益（刹更狠锁更死）
+                    case 'A': tune.feel.corner_turn_acc = value; break;    // 切向方向变化加速度限 cm/s^2（大=切更直不磨圆）
                     default: return;
                 }
                 break;

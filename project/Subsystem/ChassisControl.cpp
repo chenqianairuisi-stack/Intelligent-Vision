@@ -58,13 +58,32 @@ namespace {
     // 动摩擦更小，按实测轮速衰减 ka，避免低速/换向段被常量 ka 过量驱动 → 极限环啸叫。
     __attribute__((always_inline)) inline float friction_ff(float target, float current) {
         constexpr float KA_FADE_V = 6.0f;  // cm/s：轮速超过此量级后静摩擦补偿基本退场
+        // 近零死区：目标轮速极小(停稳/换向过零)时不给 ka 踢，否则过零瞬间 ka 反号 +
+        // 硬刹车过冲 → 原地小幅晃/抖（brake_limit 偏大时尤甚）。真要动时目标远大于此、不受影响。
+        constexpr float KA_MIN_TARGET = 1.0f;  // cm/s
+        if (std::abs(target) < KA_MIN_TARGET) return 0.0f;
         float fade = KA_FADE_V / (std::abs(current) + KA_FADE_V);  // current≈0→1，高速→~0
         return smooth_sign(target) * tune.ff.ka * fade;
+    }
+
+    // 主动刹车/锁定前馈（"加速度前瞻"）：当目标轮速明显低于当前轮速（在减速/想停但轮子
+    // 还带速）时，额外给一个与残余轮速反向的制动占空比，把车更快钉到目标上。
+    //   - 治"冲过头→回拉→晃"：减速全程轮子略快于目标 → 持续小幅主动制动 → 缩短过冲；
+    //   - 治"终点锁不死"：锁定时目标≈0、轮子还在滑 → 强主动制动 → 锁得更死。
+    // 只在减速方向介入，不会反向加速；低于接入门限不介入，避免停稳后在零附近抖。
+    // 增益走 tune.feel.brake_hold_gain（菜单 BrkHold / !T G 现场调，Save 持久化）。
+    __attribute__((always_inline)) inline float brake_ff(float target, float current) {
+        constexpr float BRAKE_ENGAGE_SPEED = 0.5f;  // cm/s：轮速低于此不介入，避免停稳抖
+        if (std::abs(current) < BRAKE_ENGAGE_SPEED) return 0.0f;
+        // 只有"目标比当前更慢"(在减速)才主动制动；加速/匀速时不介入
+        if (std::abs(target) >= std::abs(current)) return 0.0f;
+        return -tune.feel.brake_hold_gain * (current - target);
     }
 
     __attribute__((always_inline)) inline void reset_motion_residue() {
         path_follower.reset();
         yaw_controller.reset();
+        s_target_wheel_speeds = {0.0f, 0.0f, 0.0f, 0.0f};
         for (auto& pid : pid_wheels) {
             pid.reset();
         }
@@ -134,10 +153,11 @@ namespace {
         const auto& Kv = tune.ff.kv;
 
         // 计算前馈占空比 (简单的线性模型)，静摩擦补偿按轮速衰减（见 friction_ff）
-        float ff_lf = targets.lf * Kv + friction_ff(targets.lf, current_speeds.lf);
-        float ff_lb = targets.lb * Kv + friction_ff(targets.lb, current_speeds.lb);
-        float ff_rf = targets.rf * Kv + friction_ff(targets.rf, current_speeds.rf);
-        float ff_rb = targets.rb * Kv + friction_ff(targets.rb, current_speeds.rb);
+        // 再叠加主动刹车前馈（brake_ff）：减速/锁定时额外制动，缩短过冲、锁得更死。
+        float ff_lf = targets.lf * Kv + friction_ff(targets.lf, current_speeds.lf) + brake_ff(targets.lf, current_speeds.lf);
+        float ff_lb = targets.lb * Kv + friction_ff(targets.lb, current_speeds.lb) + brake_ff(targets.lb, current_speeds.lb);
+        float ff_rf = targets.rf * Kv + friction_ff(targets.rf, current_speeds.rf) + brake_ff(targets.rf, current_speeds.rf);
+        float ff_rb = targets.rb * Kv + friction_ff(targets.rb, current_speeds.rb) + brake_ff(targets.rb, current_speeds.rb);
 
         // 速度环位置式 PID + 前馈计算占空比输出
         float duty_lf = ff_lf + pid_wheels[0].calculate(targets.lf, current_speeds.lf);
@@ -201,6 +221,10 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick() {
         ctrl.current_target.x, ctrl.current_target.y,
         SystemConfig::PIT_CH1_DT_S, target_end_speed);
 
+    // 把规划器输出的全局期望速度暴露给延时补偿：它是指令、不含打滑，
+    // 末尾刹车时趋近 0，用来给编码器外推位移封顶，挡掉打滑虚增的过冲。
+    ctrl.commanded_vel = expected_global_vel;
+
     // 将全局期望速度投影到小车自身的局部坐标系
     float current_yaw_rad = yaw * SystemConfig::DEG_TO_RAD;  // 转换为弧度
     float cos_theta = cosf(current_yaw_rad);
@@ -239,11 +263,20 @@ __attribute__((section(".ramfunc"))) void update_speed_loop_5ms() {
 __attribute__((section(".ramfunc"))) void check_is_stopped() {
 
     const auto& cur_spd = App::g_state.physical.current_wheel_speed;
+    const auto& target_spd = s_target_wheel_speeds;
+    constexpr float STOPPED_WHEEL_SPEED_EPS = 0.5f;
+    constexpr float STOPPED_TARGET_SPEED_EPS = 0.5f;
         
     // 判定条件：上一帧的控制目标几乎为0，且当前四个轮子的真实反馈速度极小
     App::g_state.physical.is_stopped = 
-        (std::abs(cur_spd.lf) < 0.2f && std::abs(cur_spd.lb) < 0.2f
-        && std::abs(cur_spd.rf) < 0.2f && std::abs(cur_spd.rb) < 0.2f);
+        (std::abs(target_spd.lf) < STOPPED_TARGET_SPEED_EPS &&
+         std::abs(target_spd.lb) < STOPPED_TARGET_SPEED_EPS &&
+         std::abs(target_spd.rf) < STOPPED_TARGET_SPEED_EPS &&
+         std::abs(target_spd.rb) < STOPPED_TARGET_SPEED_EPS &&
+         std::abs(cur_spd.lf) < STOPPED_WHEEL_SPEED_EPS &&
+         std::abs(cur_spd.lb) < STOPPED_WHEEL_SPEED_EPS &&
+         std::abs(cur_spd.rf) < STOPPED_WHEEL_SPEED_EPS &&
+         std::abs(cur_spd.rb) < STOPPED_WHEEL_SPEED_EPS);
 }
 
 }

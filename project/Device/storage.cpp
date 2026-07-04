@@ -9,6 +9,9 @@
 // 否则旧 flash 数据会被裸 memcpy 读成错位/垃圾值（本结构无版本号）。
 // 0xAA55CC56: foundation 阶段为 latency 结构追加拐点延时估计字段
 // 0xAA55CC57: 运动控制阶段追加 tracker.corner_pause_speed / stanley / bomb 结构
+// 注：2026-07-04 在 TuningConfig **末尾**追加 feel{brake_hold_gain,corner_turn_acc}，
+//     属"只在尾部追加"——旧 flash 读出的尾部区由 sanitize 兜回默认，故**不 bump magic**、
+//     保留用户已调参数。只有在结构体中段插字段/改布局时才必须 bump。
 #define CONFIG_MAGIC_WORD         (0xAA55CC57)
 
 void Storage::init() {
@@ -48,6 +51,11 @@ bool Storage::load_params() {
     memcpy(&tune, &flash_union_buffer[1], sizeof(TuningConfig));
 
     changed = TuningDefaults::sanitize(tune) || changed;
+    if (tune.dynamics.max_vel == 60.0f) {
+        tune.dynamics.max_vel = TuningDefaults::DEFAULT_DYNAMICS_MAX_VEL;
+        changed = true;
+    }
+
     if (tune.latency.encoder_latency_gain == 1.00f &&
         tune.latency.vision_latency_ms == 300.0f) {
         tune.latency.encoder_latency_gain = TuningDefaults::DEFAULT_ENCODER_LATENCY_GAIN;
@@ -55,14 +63,24 @@ bool Storage::load_params() {
         changed = true;
     }
 
-    // 一次性迁移：过弯保留速度(Turn_V)历史上被旧 sanitize 钳成 0，旧 flash 普遍存的是
-    // 0=每个拐点都停。检测到 <=0 视为"旧的未迁移 flash"，在此一次性把运动手感新默认刷上：
-    //   - Turn_V 拉到默认值，让"过弯不停顿"在仅刷固件、不动其它已调参数下直接生效；
-    //   - Stanley 关闭（本底盘横移耦合，持续横纠会抖）。
-    // 一旦 Turn_V 被设为 >0（本块写入后即如此）就不再触发，后续可自由调 Turn_V/Stanley 并持久化。
-    if (tune.tracker.corner_pass_speed <= 0.0f) {
+    // 旧默认 brake_limit=0.85 会让规划层过晚刹车，实车轮速环跟不上时表现为打滑、过冲和停前晃。
+    if (tune.dynamics.brake_limit > 0.80f) {
+        tune.dynamics.brake_limit = TuningDefaults::DEFAULT_BRAKE_LIMIT;
+        changed = true;
+    }
+
+    // Turn_V/end_speed 保持 0：连贯性靠提前切段和切向限幅，不靠带末速斜切。
+    // 旧 flash 若残留非零 Turn_V 或 Stanley 开，会导致拐点带速磨圆/抖，这里刷回安全默认。
+    if (tune.tracker.corner_pass_speed > 0.0f || tune.stanley.enable) {
         tune.tracker.corner_pass_speed = TuningDefaults::DEFAULT_CORNER_PASS_SPEED;
         tune.stanley.enable = false;
+        changed = true;
+    }
+
+    // explosion_wait_ms 兜底：早期默认给了 100ms 占位（墙炸开约~1s），会导致车没等墙炸穿就穿墙。
+    // flash 里若残留过短值(<500ms，任何真墙都炸不开)就抬到安全默认；>=500 视为用户已标定，保留。
+    if (tune.bomb.explosion_wait_ms < 500.0f) {
+        tune.bomb.explosion_wait_ms = TuningDefaults::DEFAULT_EXPLOSION_WAIT_MS;
         changed = true;
     }
 

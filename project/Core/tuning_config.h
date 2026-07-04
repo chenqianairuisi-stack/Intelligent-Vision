@@ -83,14 +83,21 @@ struct TuningConfig {
     struct {
         float explosion_wait_ms;    // 引信时长：仅当下一步需穿过被炸墙时等待 ms（上车实测标定）
     } bomb;
+
+    // 刹车/切向手感（2026-07-04 追加在结构体末尾：不 bump magic，靠 sanitize 把旧 flash
+    // 读出的越界/垃圾值兜回默认——见 storage.cpp。上车可菜单/!T G/!T A 直接调并 Save 持久化）
+    struct {
+        float brake_hold_gain;   // 主动刹车前馈增益：减速/锁定时残余轮速差→制动占空比，大=刹更狠锁更死
+        float corner_turn_acc;   // 切向方向变化加速度限 cm/s^2：大=到点切得更直不磨圆，小=过弯更柔
+    } feel;
 };
 
 namespace TuningDefaults {
-    inline constexpr float DEFAULT_REACH_RADIUS_MIN = 0.20f;
-    inline constexpr float DEFAULT_CORNER_PASS_SPEED = 30.0f;  // 过弯保留速度 cm/s（>0 才能真正不停顿过弯）
-    inline constexpr float DEFAULT_BRAKE_LIMIT = 0.85f;
+    inline constexpr float DEFAULT_REACH_RADIUS_MIN = 1.00f;  // 终点锁窗口需 > 单拍滑行量，太小(如0.2)会被穿窗导致反向追点震荡
+    inline constexpr float DEFAULT_CORNER_PASS_SPEED = 0.0f;   // 过弯保留速度 cm/s：保持 0，不靠 end_speed 带速斜切
+    inline constexpr float DEFAULT_BRAKE_LIMIT = 0.65f;  // 别贪高：过大减速超出轮速环带宽→打滑过冲+原地晃
     inline constexpr float DEFAULT_ENCODER_LATENCY_GAIN = 1.00f;
-    inline constexpr float DEFAULT_VISION_LATENCY_MS = 300.0f;
+    inline constexpr float DEFAULT_VISION_LATENCY_MS = 310.0f;
     inline constexpr float DEFAULT_VISION_REQUEST_INTERVAL_MS = 100.0f;
     inline constexpr float DEFAULT_VISION_REJECT_DIST = 3.0f;
 
@@ -107,15 +114,22 @@ namespace TuningDefaults {
     inline constexpr float DEFAULT_L_STALE_MS         = 5000.0f;
 
     // 运动控制阶段默认参数
-    inline constexpr float DEFAULT_CORNER_PAUSE_SPEED = 12.0f;  // cm/s
-    inline constexpr bool  DEFAULT_STANLEY_ENABLE     = true;
+    inline constexpr float DEFAULT_CORNER_PAUSE_SPEED = 5.0f;  // cm/s：仅 force_stop/逐点停车模式使用的略停切段阈值，默认连贯模式不走它
+    inline constexpr float DEFAULT_DYNAMICS_MAX_VEL = 150.0f;  // cm/s
+    inline constexpr bool  DEFAULT_STANLEY_ENABLE     = false;  // 带速切向靠横移过渡，Stanley 再叠横纠会在拐点抖，默认关
     inline constexpr float DEFAULT_STANLEY_K_CT       = 1.2f;
     inline constexpr float DEFAULT_STANLEY_K_SOFT     = 20.0f;  // cm/s
     inline constexpr float DEFAULT_STANLEY_V_LAT_MAX  = 40.0f;  // cm/s
-    inline constexpr float DEFAULT_EXPLOSION_WAIT_MS  = 1500.0f;
+    inline constexpr float DEFAULT_EXPLOSION_WAIT_MS  = 900.0f; // ms（推炸弹后原地等墙炸开的时长；墙炸开约~1s；上车用 !T B 按实测标定）
+
+    // 刹车/切向手感默认（追加末尾，不入 magic）
+    inline constexpr float DEFAULT_BRAKE_HOLD_GAIN = 0.30f;   // 主动刹车前馈增益
+    inline constexpr float DEFAULT_CORNER_TURN_ACC = 250.0f;  // 切向方向变化加速度限 cm/s^2
 
     inline constexpr float MIN_BRAKE_LIMIT = 0.0f;
     inline constexpr float MAX_BRAKE_LIMIT = 1.0f;
+    inline constexpr float MIN_DYNAMICS_MAX_VEL = 0.0f;
+    inline constexpr float MAX_DYNAMICS_MAX_VEL = 500.0f;
     inline constexpr float MIN_REACH_RADIUS_MIN = 0.10f;
     inline constexpr float MAX_REACH_RADIUS_MIN = 3.0f;
     inline constexpr float MIN_CORNER_PASS_SPEED = 0.0f;
@@ -138,6 +152,12 @@ namespace TuningDefaults {
     inline constexpr float MAX_VISION_REQUEST_INTERVAL_MS = 1500.0f;
     inline constexpr float MIN_VISION_REJECT_DIST = 0.5f;
     inline constexpr float MAX_VISION_REJECT_DIST = 8.0f;
+
+    // 刹车/切向手感范围：MIN 取 >0，使旧 flash 追加区读出的 0/垃圾值必被 sanitize 兜回默认
+    inline constexpr float MIN_BRAKE_HOLD_GAIN = 0.01f;
+    inline constexpr float MAX_BRAKE_HOLD_GAIN = 2.0f;
+    inline constexpr float MIN_CORNER_TURN_ACC = 20.0f;
+    inline constexpr float MAX_CORNER_TURN_ACC = 1000.0f;
 
     [[nodiscard]] inline bool repair_if_outside(float& value, float min_value, float max_value, float default_value) {
         if (value >= min_value && value <= max_value) {
@@ -170,6 +190,10 @@ namespace TuningDefaults {
                                     MIN_BRAKE_LIMIT,
                                     MAX_BRAKE_LIMIT,
                                     DEFAULT_BRAKE_LIMIT) || changed;
+        changed = clamp_if_outside(config.dynamics.max_vel,
+                                   MIN_DYNAMICS_MAX_VEL,
+                                   MAX_DYNAMICS_MAX_VEL,
+                                   DEFAULT_DYNAMICS_MAX_VEL) || changed;
         changed = repair_if_outside(config.tracker.reach_radius_min,
                                     MIN_REACH_RADIUS_MIN,
                                     MAX_REACH_RADIUS_MIN,
@@ -217,6 +241,16 @@ namespace TuningDefaults {
                                    MAX_EXPLOSION_WAIT_MS,
                                    DEFAULT_EXPLOSION_WAIT_MS) || changed;
 
+        // 追加末尾字段：旧 flash 无此区，memcpy 读出 0/垃圾 → 这里兜回默认（免 bump magic）
+        changed = clamp_if_outside(config.feel.brake_hold_gain,
+                                   MIN_BRAKE_HOLD_GAIN,
+                                   MAX_BRAKE_HOLD_GAIN,
+                                   DEFAULT_BRAKE_HOLD_GAIN) || changed;
+        changed = clamp_if_outside(config.feel.corner_turn_acc,
+                                   MIN_CORNER_TURN_ACC,
+                                   MAX_CORNER_TURN_ACC,
+                                   DEFAULT_CORNER_TURN_ACC) || changed;
+
         return changed;
     }
 }
@@ -228,7 +262,7 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
     {0.2f, 4.0f, 0.54f},     // feedforward
     {
         80.0f,   // max_duty
-        150.0f,  // max_vel
+        TuningDefaults::DEFAULT_DYNAMICS_MAX_VEL,  // max_vel cm/s
         65.0f,   // max_acc
         3.0f,    // max_ang_vel
         4.6f,    // max_ang_acc
@@ -240,15 +274,15 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
         0.3f,    // reach_radius
         TuningDefaults::DEFAULT_REACH_RADIUS_MIN,   // reach_radius_min
         TuningDefaults::DEFAULT_CORNER_PASS_SPEED,  // corner_pass_speed
-        3.0f,    // corner_switch_window —— 提前切换过弯起步值 cm（保守，现场用 !SN 加大，上限 8cm）
-        0.5f,    // corner_line_tolerance
+        2.0f,    // corner_switch_window —— 带速过弯模式提前切段窗口，上限 8cm，!SN 调
+        0.7f,    // corner_line_tolerance
         TuningDefaults::DEFAULT_VISION_REQUEST_INTERVAL_MS,  // vision_request_interval_ms
         3.0f,    // vision_reject_dist
         0.006f,  // ang_tolerance
-        TuningDefaults::DEFAULT_CORNER_PAUSE_SPEED  // corner_pause_speed
+        TuningDefaults::DEFAULT_CORNER_PAUSE_SPEED  // corner_pause_speed —— force_stop/逐点停车略停阈值；默认连贯模式不使用
     },
     {
-        false,                                     // stanley.enable —— 暂关：本底盘横移会跑偏，持续横纠会正反馈冲出赛道；退回纯朝点全向
+        false,                                    // stanley.enable —— 带速切向时关，避免横纠叠加拐点抖
         TuningDefaults::DEFAULT_STANLEY_K_CT,       // stanley.k_ct
         TuningDefaults::DEFAULT_STANLEY_K_SOFT,     // stanley.k_soft
         TuningDefaults::DEFAULT_STANLEY_V_LAT_MAX   // stanley.v_lat_max
@@ -278,5 +312,9 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
     },
     {
         TuningDefaults::DEFAULT_EXPLOSION_WAIT_MS      // bomb.explosion_wait_ms
+    },
+    {
+        TuningDefaults::DEFAULT_BRAKE_HOLD_GAIN,       // feel.brake_hold_gain
+        TuningDefaults::DEFAULT_CORNER_TURN_ACC        // feel.corner_turn_acc
     }
 };

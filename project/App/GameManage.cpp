@@ -32,12 +32,15 @@ namespace {
     DTCM_DATA uint32_t s_return_pose_start_seq = 0U;
     DTCM_DATA bool s_return_tracking_started = false;
 
-    // 炸弹按需等待爆炸：记录最近推入的被炸墙格，下一条路径若穿过它才等爆炸
-    DTCM_DATA point s_pending_blast_wall = {-1, -1};   // {-1,-1} = 无待处理炸弹
+    // 炸弹按需等待爆炸：记录"这次爆炸真正会清开的墙格集合"，下一条路径若踩到其中任一格才等爆炸。
+    // 存被清开的墙格(而非 blast_wall 单点)有两个原因：
+    //  1) 精确——3×3 里多数格本就是空地，只有原本是墙、靠这次爆炸清开的格才需要等；踩邻域空地不等；
+    //  2) 时序——爆破 apply 会把这些墙当场清成 0，故必须在 apply 前捕获，之后无法再从地图反查。
+    DTCM_DATA StaticArray<point, 9> s_pending_blast_cells;  // 空 = 无待处理炸弹
     DTCM_DATA bool s_explosion_wait_active = false;    // 当前是否正在等爆炸
     DTCM_DATA uint32_t s_explosion_wait_start_ms = 0U; // 等待起始时刻
 
-    [[gnu::always_inline]] inline bool segment_contains(
+    [[maybe_unused]] [[gnu::always_inline]] inline bool segment_contains(
         const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& seg, point cell) {
         for (int i = 0; i < seg.size(); ++i) {
             if (seg[i] == cell) return true;
@@ -45,15 +48,44 @@ namespace {
         return false;
     }
 
-    // 路径加载前调用：刚推的炸弹墙若在即将执行的路径段 seg 上，则先原地等爆炸。
+    // 在爆破 apply 之前调用：扫描 blast_wall 的 3×3，把其中当前仍是墙(map!=0)的格捕获进
+    // s_pending_blast_cells。这些正是"下一步只有等这次爆炸炸开才能通过"的格子。
+    [[gnu::always_inline]] inline void capture_blast_cells(point blast_wall, const SokobanLevel& level) {
+        s_pending_blast_cells.clear();
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                int gx = blast_wall.x + dx;
+                int gy = blast_wall.y + dy;
+                if (gy < 0 || gy >= SystemConfig::MAP_MAX_HEIGHT ||
+                    gx < 0 || gx >= SystemConfig::MAP_MAX_WIDTH) continue;
+                if (level.map[gy][gx] != 0) {
+                    s_pending_blast_cells.push_back({static_cast<int8_t>(gx), static_cast<int8_t>(gy)});
+                }
+            }
+        }
+    }
+
+    // 路径是否踩到"这次爆炸才会清开的墙格"。只要路径任一格命中捕获的墙格集合即为真。
+    // 车绕墙而行、只擦过墙的邻域空地时不命中 → 不需要等(见图示轨迹绕开墙却曾误等 1 秒)。
+    [[gnu::always_inline]] inline bool segment_needs_blast(
+        const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& seg) {
+        for (int i = 0; i < seg.size(); ++i) {
+            for (int j = 0; j < s_pending_blast_cells.size(); ++j) {
+                if (seg[i] == s_pending_blast_cells[j]) return true;
+            }
+        }
+        return false;
+    }
+
+    // 路径加载前调用：刚推的炸弹若炸开的墙挡住即将执行的路径段 seg，则先原地等爆炸。
     // 返回 true = 仍需等待（调用方应保持原地、暂不加载路径）；false = 可放行加载。
     [[gnu::always_inline]] inline bool gate_explosion_before_path(
         const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& seg) {
-        if (s_pending_blast_wall.x < 0) return false;  // 无待处理炸弹
+        if (s_pending_blast_cells.size() == 0) return false;  // 无待处理炸弹
 
         if (!s_explosion_wait_active) {
-            if (!segment_contains(seg, s_pending_blast_wall)) {
-                s_pending_blast_wall = {-1, -1};       // 不穿墙：不等，直奔目标
+            if (!segment_needs_blast(seg)) {
+                s_pending_blast_cells.clear();         // 路径不靠这次爆炸开路：不等，直奔目标
                 return false;
             }
             s_explosion_wait_active = true;            // 需穿墙：启动固定时长等待
@@ -68,7 +100,7 @@ namespace {
         uint32_t wait_ms = (uint32_t)tune.bomb.explosion_wait_ms;
         if (Core::Scheduler::get_sys_tick_ms() - s_explosion_wait_start_ms >= wait_ms) {
             s_explosion_wait_active = false;
-            s_pending_blast_wall = {-1, -1};
+            s_pending_blast_cells.clear();
             Algorithm::Tracker::set_vision_correction_suppressed(false);  // 闪光过去，恢复视觉修正
             return false;  // 等待结束，放行加载
         }
@@ -199,7 +231,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             Algorithm::Tracker::track_point({OUT_TARGET_X, OUT_TARGET_Y, ENTRY_YAW});
 
             // 复位炸弹爆炸等待与视觉抑制，防止上一局异常中断后抑制标志卡死导致视觉永久失效
-            s_pending_blast_wall = {-1, -1};
+            s_pending_blast_cells.clear();
             s_explosion_wait_active = false;
             Algorithm::Tracker::set_vision_correction_suppressed(false);
 
@@ -439,6 +471,17 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     break;
                 }
                 case TaskType::APPLY_BOMB_RESULT: {
+                    // 记录被炸墙格：仅当本次推动确实引爆(detonates)才登记，下一条路径踩到被炸开的
+                    // 墙格才等爆炸。非引爆的中间推动(detonates=false，只挪炸弹未炸墙)绝不能等待——
+                    // 否则下一段常会经过 blast_wall(那还只是"未来"的墙)而误触发原地锁位等待+屏蔽视觉，
+                    // 表现为"没有炸墙也在原地干等好久"。参见 [[bomb-wait-after-push]]。
+                    // 必须在 apply 结算地图**之前**捕获——apply 会把这些墙当场清成空地，之后无法反查。
+                    if (task.param.bomb_push.detonates) {
+                        capture_blast_cells(task.param.bomb_push.blast_wall, logical_level);
+                    } else {
+                        s_pending_blast_cells.clear();
+                    }
+
                     // 真实执行完成后，同时结算地图状态和剩余炸弹任务
                     PlanningCommon::apply_executed_bomb_push_result(
                         logical_level,
@@ -451,8 +494,6 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                         logical_level.player_start = App::g_state.planning.grid_path.back();
                     }
 
-                    // 记录被炸墙格：下一条路径若穿过它才等爆炸，否则直奔下一目标（避免视觉污染）
-                    s_pending_blast_wall = task.param.bomb_push.blast_wall;
                     s_explosion_wait_active = false;
 
                     task_done = true;
