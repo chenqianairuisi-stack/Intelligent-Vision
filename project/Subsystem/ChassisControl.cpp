@@ -207,6 +207,16 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick() {
 
     guard_motion_residue(App::g_state);
 
+    // 硬锁：到达停车航点半径内后 Tracker 置位 hard_lock。此时直接把四轮目标速度清零，
+    // 不再经过 path_follower / yaw 规划 / 逆运动学，靠 5ms 速度环 PID 顶在 0 主动刹停锁死轮胎。
+    // 同步清掉规划器与偏航控制器的残留速度，解锁进入下一段时从零平滑起步。
+    if (ctrl.hard_lock) {
+        path_follower.reset();
+        yaw_controller.reset();
+        s_target_wheel_speeds = {0.0f, 0.0f, 0.0f, 0.0f};
+        return;
+    }
+
     float err_yaw = normalize_angle(ctrl.current_target.yaw - yaw);
 
     // 过弯不停顿：末速度由 Tracker 按"当前航点是否需要停稳"写入。

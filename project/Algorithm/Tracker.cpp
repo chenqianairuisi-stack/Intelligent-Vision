@@ -39,7 +39,7 @@ namespace {
     DTCM_DATA float s_box_push_final_press_cm = DEFAULT_BOX_PUSH_FINAL_PRESS_CM;
     // 默认连贯模式：中间拐点不强停，靠 corner_pass_speed/end_speed 保留切向动量。
     // 终点、推箱补点和 force_stop 航点仍会停车锁死，避免末端反追点。
-    DTCM_DATA bool s_stop_at_every_waypoint = false;
+    DTCM_DATA bool s_stop_at_every_waypoint = true;
     DTCM_DATA bool s_finish_without_stop = false;
     DTCM_DATA bool s_force_vision_assist_current_segment = false;
     DTCM_DATA bool s_vision_correction_suppressed = false;  // 炸弹爆炸窗口期屏蔽视觉修正
@@ -324,14 +324,15 @@ namespace {
     }
 
     // 当前底盘合速度大小 cm/s（由四轮反馈正运动学求出）
-    [[gnu::always_inline]] inline float current_speed_mag() {
+    [[maybe_unused]] [[gnu::always_inline]] inline float current_speed_mag() {
         const auto& w = App::g_state.physical.current_wheel_speed;
         Velocity2D v = Algorithm::Motion::Kinematics::forward(w.lf, w.lb, w.rf, w.rb);
         return std::sqrt(v.vx * v.vx + v.vy * v.vy);
     }
 
     // 拐点略停切换阈值 cm/s：合速度低于此即可切下一段（替代等完全停稳）
-    [[gnu::always_inline]] inline float corner_pause_speed() {
+    // 现已改为每航点等完全停稳，这里保留供未来调参，暂不使用。
+    [[maybe_unused]] [[gnu::always_inline]] inline float corner_pause_speed() {
         float s = tune.tracker.corner_pause_speed;
         if (!std::isfinite(s) || s < 0.0f) {
             return TuningDefaults::DEFAULT_CORNER_PAUSE_SPEED;
@@ -427,6 +428,7 @@ static void load_path_impl(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
     clear_stop_settle();
     s_finish_without_stop = false;
     ctrl.tracker_state = TrackerState::FINISHED;
+    ctrl.hard_lock = false;   // 新路径载入：解除上一任务遗留的硬锁
     reset_vision_assist(current_pose_point());
 
     if (raw_path.size() == 0) return;
@@ -598,10 +600,13 @@ __attribute__((section(".ramfunc"))) void update_target() {
 
     // 默认按停车规划；只有确认是"过弯不停顿"的拐点才在下面改成保留速度
     ctrl.segment_end_speed = 0.0f;
+    // 默认解除硬锁；只有确认已进入停车航点半径内、正在原地刹停时才在下面置位
+    ctrl.hard_lock = false;
 
     if (plan.physical_path.empty() || plan.current_wp_idx >= plan.physical_path.size()) {
         clear_stop_settle();
         ctrl.tracker_state = TrackerState::FINISHED;
+        ctrl.hard_lock = true;   // 路径耗尽：锁死轮胎原地保持
         Point2D hold = current_pose_point();
         ctrl.current_target.x = hold.x;
         ctrl.current_target.y = hold.y;
@@ -614,9 +619,11 @@ __attribute__((section(".ramfunc"))) void update_target() {
     bool push_extra_wp = is_push_extra_waypoint(plan.current_wp_idx);
     Point2D target_phys = plan.physical_path[plan.current_wp_idx];
     bool finish_without_stop_at_last = is_last_point && s_finish_without_stop;
-    bool must_stop_at_wp = (!finish_without_stop_at_last && is_last_point) ||
-                           force_stop_wp ||
-                           s_stop_at_every_waypoint;
+    // 每个航点都停稳再切向：中间航点由 s_stop_at_every_waypoint 控制（默认开）；
+    // 终点除"推箱不停顿终点"外都停；force_stop 标记的（拐点/推箱补点）始终停。
+    bool must_stop_at_wp = force_stop_wp ||
+                           (is_last_point ? !finish_without_stop_at_last
+                                          : s_stop_at_every_waypoint);
 
     // 终点粘滞锁：一旦进过终点半径就锁死，之后只原地刹车、绝不再朝 target_phys 反向追点，
     // 直到 is_stopped 才 FINISHED。解决"reach_radius 窗口 < 单拍滑行 → 惯性滑出窗口后
@@ -633,6 +640,7 @@ __attribute__((section(".ramfunc"))) void update_target() {
             if (!check_arrival(target_phys, FINAL_LOCK_RELEASE_RADIUS_CM)) {
                 s_final_lock_active = false;
             } else {
+                ctrl.hard_lock = true;
                 Point2D hold = current_pose_point();
                 ctrl.current_target.x = hold.x;
                 ctrl.current_target.y = hold.y;
@@ -659,17 +667,10 @@ __attribute__((section(".ramfunc"))) void update_target() {
     bool arrived = false;
 
     if (must_stop_at_wp) {
-        // 中间拐点（force-stop 但非终点、非推箱补点）只需略停顿：合速度低于阈值即可切；
-        // 真正终点/推箱补点仍要求完全停稳，保证精度不变。
-        bool brief_pause_corner = !is_last_point && !push_extra_wp && !finish_without_stop_at_last;
-        // 逐点停车模式：切段合速度阈值封顶，杜绝 flash 残留高值 → 带速切向磨圆弧
-        float switch_speed = corner_pause_speed();
-        if (s_stop_at_every_waypoint) {
-            switch_speed = std::min(switch_speed, STRAIGHT_MODE_SWITCH_SPEED_CAP_CM_S);
-        }
-        bool settled = brief_pause_corner ?
-            (current_speed_mag() < switch_speed) :
-            App::g_state.physical.is_stopped;
+        // 用户要求每个航点都"停稳"再切向：一律等四轮完全停住（is_stopped），
+        // 不再用 corner_pause_speed 略停顿提前切段。
+        bool brief_pause_corner = false;
+        bool settled = App::g_state.physical.is_stopped;
 
         if (s_stop_settle_active && s_stop_settle_wp_idx != plan.current_wp_idx) {
             clear_stop_settle();
@@ -679,6 +680,7 @@ __attribute__((section(".ramfunc"))) void update_target() {
             if (!check_arrival(s_stop_settle_target, STOP_SETTLE_RELEASE_RADIUS_CM)) {
                 clear_stop_settle();
             } else if (!settled) {
+                ctrl.hard_lock = true;   // 已在半径内、尚未停稳：锁死轮胎原地刹停
                 Point2D hold = current_pose_point();
                 ctrl.current_target.x = hold.x;
                 ctrl.current_target.y = hold.y;
@@ -703,6 +705,7 @@ __attribute__((section(".ramfunc"))) void update_target() {
                     s_stop_settle_active = true;
                     s_stop_settle_wp_idx = plan.current_wp_idx;
                     s_stop_settle_target = target_phys;
+                    ctrl.hard_lock = true;   // 刚进入半径：立即清零四轮目标速度锁死刹停
                     Point2D hold = current_pose_point();
                     ctrl.current_target.x = hold.x;
                     ctrl.current_target.y = hold.y;
@@ -764,6 +767,7 @@ void track_point_impl(const Pose2D& target, bool force_vision_assist) {
 
     ctrl.current_target = target;
     ctrl.segment_end_speed = 0.0f;   // 锁点/收尾一律按停车规划
+    ctrl.hard_lock = false;          // 点追踪由位置伺服贴点，解除硬锁
     ctrl.mode = ControlMode::POINT_TRACKING;
 }
 
