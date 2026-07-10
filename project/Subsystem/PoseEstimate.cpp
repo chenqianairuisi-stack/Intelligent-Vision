@@ -778,6 +778,9 @@ void update_yaw_1ms_tick() {
     float gy_rad = pure_gy * SystemConfig::DEG_TO_RAD;
     float gz_rad = pure_gz * SystemConfig::DEG_TO_RAD;
 
+    // 发布 yaw 角速度供控制层做陀螺阻尼，符号与下面 Mahony/yaw 积分方向一致
+    App::g_state.physical.yaw_rate = gz_rad;
+
     // ===============================================================================================
     // // 探针数据更新
     // float acc_sq = ax*ax + ay*ay + az*az;

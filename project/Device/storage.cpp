@@ -84,5 +84,19 @@ bool Storage::load_params() {
         changed = true;
     }
 
+    // yaw 控制链融合(2026-07-10)：新的 sqrt/线性/陀螺阻尼 yaw 控制器复用 dynamics.max_ang_*
+    // 与 tracker.ang_tolerance，但它们是旧 Master 为纯 P 控制器整定的(3.0/4.6/0.006)。
+    // 精确匹配旧默认值一次性迁到 Branch 值，避免旧 flash 让新控制器跑得过钝；
+    // 用户已改过(值≠旧默认)则不动，不与现场整定打架。
+    if (tune.dynamics.max_ang_vel == 3.0f && tune.dynamics.max_ang_acc == 4.6f) {
+        tune.dynamics.max_ang_vel = 10.0f;
+        tune.dynamics.max_ang_acc = 40.0f;
+        changed = true;
+    }
+    if (tune.tracker.ang_tolerance == 0.006f) {
+        tune.tracker.ang_tolerance = 0.010f;
+        changed = true;
+    }
+
     return changed;
 }

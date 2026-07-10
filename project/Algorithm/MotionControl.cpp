@@ -66,60 +66,83 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
 /// \param err yaw 误差，单位 rad
 /// \param dt 控制周期 s
 /// \param is_translating 当前是否正在明显平移
+/// \param yaw_rate IMU 实测 yaw 角速度，单位 rad/s，符号与 err 一致（逆时针为正）
 /// \return 期望角速度 rad/s
 ///
 /// \details
-/// 平移时不额外叠加静摩擦补偿，避免平移和旋转耦合后产生抖动
-/// 静止转向时会给很小目标角速度补偿 k_stiction，帮助克服启动摩擦
-/// 死区带迟滞：进入死区判定"已稳"后，要等误差涨过更大的再触发阈值才重新给力，
-/// 否则陀螺噪声在死区边界反复跨越会触发 k_stiction 猛踢 → 原地嗡嗡抖（静摩擦极限环）
+/// 速度规划分三层：
+/// 1) 远离目标时用 sqrt(2·a·err) 时间最优减速曲线，保证大角度快速收敛；
+/// 2) 进入 yaw.lin_band 线性带后，改用与 sqrt 在带边相切的线性律，
+///    使等效比例增益在 err→0 处不再发散，从根上消除"越接近越硬"导致的极限环；
+/// 3) 叠加 -yaw.kd·yaw_rate 陀螺阻尼，直接对被控对象角速度做微分反馈，
+///    与误差符号无关地抑制冲过/回摆，是真正的止抖项（无 setpoint kick、无编码器差分噪声）。
+/// 静止转向时仍在刹车距离足够处补偿 yaw.stiction，避免小角度越界来回蹭。
 ///
 __attribute__((section(".ramfunc")))
-float YawProfiled::calculate(float err, float dt, bool is_translating) {
+float YawProfiled::calculate(float err, float dt, bool is_translating, float yaw_rate) {
 
+    // 容差死区判断：到达目标后彻底切断动力，防止持续微调引起的抖动
     float abs_err = std::abs(err);
-    float ang_tol = tune.tracker.ang_tolerance;
-    // 再触发阈值 = 死区 × 迟滞倍数：已稳后误差必须涨过它才重新介入，把噪声关在死区里
-    constexpr float HOLD_HYSTERESIS = 4.0f;
-    float reengage = ang_tol * HOLD_HYSTERESIS;
-
-    if (settled) {
-        // 已判定停稳：误差还在再触发阈值内就保持零动力，噪声不再喂出抖动
-        if (abs_err <= reengage) {
-            current_vw = 0.0f;
-            return 0.0f;
-        }
-        settled = false;  // 误差确实变大（真有新目标/明显漂移），重新介入
-    } else if (abs_err <= ang_tol) {
-        // 收敛进死区：锁存"已稳"，彻底切断动力
-        settled = true;
+    if (abs_err <= tune.tracker.ang_tolerance) {
         current_vw = 0.0f;
+        current_aw = 0.0f;
         return 0.0f;
     }
 
-    // 纯 P 控制：距离越近，要求速度越小
-    float target_vw = tune.pid_yaw.kp * err;
+    float max_ang_vel = std::max(tune.dynamics.max_ang_vel, 0.0f);
+    float max_ang_acc = std::max(tune.dynamics.max_ang_acc, 0.001f);
 
-    // 静摩擦补偿：当目标速度过小时，提供一个最小的补偿速度，帮助克服静摩擦阈值
-    if (!is_translating) {
-        if (std::abs(target_vw) < tune.ff.k_stiction) {
-            target_vw = std::copysign(tune.ff.k_stiction, err);
+    // 线性带宽下限护栏：过小会退化回 sqrt 的无穷斜率问题
+    float lin_band = std::max(tune.yaw.lin_band, 0.005f);
+
+    // 带边速度与斜率：sqrt 曲线在 err=lin_band 处的值和导数
+    // v_edge = sqrt(2·a·band)，斜率 k = dv/d(err)|edge = a / v_edge
+    // 线性带内用 v = k·err 保证带边 C0 连续，且 err→0 处等效增益恒为 k（有界）
+    float v_edge = sqrtf(2.0f * max_ang_acc * lin_band);
+
+    float target_abs_vw;
+    if (abs_err >= lin_band) {
+        // 远端：时间最优 sqrt 减速曲线
+        target_abs_vw = sqrtf(2.0f * max_ang_acc * abs_err);
+    } else {
+        // 近端：与 sqrt 相切的线性律，等效 Kp = v_edge / lin_band 有界
+        target_abs_vw = (v_edge / lin_band) * abs_err;
+    }
+    if (is_translating) {
+        target_abs_vw *= tune.yaw.translate_gain;
+    }
+    target_abs_vw = std::min(target_abs_vw, max_ang_vel);
+
+    // 静摩擦补偿：提供一个最小的纠正角速度地板，避免小偏差纠正力度不足
+    // 平移时轮子动态摩擦低于静止，地板减至 40%，仍然保证基本纠正能力
+    {
+        float stiction_vw = std::min(tune.yaw.stiction, max_ang_vel);
+        if (is_translating) stiction_vw *= 0.4f;
+        float stiction_brake_err = (stiction_vw * stiction_vw) / (2.0f * max_ang_acc);
+        if (target_abs_vw < stiction_vw && abs_err > stiction_brake_err) {
+            target_abs_vw = stiction_vw;
         }
     }
 
-    // 速度物理限幅
-    target_vw = std::clamp(target_vw, -tune.dynamics.max_ang_vel, tune.dynamics.max_ang_vel);
+    float target_vw = std::copysign(target_abs_vw, err);
+
+    // 陀螺阻尼：平移时减小阻尼，避免被动带歪阶段削弱主动纠偏
+    // 放在加速度限幅之前，使阻尼也受物理步长约束，不会引入单帧跳变
+    float yaw_kd = is_translating ? tune.yaw.kd_translate : tune.yaw.kd;
+    target_vw -= yaw_kd * yaw_rate;
 
     // 加速度物理限幅：防止起步打滑和急刹打滑
-    float max_dv = tune.dynamics.max_ang_acc * dt;
+    float last_vw = current_vw;
+    float max_dv = max_ang_acc * dt;
     if (target_vw > current_vw + max_dv) {
-        current_vw += max_dv;       
+        current_vw += max_dv;
     } else if (target_vw < current_vw - max_dv) {
-        current_vw -= max_dv;      
+        current_vw -= max_dv;
     } else {
-        current_vw = target_vw; 
+        current_vw = target_vw;
     }
 
+    current_aw = (current_vw - last_vw) / std::max(dt, 0.001f);
     return current_vw;
 }
 

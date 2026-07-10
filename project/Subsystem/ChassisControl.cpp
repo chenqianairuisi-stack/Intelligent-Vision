@@ -243,9 +243,9 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick() {
     float expected_local_vy = expected_global_vel.vx * cos_theta + expected_global_vel.vy * sin_theta;
 
 
-    // Yaw 角速度规划：根据当前的偏航误差，计算出一个平滑的期望角速度
+    // Yaw 角速度规划：三层规划(sqrt远端/线性近端)叠加 IMU 陀螺阻尼，抑制冲过/回摆
     bool is_translating = (std::abs(expected_local_vx) > 2.0f || std::abs(expected_local_vy) > 2.0f);
-    float expected_local_vw = yaw_controller.calculate(err_yaw, SystemConfig::PIT_CH1_DT_S, is_translating);
+    float expected_local_vw = yaw_controller.calculate(err_yaw, SystemConfig::PIT_CH1_DT_S, is_translating, App::g_state.physical.yaw_rate);
 
 
     // 逆运动学解算：将期望的底盘全向速度分配给 4 个轮子，得到每个轮子的目标转速 (v1, v2, v3, v4)

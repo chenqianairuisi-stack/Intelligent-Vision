@@ -22,12 +22,15 @@ private:
 
 class YawProfiled {
 public:
-    void reset() { current_vw = 0.0f; settled = false; }
-    float calculate(float err, float dt, bool is_translating);
+    void reset() { current_vw = 0.0f; current_aw = 0.0f; }
+    // err/yaw_rate 单位 rad、rad/s，yaw_rate 为 IMU 实测角速度，用于陀螺阻尼
+    float calculate(float err, float dt, bool is_translating, float yaw_rate);
+    // 获取最近一次角速度规划产生的角加速度（rad/s^2）
+    float accel() const { return current_aw; }
 
 private:
     float current_vw = 0.0f;
-    bool settled = false;   // 死区迟滞锁存：进死区判稳后，需误差涨过再触发阈值才重新给力
+    float current_aw = 0.0f;
 };
 
 

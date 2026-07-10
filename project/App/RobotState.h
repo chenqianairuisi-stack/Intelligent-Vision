@@ -82,6 +82,7 @@ struct RobotState {
     struct {
         Pose2D pose = {0.0f, 0.0f, SystemConfig::ENTRY_YAW};          // 物理位姿 (cm/deg)
         WheelSpeed4 current_wheel_speed = {0.0f, 0.0f, 0.0f, 0.0f};   // 当前四轮速度 (cm/s)
+        float yaw_rate = 0.0f;                                        // IMU 直接测得的 yaw 角速度 (rad/s, 逆时针为正)，供 yaw 环陀螺阻尼
         bool is_stopped = true;                                       // 底盘是否完全停止
     } physical;
 
