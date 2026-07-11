@@ -41,6 +41,13 @@ __attribute__((section(".dtcm_data"))) static WheelSpeed4 s_target_wheel_speeds 
 // 与上一拍目标轮速一同由 20ms 慢环维护，5ms 快环消费。
 __attribute__((section(".dtcm_data"))) static WheelSpeed4 s_target_wheel_accels = {0.0f, 0.0f, 0.0f, 0.0f};
 __attribute__((section(".dtcm_data"))) static WheelSpeed4 s_prev_target_wheel_speeds = {0.0f, 0.0f, 0.0f, 0.0f};
+// 20ms→5ms 线性内插：把慢环产出的目标轮速/加速度在 4 个快环拍上线性铺开，消除 20ms 台阶
+// 对速度环的周期性激励（低速刹车段"微颤"根因）。快环消费 s_interp_*，慢环末尾发布步长。
+__attribute__((section(".dtcm_data"))) static WheelSpeed4 s_interp_speed = {0.0f, 0.0f, 0.0f, 0.0f};
+__attribute__((section(".dtcm_data"))) static WheelSpeed4 s_interp_accel = {0.0f, 0.0f, 0.0f, 0.0f};
+__attribute__((section(".dtcm_data"))) static WheelSpeed4 s_speed_step = {0.0f, 0.0f, 0.0f, 0.0f};
+__attribute__((section(".dtcm_data"))) static WheelSpeed4 s_accel_step = {0.0f, 0.0f, 0.0f, 0.0f};
+__attribute__((section(".dtcm_data"))) static uint8_t s_interp_ticks_left = 0;
 __attribute__((section(".dtcm_data"))) static bool control_history_ready = false;
 __attribute__((section(".dtcm_data"))) static ControlMode last_control_mode = ControlMode::AUTO_TRACKING;
 __attribute__((section(".dtcm_data"))) static TrackerState last_tracker_state = TrackerState::NONE;
@@ -82,6 +89,12 @@ namespace {
         s_target_wheel_speeds = {0.0f, 0.0f, 0.0f, 0.0f};
         s_target_wheel_accels = {0.0f, 0.0f, 0.0f, 0.0f};
         s_prev_target_wheel_speeds = {0.0f, 0.0f, 0.0f, 0.0f};
+        // 内插状态一并清零：切任务/急停后从零重新铺，避免残留步长把速度带偏
+        s_interp_speed = {0.0f, 0.0f, 0.0f, 0.0f};
+        s_interp_accel = {0.0f, 0.0f, 0.0f, 0.0f};
+        s_speed_step = {0.0f, 0.0f, 0.0f, 0.0f};
+        s_accel_step = {0.0f, 0.0f, 0.0f, 0.0f};
+        s_interp_ticks_left = 0;
         for (auto& pid : pid_wheels) {
             pid.reset();
         }
@@ -145,9 +158,25 @@ namespace {
         App::g_state.game.phase = GamePhase::ERROR_OCCURRED;
     }
 
+    // 慢环(20ms)末尾发布：把"当前内插值→新目标"的差分成 N=4 拍，交给快环逐拍线性逼近，
+    // 消除 20ms 台阶对速度环的周期性激励（低速刹车微颤根因）。速度与加速度目标一同内插。
+    __attribute__((always_inline)) inline void publish_wheel_target_interp() {
+        constexpr float N = static_cast<float>(SystemConfig::PIT_CH1_PERIOD_MS) /
+                            static_cast<float>(SystemConfig::SPEED_LOOP_PERIOD_MS);  // 20/5 = 4
+        s_speed_step.lf = (s_target_wheel_speeds.lf - s_interp_speed.lf) / N;
+        s_speed_step.lb = (s_target_wheel_speeds.lb - s_interp_speed.lb) / N;
+        s_speed_step.rf = (s_target_wheel_speeds.rf - s_interp_speed.rf) / N;
+        s_speed_step.rb = (s_target_wheel_speeds.rb - s_interp_speed.rb) / N;
+        s_accel_step.lf = (s_target_wheel_accels.lf - s_interp_accel.lf) / N;
+        s_accel_step.lb = (s_target_wheel_accels.lb - s_interp_accel.lb) / N;
+        s_accel_step.rf = (s_target_wheel_accels.rf - s_interp_accel.rf) / N;
+        s_accel_step.rb = (s_target_wheel_accels.rb - s_interp_accel.rb) / N;
+        s_interp_ticks_left = static_cast<uint8_t>(N);
+    }
+
     // 速度内环控制（从 Branch 搬入：每轮独立 PID + 前馈）：输入四轮目标转速，逐轮
     // 前馈(kv + ks + ka/kb·目标加速度) + 独立 PID(积分门控) 出占空比。零速死区改为松力滑行，
-    // 无主动制动锁定。目标加速度由 20ms 慢环算出（s_target_wheel_accels），起步弹射/刹车稳停更脆。
+    // 无主动制动锁定。目标速度/加速度均经 20ms→5ms 内插喂入，起步弹射/刹车稳停更脆更平顺。
     __attribute__((always_inline)) inline void run_speed_loop(const WheelSpeed4& targets) {
         const auto& current_speeds = App::g_state.physical.current_wheel_speed;
         const float max_duty = tune.dynamics.max_duty;
@@ -160,8 +189,8 @@ namespace {
 
         const float tgt[4] = {targets.lf, targets.lb, targets.rf, targets.rb};
         const float cur[4] = {current_speeds.lf, current_speeds.lb, current_speeds.rf, current_speeds.rb};
-        const float acc[4] = {s_target_wheel_accels.lf, s_target_wheel_accels.lb,
-                              s_target_wheel_accels.rf, s_target_wheel_accels.rb};
+        const float acc[4] = {s_interp_accel.lf, s_interp_accel.lb,
+                              s_interp_accel.rf, s_interp_accel.rb};
 
         for (int i = 0; i < 4; ++i) {
             // 零速死区：目标、实测、目标加速度都≈0 → 松力滑行(输出0)。注意这不是"没到点提前停"——
@@ -225,6 +254,9 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick() {
         s_target_wheel_speeds = {0.0f, 0.0f, 0.0f, 0.0f};
         s_target_wheel_accels = {0.0f, 0.0f, 0.0f, 0.0f};
         s_prev_target_wheel_speeds = {0.0f, 0.0f, 0.0f, 0.0f};
+        // 目标已置 0，仍走内插把当前速度在 4 拍内线性铺到 0（比直接阶跃到 0 更平顺，减少刹停微颤），
+        // PID 全程主动刹，停得依旧干脆。
+        publish_wheel_target_interp();
         return;
     }
 
@@ -279,17 +311,31 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick() {
         s_target_wheel_accels.rb = acc_of(s_target_wheel_speeds.rb, s_prev_target_wheel_speeds.rb);
         s_prev_target_wheel_speeds = s_target_wheel_speeds;
     }
+
+    // 发布 20ms→5ms 内插步长：快环 4 拍线性铺到新目标，消除台阶激励（低速刹车微颤）。
+    publish_wheel_target_interp();
 }
 
 
 /// \brief 5ms 轮速内环（200Hz 快环）
 ///
 /// \details
-/// 消费慢环(20ms)最近一次产出的四轮目标速度，配合 5ms 新测得的轮速跑 PID+前馈出占空比。
-/// 内环提速到 200Hz 后才能在高速/急刹下紧跟目标，不再因 50Hz 跟不上而过冲互顶（啸叫根因）。
+/// 消费慢环(20ms)产出目标，经 20ms→5ms 线性内插后配合 5ms 新测轮速跑 PID+前馈出占空比。
+/// 内插消除 20ms 台阶对速度环的周期性激励（低速刹车"微颤"根因），同时内环 200Hz 紧跟目标。
 ///
 __attribute__((section(".ramfunc"))) void update_speed_loop_5ms() {
-    run_speed_loop(s_target_wheel_speeds);
+    if (s_interp_ticks_left > 0) {
+        s_interp_speed.lf += s_speed_step.lf;  s_interp_speed.lb += s_speed_step.lb;
+        s_interp_speed.rf += s_speed_step.rf;  s_interp_speed.rb += s_speed_step.rb;
+        s_interp_accel.lf += s_accel_step.lf;  s_interp_accel.lb += s_accel_step.lb;
+        s_interp_accel.rf += s_accel_step.rf;  s_interp_accel.rb += s_accel_step.rb;
+        --s_interp_ticks_left;
+    } else {
+        // 内插拍数用尽：锁定到慢环最新目标，等下一次 publish 再铺
+        s_interp_speed = s_target_wheel_speeds;
+        s_interp_accel = s_target_wheel_accels;
+    }
+    run_speed_loop(s_interp_speed);
 }
 
 

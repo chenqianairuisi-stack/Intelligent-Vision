@@ -487,12 +487,16 @@ void load_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path, point start_
     load_path_impl(raw_path, true, start_grid);
 }
 
+// 推箱 / Sokoban 路径载入：现与观测 load_path 行为完全一致——不再插 0.2cm 顶死补点，
+// 终点按 must_stop 正常停稳一次。原先的 s_finish_without_stop + apply_box_push_extra 会在
+// 终点 0.2cm 内制造"停→弹射→停"，把目标加速度打成正负 doublet → 底盘"猛地一下"（推箱专属抖动）。
+// 去掉后推箱收尾与观测同样干净。代价：丢箱子最后 0.2cm 顶死余量（按用户取舍：消抖优先）。
+// level 参数保留以维持接口/调用点不变，当前实现不再使用（顶死补点的遥测调参 '3' 随之失效但无害）。
 void load_sokoban_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
                        point start_grid,
                        const SokobanLevel& level) {
+    (void)level;
     load_path_impl(raw_path, true, start_grid);
-    s_finish_without_stop = true;
-    apply_box_push_extra_from_raw_path(raw_path, start_grid, level);
 }
 
 void load_box_push_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
@@ -500,9 +504,8 @@ void load_box_push_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
                         point,
                         point,
                         const SokobanLevel& level) {
+    (void)level;
     load_path_impl(raw_path, true, start_grid);
-    s_finish_without_stop = true;
-    apply_box_push_extra_from_raw_path(raw_path, start_grid, level);
 }
 
 void load_bomb_push_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
