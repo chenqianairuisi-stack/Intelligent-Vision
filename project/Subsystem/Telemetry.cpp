@@ -462,6 +462,21 @@ namespace {
                 }
                 break;
 
+            case 'W': {  // 每轮轮速环调参：!W <轮 0-3> <字段> <值>，字段 kp/ki/kd/kv/ka/kb/ks
+                int wi = -1; char field[8] = {0}; float v = 0.0f;
+                if (sscanf(&cmd[2], "%d %7s %f", &wi, field, &v) == 3 && wi >= 0 && wi < 4) {
+                    WheelControlParams& w = tune.wheels[wi];
+                    if      (strcmp(field, "kp") == 0) w.pid.kp = v;
+                    else if (strcmp(field, "ki") == 0) w.pid.ki = v;
+                    else if (strcmp(field, "kd") == 0) w.pid.kd = v;
+                    else if (strcmp(field, "kv") == 0) w.kv = v;
+                    else if (strcmp(field, "ka") == 0) w.ka = v;
+                    else if (strcmp(field, "kb") == 0) w.kb = v;
+                    else if (strcmp(field, "ks") == 0) w.ks = v;
+                }
+                break;
+            }
+
             case 'P': { // 多点路径下发指令
                 auto& plan = App::g_state.planning;
                 if (sub == 'C') {

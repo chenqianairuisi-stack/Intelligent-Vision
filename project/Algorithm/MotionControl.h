@@ -119,35 +119,71 @@ private:
     float last_err = 0.0f, i_out = 0.0f;
 };
 
-// 速度环 PID
+// 速度环 PID（从 Branch 搬入：每轮独立整定）
+// - 积分门控：大加减速段（|target_acc| 或 |err| 大）主要靠前馈跟随，积分退避（*0.98），
+//   只在接近稳态时兜慢偏差，避免平台切入/刹停把加速段积累的历史误差释放成过冲。
+// - 滤波微分：只阻尼"计划外加速度"(measured_accel - target_acc)，不抵消 ka/kb 前馈。
+// calculate 需传目标加速度 target_acc 与 dt（阶段1 target_acc 传 0，ka/kb/微分自然不参与）。
 class Speed_PosPid {
 public:
     Speed_PosPid(const PidParams& p) : params(p) {}
-    
-    void reset() { i_out = 0.0f;}  // 断电/急停/初始化时，必须调用此函数清零历史状态
+
+    void reset() {  // 断电/急停/初始化时，必须调用此函数清零历史状态
+        i_out = 0.0f;
+        d_filt = 0.0f;
+        last_current = 0.0f;
+        has_last = false;
+    }
 
     __attribute__((always_inline))
-    inline float calculate(float target, float current) {
+    inline float calculate(float target, float current, float target_acc, float dt) {
         if (std::abs(target) < 0.1f && std::abs(current) < 0.5f) {
             i_out = 0.0f;
+            d_filt = 0.0f;
+            has_last = false;
             return 0.0f;
         }
 
         float err = target - current;
 
-        // 积分按快环节拍缩放，保持原 20ms 整定的 ki 等效（快环每秒调用更多次）
-        i_out += params.ki * err * SystemConfig::SPEED_LOOP_KI_SCALE;
+        // 大加减速段主要靠前馈跟随，积分只在接近稳态时兜慢偏差
+        constexpr float INTEGRAL_ACCEL_BAND = 80.0f;
+        constexpr float INTEGRAL_ERR_BAND = 15.0f;
+        if (std::abs(target_acc) < INTEGRAL_ACCEL_BAND && std::abs(err) < INTEGRAL_ERR_BAND) {
+            i_out += params.ki * err * dt;
+        } else {
+            i_out *= 0.98f;
+        }
 
         // 积分抗饱和
-        i_out = std::clamp(i_out, -20.0f, 20.0f);
+        i_out = std::clamp(i_out, -10.0f, 10.0f);
 
-        // 最终返回 PI 补偿占空比
-        return (params.kp * err) + i_out;
+        float d_out = 0.0f;
+        if (has_last && dt > 0.001f) {
+            constexpr float D_FILTER_ALPHA = 0.35f;
+            constexpr float D_ACCEL_DEADBAND = 8.0f;
+            float measured_accel = (current - last_current) / dt;
+            float accel_err = measured_accel - target_acc;
+            if (std::abs(accel_err) < D_ACCEL_DEADBAND) {
+                accel_err = 0.0f;
+            }
+            d_filt += D_FILTER_ALPHA * (accel_err - d_filt);
+            d_out = -params.kd * d_filt;   // D 项只阻尼计划外加速度，避免抵消 ka/kb 前馈
+        } else {
+            d_filt = 0.0f;
+            has_last = true;
+        }
+        last_current = current;
+
+        return (params.kp * err) + i_out + d_out;
     }
 
 private:
     const PidParams& params;
     float i_out = 0.0f;
+    float d_filt = 0.0f;
+    float last_current = 0.0f;
+    bool has_last = false;
 };
 
 } // namespace Algorithm::Motion

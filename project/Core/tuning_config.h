@@ -14,6 +14,17 @@ struct FeedforwardParams {
     float k_stiction;  // 角度环静摩擦补偿
 };
 
+// 单轮速度环与前馈参数（从 Branch 搬入：每轮独立整定，治四轮跟踪不齐→平移歪）
+// pid 走每轮独立 kp/ki/kd；kv 速度前馈、ks 静摩擦补偿常态生效；ka/kb 为目标加速度前馈
+// （加速用 ka、刹车用 kb），阶段1 暂不喂 target_acc，故 ka/kb 暂不参与，留待阶段2。
+struct WheelControlParams {
+    PidParams pid;  // 单轮速度 PID
+    float kv;       // 速度前馈系数
+    float ka;       // 目标加速度前馈系数（加速工况）
+    float kb;       // 目标刹车加速度前馈系数（减速工况）
+    float ks;       // 静摩擦补偿系数
+};
+
 // 集中管理全车所有可调参数
 struct TuningConfig {
     PidParams pid_yaw;       // 航向角速度控制参数
@@ -101,6 +112,11 @@ struct TuningConfig {
         float kd_translate;    // 平移段陀螺阻尼系数
         float stiction;        // 原地转向静摩擦补偿角速度 rad/s
     } yaw;
+
+    // 每轮独立轮速环参数（顺序 LF, LB, RF, RB）。追加在结构体**末尾**，不 bump magic：
+    // 旧 flash 无此区、memcpy 读出垃圾 → 由 sanitize 兜回 Branch 调好的默认值（见 storage.cpp 尾部约定）。
+    // 新轮速环走此表；旧 pid_speed / ff.kv / ff.ka 字段保留但不再被速度内环使用。
+    WheelControlParams wheels[4];
 };
 
 namespace TuningDefaults {
@@ -143,6 +159,15 @@ namespace TuningDefaults {
     inline constexpr float DEFAULT_YAW_TRANSLATE_GAIN = 1.00f;  // 平移途中增强航向纠偏
     inline constexpr float DEFAULT_YAW_KD_TRANSLATE   = 0.36f;  // 平移途中减小阻尼削弱
     inline constexpr float DEFAULT_YAW_STICTION       = 0.24f;  // 原地转向静摩擦补偿
+
+    // 每轮独立轮速环默认（顺序 LF, LB, RF, RB）：直接取 Branch 在**同一辆车**上调好的值。
+    // 格式 {{kp,ki,kd}, kv, ka, kb, ks}。旧 flash 尾部无此区、读出垃圾 → sanitize 兜回这里。
+    inline constexpr WheelControlParams DEFAULT_WHEELS[4] = {
+        {{0.72f, 0.56f, 0.0f}, 0.046f, 0.020f, 0.030f, 5.0f},  // LF
+        {{0.65f, 0.56f, 0.0f}, 0.054f, 0.016f, 0.024f, 5.0f},  // LB
+        {{0.64f, 0.74f, 0.0f}, 0.052f, 0.014f, 0.028f, 5.0f},  // RF
+        {{0.74f, 0.56f, 0.0f}, 0.062f, 0.024f, 0.032f, 6.4f},  // RB
+    };
 
     inline constexpr float MIN_BRAKE_LIMIT = 0.0f;
     inline constexpr float MAX_BRAKE_LIMIT = 1.0f;
@@ -303,6 +328,26 @@ namespace TuningDefaults {
                                    MAX_YAW_STICTION,
                                    DEFAULT_YAW_STICTION) || changed;
 
+        // 每轮轮速环参数（尾部追加区）：旧 flash 无此区，memcpy 读出垃圾/NaN → 兜回 Branch 默认。
+        // 判据：kp 或 ks 越界/NaN 视为该轮未初始化（真实整定 kp≥0.1、ks≥0.5），整轮兜回默认；
+        // 其余字段（可为 0）各自限幅。NaN 因比较恒 false 会自动落入越界分支被兜回。
+        for (int w = 0; w < 4; ++w) {
+            WheelControlParams& wp = config.wheels[w];
+            const WheelControlParams& def = DEFAULT_WHEELS[w];
+            bool wheel_bad = !(wp.pid.kp >= 0.1f && wp.pid.kp <= 5.0f) ||
+                             !(wp.ks     >= 0.5f && wp.ks     <= 30.0f);
+            if (wheel_bad) {
+                wp = def;
+                changed = true;
+                continue;
+            }
+            changed = clamp_if_outside(wp.pid.ki, 0.0f, 5.0f, def.pid.ki) || changed;
+            changed = clamp_if_outside(wp.pid.kd, 0.0f, 2.0f, def.pid.kd) || changed;
+            changed = clamp_if_outside(wp.kv,     0.0f, 1.0f, def.kv)     || changed;
+            changed = clamp_if_outside(wp.ka,     0.0f, 1.0f, def.ka)     || changed;
+            changed = clamp_if_outside(wp.kb,     0.0f, 1.0f, def.kb)     || changed;
+        }
+
         return changed;
     }
 }
@@ -375,5 +420,11 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
         TuningDefaults::DEFAULT_YAW_TRANSLATE_GAIN,    // yaw.translate_gain
         TuningDefaults::DEFAULT_YAW_KD_TRANSLATE,      // yaw.kd_translate
         TuningDefaults::DEFAULT_YAW_STICTION           // yaw.stiction
+    },
+    {
+        TuningDefaults::DEFAULT_WHEELS[0],  // wheels[LF]
+        TuningDefaults::DEFAULT_WHEELS[1],  // wheels[LB]
+        TuningDefaults::DEFAULT_WHEELS[2],  // wheels[RF]
+        TuningDefaults::DEFAULT_WHEELS[3]   // wheels[RB]
     }
 };

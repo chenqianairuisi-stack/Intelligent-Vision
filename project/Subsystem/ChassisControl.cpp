@@ -25,8 +25,10 @@ __attribute__((section(".dtcm_data"))) static Motor motors[4] = {
 };
 
 __attribute__((section(".dtcm_data"))) static Algorithm::Motion::Speed_PosPid pid_wheels[4] = {
-    Algorithm::Motion::Speed_PosPid(tune.pid_speed), Algorithm::Motion::Speed_PosPid(tune.pid_speed),
-    Algorithm::Motion::Speed_PosPid(tune.pid_speed), Algorithm::Motion::Speed_PosPid(tune.pid_speed)
+    Algorithm::Motion::Speed_PosPid(tune.wheels[0].pid),   // LF：每轮独立整定
+    Algorithm::Motion::Speed_PosPid(tune.wheels[1].pid),   // LB
+    Algorithm::Motion::Speed_PosPid(tune.wheels[2].pid),   // RF
+    Algorithm::Motion::Speed_PosPid(tune.wheels[3].pid)    // RB
 };
 
 // __attribute__((section(".dtcm_data"))) static Algorithm::Motion::Angle_PosPid pid_pos_yaw(tune.pid_yaw);
@@ -54,30 +56,20 @@ namespace {
         return val / (std::abs(val) + 0.5f);
     }
 
-    // 静摩擦前馈：轮子接近静止、要启动时给满 ka 破静摩擦（动作干脆）；轮子转起来后
-    // 动摩擦更小，按实测轮速衰减 ka，避免低速/换向段被常量 ka 过量驱动 → 极限环啸叫。
-    __attribute__((always_inline)) inline float friction_ff(float target, float current) {
-        constexpr float KA_FADE_V = 6.0f;  // cm/s：轮速超过此量级后静摩擦补偿基本退场
-        // 近零死区：目标轮速极小(停稳/换向过零)时不给 ka 踢，否则过零瞬间 ka 反号 +
-        // 硬刹车过冲 → 原地小幅晃/抖（brake_limit 偏大时尤甚）。真要动时目标远大于此、不受影响。
-        constexpr float KA_MIN_TARGET = 1.0f;  // cm/s
-        if (std::abs(target) < KA_MIN_TARGET) return 0.0f;
-        float fade = KA_FADE_V / (std::abs(current) + KA_FADE_V);  // current≈0→1，高速→~0
-        return smooth_sign(target) * tune.ff.ka * fade;
-    }
-
-    // 主动刹车/锁定前馈（"加速度前瞻"）：当目标轮速明显低于当前轮速（在减速/想停但轮子
-    // 还带速）时，额外给一个与残余轮速反向的制动占空比，把车更快钉到目标上。
-    //   - 治"冲过头→回拉→晃"：减速全程轮子略快于目标 → 持续小幅主动制动 → 缩短过冲；
-    //   - 治"终点锁不死"：锁定时目标≈0、轮子还在滑 → 强主动制动 → 锁得更死。
-    // 只在减速方向介入，不会反向加速；低于接入门限不介入，避免停稳后在零附近抖。
-    // 增益走 tune.feel.brake_hold_gain（菜单 BrkHold / !T G 现场调，Save 持久化）。
-    __attribute__((always_inline)) inline float brake_ff(float target, float current) {
-        constexpr float BRAKE_ENGAGE_SPEED = 0.5f;  // cm/s：轮速低于此不介入，避免停稳抖
-        if (std::abs(current) < BRAKE_ENGAGE_SPEED) return 0.0f;
-        // 只有"目标比当前更慢"(在减速)才主动制动；加速/匀速时不介入
-        if (std::abs(target) >= std::abs(current)) return 0.0f;
-        return -tune.feel.brake_hold_gain * (current - target);
+    // 单轮前馈（从 Branch 搬入，每轮参数独立）：
+    //   kv·target  —— 速度前馈
+    //   ks·smooth_sign(target) —— 静摩擦补偿（常态生效，破静摩擦）
+    //   ka/kb·target_acc —— 目标加速度前馈（加速用 ka、刹车用 kb，按 target_acc 是否与
+    //                        当前运动方向相反判别 braking）
+    // 注意：这里**没有** master 旧的 brake_ff 主动制动锁定项。零速收尾改为松力滑行
+    // （见 run_speed_loop 的零速死区），所以搬入后"锁死"现象自然消失。
+    // 阶段1：run_speed_loop 传 target_acc=0，故 ka/kb 项恒为 0，只有 kv+ks 生效。
+    __attribute__((always_inline)) inline float wheel_feedforward(
+            const WheelControlParams& p, float target, float current, float target_acc) {
+        float motion_ref = (std::abs(current) > 1.0f) ? current : target;
+        bool braking = (motion_ref * target_acc) < -0.1f;
+        float accel_gain = braking ? p.kb : p.ka;
+        return target * p.kv + smooth_sign(target) * p.ks + target_acc * accel_gain;
     }
 
     __attribute__((always_inline)) inline void reset_motion_residue() {
@@ -147,29 +139,36 @@ namespace {
         App::g_state.game.phase = GamePhase::ERROR_OCCURRED;
     }
 
-    // 速度内环控制：输入四个轮子的目标转速，执行 PID 计算并驱动电机
+    // 速度内环控制（从 Branch 搬入：每轮独立 PID + 前馈）：输入四轮目标转速，逐轮
+    // 前馈(kv+ks) + 独立 PID(积分门控) 出占空比。零速死区改为松力滑行，无主动制动锁定。
+    // 阶段1：目标加速度 target_acc 暂传 0（ka/kb 与微分项自然不参与），留待阶段2内插喂入。
     __attribute__((always_inline)) inline void run_speed_loop(const WheelSpeed4& targets) {
         const auto& current_speeds = App::g_state.physical.current_wheel_speed;
-        const auto& Kv = tune.ff.kv;
+        const float max_duty = tune.dynamics.max_duty;
+        const float dt = SystemConfig::SPEED_LOOP_DT_S;
 
-        // 计算前馈占空比 (简单的线性模型)，静摩擦补偿按轮速衰减（见 friction_ff）
-        // 再叠加主动刹车前馈（brake_ff）：减速/锁定时额外制动，缩短过冲、锁得更死。
-        float ff_lf = targets.lf * Kv + friction_ff(targets.lf, current_speeds.lf) + brake_ff(targets.lf, current_speeds.lf);
-        float ff_lb = targets.lb * Kv + friction_ff(targets.lb, current_speeds.lb) + brake_ff(targets.lb, current_speeds.lb);
-        float ff_rf = targets.rf * Kv + friction_ff(targets.rf, current_speeds.rf) + brake_ff(targets.rf, current_speeds.rf);
-        float ff_rb = targets.rb * Kv + friction_ff(targets.rb, current_speeds.rb) + brake_ff(targets.rb, current_speeds.rb);
+        // 零速松力滑行门限（Branch 值）：目标与实测均低于此即关输出，避免 ks 放大微小爬行目标
+        constexpr float WHEEL_ZERO_TARGET_CM_S = 0.8f;
 
-        // 速度环位置式 PID + 前馈计算占空比输出
-        float duty_lf = ff_lf + pid_wheels[0].calculate(targets.lf, current_speeds.lf);
-        float duty_lb = ff_lb + pid_wheels[1].calculate(targets.lb, current_speeds.lb);
-        float duty_rf = ff_rf + pid_wheels[2].calculate(targets.rf, current_speeds.rf);
-        float duty_rb = ff_rb + pid_wheels[3].calculate(targets.rb, current_speeds.rb);
+        const float tgt[4] = {targets.lf, targets.lb, targets.rf, targets.rb};
+        const float cur[4] = {current_speeds.lf, current_speeds.lb, current_speeds.rf, current_speeds.rb};
 
-        // 驱动底层电机
-        motors[0].set_duty(duty_lf, tune.dynamics.max_duty);
-        motors[1].set_duty(duty_lb, tune.dynamics.max_duty);
-        motors[2].set_duty(duty_rf, tune.dynamics.max_duty);
-        motors[3].set_duty(duty_rb, tune.dynamics.max_duty);
+        for (int i = 0; i < 4; ++i) {
+            // 零速死区：目标和实测都≈0 → 松力滑行(输出0)。注意这不是"没到点提前停"——减速
+            // 全程 PID 仍跟着目标主动刹（无 brake_ff 锁定），只有真正停到零附近才滑。
+            // 与 Branch 一致：此处只关输出、不清 PID 历史（真正停稳时 calculate 内部会自清）。
+            if (std::abs(tgt[i]) < WHEEL_ZERO_TARGET_CM_S &&
+                std::abs(cur[i]) < WHEEL_ZERO_TARGET_CM_S) {
+                motors[i].set_duty(0.0f, max_duty);
+                continue;
+            }
+
+            const WheelControlParams& p = tune.wheels[i];
+            float target_acc = 0.0f;  // 阶段1 无加速度前馈
+            float ff  = wheel_feedforward(p, tgt[i], cur[i], target_acc);
+            float pid = pid_wheels[i].calculate(tgt[i], cur[i], target_acc, dt);
+            motors[i].set_duty(ff + pid, max_duty);
+        }
     }
 }
 

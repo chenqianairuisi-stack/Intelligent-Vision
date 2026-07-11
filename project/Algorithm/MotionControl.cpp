@@ -27,6 +27,19 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
         return {0.0f, 0.0f};
     }
 
+    // 弹簧静止点（治空载/保持点"原地颤抖"根因）：停车工况进"到达半径"内直接停伺服、命令零速，
+    // 不再追毫米级残差——sqrt 在 d→0 处斜率无穷，会把残差放大成大速度→原地猛冲抖，max_acc 越大越抖。
+    //   · 无状态：车被推出半径立即恢复伺服，绝不锁存、绝不在接近途中提前停（区别于被否掉的到达锁存）。
+    //   · 仅"非 AUTO 正在循迹"启用（空载/观测保持/!M 调试点）；AUTO 正循迹(航点/推箱)不启用，
+    //     保精度、由 Tracker 的 hard_lock 收尾。等效于 yaw 环的 ang_tolerance，yaw 从不原地抖。
+    float rest_radius = tune.tracker.reach_radius;
+    bool active_auto_track = (App::g_state.control.mode == ControlMode::AUTO_TRACKING &&
+                             App::g_state.control.tracker_state == TrackerState::TRACKING);
+    if (target_end_speed <= 0.1f && !active_auto_track && distance <= rest_radius) {
+        current_v = 0.0f;
+        return {0.0f, 0.0f};
+    }
+
     // 刹车距离按末速度反推，end_speed 越高，越晚开始减速
     float brake_dist = (max_speed * max_speed - target_end_speed * target_end_speed) / (2.0f * brake_acc);
     if (brake_dist < 0.0f) {
@@ -35,11 +48,21 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
 
     float target_v = max_speed;
     if (distance <= brake_dist) {
-        // 反推当前距离下允许的速度，保证到段尾时仍可保留目标末速度
-        target_v = sqrtf(target_end_speed * target_end_speed + 2.0f * brake_acc * distance);
-
-        if (target_end_speed > 0.1f && target_v < target_end_speed) {
-            target_v = target_end_speed;
+        if (target_end_speed <= 0.1f) {
+            // 弹簧终端：远端 sqrt(时间最优减速)，近端 TERMINAL_LIN_BAND_CM 内切成线性律 v=k·distance
+            // （斜率有界）——越靠近目标阻尼越大、线性柔和收敛到 0（"撞弹簧不撞墙"），且毫米级残差只
+            // 映射成小速度、不再被 sqrt 无穷斜率放大成猛冲。带宽先用常量，需要现调可再接菜单。
+            constexpr float TERMINAL_LIN_BAND_CM = 3.0f;
+            float v_edge = sqrtf(2.0f * brake_acc * TERMINAL_LIN_BAND_CM);
+            target_v = (distance >= TERMINAL_LIN_BAND_CM)
+                ? sqrtf(2.0f * brake_acc * distance)
+                : (v_edge / TERMINAL_LIN_BAND_CM) * distance;
+        } else {
+            // 过弯带速通过：按末速度反推 sqrt，保留切向动量（不加弹簧终端）
+            target_v = sqrtf(target_end_speed * target_end_speed + 2.0f * brake_acc * distance);
+            if (target_v < target_end_speed) {
+                target_v = target_end_speed;
+            }
         }
     }
 
