@@ -37,6 +37,10 @@ __attribute__((section(".dtcm_data"))) static Algorithm::Motion::PathLineFollowe
 __attribute__((section(".dtcm_data"))) static Algorithm::Motion::YawProfiled yaw_controller;
 // 慢环(20ms)产出、快环(5ms)消费的四轮目标速度。两段同在 PIT 中断、不并发，无需加锁。
 __attribute__((section(".dtcm_data"))) static WheelSpeed4 s_target_wheel_speeds = {0.0f, 0.0f, 0.0f, 0.0f};
+// 每轮目标加速度(cm/s^2) = 慢环相邻两拍目标轮速之差/dt，供轮速环 ka/kb 加速度前馈（起步/刹车更脆）。
+// 与上一拍目标轮速一同由 20ms 慢环维护，5ms 快环消费。
+__attribute__((section(".dtcm_data"))) static WheelSpeed4 s_target_wheel_accels = {0.0f, 0.0f, 0.0f, 0.0f};
+__attribute__((section(".dtcm_data"))) static WheelSpeed4 s_prev_target_wheel_speeds = {0.0f, 0.0f, 0.0f, 0.0f};
 __attribute__((section(".dtcm_data"))) static bool control_history_ready = false;
 __attribute__((section(".dtcm_data"))) static ControlMode last_control_mode = ControlMode::AUTO_TRACKING;
 __attribute__((section(".dtcm_data"))) static TrackerState last_tracker_state = TrackerState::NONE;
@@ -76,6 +80,8 @@ namespace {
         path_follower.reset();
         yaw_controller.reset();
         s_target_wheel_speeds = {0.0f, 0.0f, 0.0f, 0.0f};
+        s_target_wheel_accels = {0.0f, 0.0f, 0.0f, 0.0f};
+        s_prev_target_wheel_speeds = {0.0f, 0.0f, 0.0f, 0.0f};
         for (auto& pid : pid_wheels) {
             pid.reset();
         }
@@ -140,33 +146,37 @@ namespace {
     }
 
     // 速度内环控制（从 Branch 搬入：每轮独立 PID + 前馈）：输入四轮目标转速，逐轮
-    // 前馈(kv+ks) + 独立 PID(积分门控) 出占空比。零速死区改为松力滑行，无主动制动锁定。
-    // 阶段1：目标加速度 target_acc 暂传 0（ka/kb 与微分项自然不参与），留待阶段2内插喂入。
+    // 前馈(kv + ks + ka/kb·目标加速度) + 独立 PID(积分门控) 出占空比。零速死区改为松力滑行，
+    // 无主动制动锁定。目标加速度由 20ms 慢环算出（s_target_wheel_accels），起步弹射/刹车稳停更脆。
     __attribute__((always_inline)) inline void run_speed_loop(const WheelSpeed4& targets) {
         const auto& current_speeds = App::g_state.physical.current_wheel_speed;
         const float max_duty = tune.dynamics.max_duty;
         const float dt = SystemConfig::SPEED_LOOP_DT_S;
 
-        // 零速松力滑行门限（Branch 值）：目标与实测均低于此即关输出，避免 ks 放大微小爬行目标
+        // 零速松力滑行门限（Branch 值）：目标、实测、目标加速度均低于此才关输出，避免 ks 放大微小
+        // 爬行目标；加了加速度门限，起步(目标小但加速度大)不会被误判成零速滑掉起步。
         constexpr float WHEEL_ZERO_TARGET_CM_S = 0.8f;
+        constexpr float WHEEL_ZERO_ACCEL_CM_S2 = 8.0f;
 
         const float tgt[4] = {targets.lf, targets.lb, targets.rf, targets.rb};
         const float cur[4] = {current_speeds.lf, current_speeds.lb, current_speeds.rf, current_speeds.rb};
+        const float acc[4] = {s_target_wheel_accels.lf, s_target_wheel_accels.lb,
+                              s_target_wheel_accels.rf, s_target_wheel_accels.rb};
 
         for (int i = 0; i < 4; ++i) {
-            // 零速死区：目标和实测都≈0 → 松力滑行(输出0)。注意这不是"没到点提前停"——减速
-            // 全程 PID 仍跟着目标主动刹（无 brake_ff 锁定），只有真正停到零附近才滑。
+            // 零速死区：目标、实测、目标加速度都≈0 → 松力滑行(输出0)。注意这不是"没到点提前停"——
+            // 减速全程 PID 仍跟着目标主动刹（无 brake_ff 锁定），只有真正停到零附近才滑。
             // 与 Branch 一致：此处只关输出、不清 PID 历史（真正停稳时 calculate 内部会自清）。
             if (std::abs(tgt[i]) < WHEEL_ZERO_TARGET_CM_S &&
-                std::abs(cur[i]) < WHEEL_ZERO_TARGET_CM_S) {
+                std::abs(cur[i]) < WHEEL_ZERO_TARGET_CM_S &&
+                std::abs(acc[i]) < WHEEL_ZERO_ACCEL_CM_S2) {
                 motors[i].set_duty(0.0f, max_duty);
                 continue;
             }
 
             const WheelControlParams& p = tune.wheels[i];
-            float target_acc = 0.0f;  // 阶段1 无加速度前馈
-            float ff  = wheel_feedforward(p, tgt[i], cur[i], target_acc);
-            float pid = pid_wheels[i].calculate(tgt[i], cur[i], target_acc, dt);
+            float ff  = wheel_feedforward(p, tgt[i], cur[i], acc[i]);
+            float pid = pid_wheels[i].calculate(tgt[i], cur[i], acc[i], dt);
             motors[i].set_duty(ff + pid, max_duty);
         }
     }
@@ -213,6 +223,8 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick() {
         path_follower.reset();
         yaw_controller.reset();
         s_target_wheel_speeds = {0.0f, 0.0f, 0.0f, 0.0f};
+        s_target_wheel_accels = {0.0f, 0.0f, 0.0f, 0.0f};
+        s_prev_target_wheel_speeds = {0.0f, 0.0f, 0.0f, 0.0f};
         return;
     }
 
@@ -250,6 +262,23 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick() {
     // 逆运动学解算：将期望的底盘全向速度分配给 4 个轮子，得到每个轮子的目标转速 (v1, v2, v3, v4)
     // 只产出目标速度，交给 5ms 快环闭环；本慢环不再直接驱动电机。
     s_target_wheel_speeds = Algorithm::Motion::Kinematics::inverse(expected_local_vx, expected_local_vy, expected_local_vw);
+
+    // 每轮目标加速度 = 相邻两拍目标轮速之差 / dt，供 5ms 轮速环的 ka/kb 加速度前馈：
+    // 起步时前喂 ka·a → 弹射更脆(消 PID 追斜坡的滞后)；刹车时前喂 kb·a → 稳停更利落。
+    // 限幅到物理上限，避免切段/yaw 纠偏引起目标突变时产生前馈尖峰。
+    {
+        const float dt = SystemConfig::PIT_CH1_DT_S;
+        const float max_wheel_acc = tune.dynamics.max_acc +
+            tune.dynamics.max_ang_acc * Algorithm::Motion::Kinematics::L;
+        auto acc_of = [&](float now, float prev) {
+            return std::clamp((now - prev) / dt, -max_wheel_acc, max_wheel_acc);
+        };
+        s_target_wheel_accels.lf = acc_of(s_target_wheel_speeds.lf, s_prev_target_wheel_speeds.lf);
+        s_target_wheel_accels.lb = acc_of(s_target_wheel_speeds.lb, s_prev_target_wheel_speeds.lb);
+        s_target_wheel_accels.rf = acc_of(s_target_wheel_speeds.rf, s_prev_target_wheel_speeds.rf);
+        s_target_wheel_accels.rb = acc_of(s_target_wheel_speeds.rb, s_prev_target_wheel_speeds.rb);
+        s_prev_target_wheel_speeds = s_target_wheel_speeds;
+    }
 }
 
 

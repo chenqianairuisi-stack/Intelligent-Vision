@@ -27,15 +27,19 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
         return {0.0f, 0.0f};
     }
 
-    // 弹簧静止点（治空载/保持点"原地颤抖"根因）：停车工况进"到达半径"内直接停伺服、命令零速，
-    // 不再追毫米级残差——sqrt 在 d→0 处斜率无穷，会把残差放大成大速度→原地猛冲抖，max_acc 越大越抖。
-    //   · 无状态：车被推出半径立即恢复伺服，绝不锁存、绝不在接近途中提前停（区别于被否掉的到达锁存）。
-    //   · 仅"非 AUTO 正在循迹"启用（空载/观测保持/!M 调试点）；AUTO 正循迹(航点/推箱)不启用，
-    //     保精度、由 Tracker 的 hard_lock 收尾。等效于 yaw 环的 ang_tolerance，yaw 从不原地抖。
+    // 弹簧终端总开关：只有"停车工况 且 非 AUTO 正在循迹"才启用弹簧（线性带 + 静止死区）。
+    //   · 空载/观测保持/!M 调试点：启用 → 治原地颤抖、稳停。
+    //   · AUTO 正循迹（航点/推箱）：不启用 → 走原版 sqrt 满力气进点，推箱靠力气顶到位不"原地待机"，
+    //     停车由 Tracker 的 hard_lock 收尾。（弹簧近端压速会削掉顶箱力气，故 AUTO 一律豁免。）
     float rest_radius = tune.tracker.reach_radius;
     bool active_auto_track = (App::g_state.control.mode == ControlMode::AUTO_TRACKING &&
                              App::g_state.control.tracker_state == TrackerState::TRACKING);
-    if (target_end_speed <= 0.1f && !active_auto_track && distance <= rest_radius) {
+    bool spring_terminal = (target_end_speed <= 0.1f && !active_auto_track);
+
+    // 弹簧静止点（治空载/保持点"原地颤抖"根因）：进"到达半径"内直接停伺服、命令零速，不再追毫米级
+    // 残差——sqrt 在 d→0 斜率无穷会把残差放大成大速度→原地猛冲抖，max_acc 越大越抖。
+    // 无状态：车被推出半径立即恢复伺服，绝不锁存、绝不在接近途中提前停。等效 yaw 环 ang_tolerance。
+    if (spring_terminal && distance <= rest_radius) {
         current_v = 0.0f;
         return {0.0f, 0.0f};
     }
@@ -48,7 +52,7 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
 
     float target_v = max_speed;
     if (distance <= brake_dist) {
-        if (target_end_speed <= 0.1f) {
+        if (spring_terminal) {
             // 弹簧终端：远端 sqrt(时间最优减速)，近端 TERMINAL_LIN_BAND_CM 内切成线性律 v=k·distance
             // （斜率有界）——越靠近目标阻尼越大、线性柔和收敛到 0（"撞弹簧不撞墙"），且毫米级残差只
             // 映射成小速度、不再被 sqrt 无穷斜率放大成猛冲。带宽先用常量，需要现调可再接菜单。
@@ -58,9 +62,9 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
                 ? sqrtf(2.0f * brake_acc * distance)
                 : (v_edge / TERMINAL_LIN_BAND_CM) * distance;
         } else {
-            // 过弯带速通过：按末速度反推 sqrt，保留切向动量（不加弹簧终端）
+            // AUTO 循迹停车 / 过弯带速通过：原版 sqrt 反推（满力气进点、保切向动量）
             target_v = sqrtf(target_end_speed * target_end_speed + 2.0f * brake_acc * distance);
-            if (target_v < target_end_speed) {
+            if (target_end_speed > 0.1f && target_v < target_end_speed) {
                 target_v = target_end_speed;
             }
         }
