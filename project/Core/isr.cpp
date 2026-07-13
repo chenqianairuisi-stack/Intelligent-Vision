@@ -4,6 +4,7 @@
 #include "RobotState.h"
 #include "ChassisControl.h"
 #include "PoseEstimate.h"
+#include "Tracker.h"
 
 #include "UartComm.h"
 #include "Encoder.h"
@@ -50,9 +51,14 @@ extern "C" void PIT_IRQHandler(void) {
         Subsystem::Chassis::update_20ms_tick();      
     }
     
+    // PIT_CH2 定时器中断：周期为 SystemConfig::PIT_CH2_PERIOD_MS(15ms)，专跑视觉位姿修正。
+    // 必须放在 CH1 分支之后：同一次中断里若 20ms 也到期，先让里程计更新 s_encoder_pose，
+    // CH2 再拿最新编码器位姿去纠偏。与 CH1 同属一个 PIT_IRQ、串行执行，写 pose.x/y 免锁。
     if(pit_flag_get(PIT_CH2))
     {
         pit_flag_clear(PIT_CH2);
+
+        Algorithm::Tracker::vision_correction_tick();
     }
     
     if(pit_flag_get(PIT_CH3))

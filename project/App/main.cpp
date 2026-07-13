@@ -33,7 +33,8 @@ extern "C" int main(void) {
 
     pit_ms_init(PIT_CH0, SystemConfig::PIT_CH0_PERIOD_MS);
     pit_ms_init(PIT_CH1, SystemConfig::PIT_CH1_PERIOD_MS);
-    interrupt_set_priority(PIT_IRQn, 0);    
+    pit_ms_init(PIT_CH2, SystemConfig::PIT_CH2_PERIOD_MS);   // 视觉修正专用 15ms 通道（与 CH0/CH1 共用 PIT_IRQ，串行免锁）
+    interrupt_set_priority(PIT_IRQn, 0);
     interrupt_global_enable(0);
     
 

@@ -236,11 +236,10 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick() {
     }
 
     // 根据模式决定是否听 Tracker 的话
-    // 如果是 POINT_TRACKING，我们就不调用 update_target，直接用上位机写入 ctrl.current_target 的值
+    // 如果是 POINT_TRACKING，我们就不调用 update_target，直接用上位机写入 ctrl.current_target 的值。
+    // 视觉修正（含 POINT_TRACKING 保持）已移到 PIT_CH2 的 15ms 节拍 vision_correction_tick，此处不再触发。
     if (ctrl.mode == ControlMode::AUTO_TRACKING && ctrl.tracker_state == TrackerState::TRACKING) {
         Algorithm::Tracker::update_target();
-    } else if (ctrl.mode == ControlMode::POINT_TRACKING) {
-        Algorithm::Tracker::update_vision_assist({ctrl.current_target.x, ctrl.current_target.y});
     }
 
     guard_motion_residue(App::g_state);

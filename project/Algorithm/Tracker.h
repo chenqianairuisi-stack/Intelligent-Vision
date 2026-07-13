@@ -29,6 +29,8 @@ namespace Algorithm::Tracker {
 
     // 运动中的视觉辅助，POINT_TRACKING 也可复用
     void update_vision_assist(const Point2D& target);
+    // 15ms 视觉修正节拍（PIT_CH2 中断调用）：停车/保持冻结、起步取新帧，内部含全部纠偏门控。
+    void vision_correction_tick();
     // 炸弹爆炸窗口期屏蔽视觉修正：闪光会污染视觉坐标，此期间只靠锁位+里程计扛过
     void set_vision_correction_suppressed(bool suppressed);
     void track_point(const Pose2D& target);

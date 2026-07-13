@@ -16,8 +16,14 @@ namespace SystemConfig {
     // 定时器参数
     static constexpr uint32_t PIT_CH0_PERIOD_MS = 1U;          // IMU 采样与姿态解算周期
     static constexpr uint32_t PIT_CH1_PERIOD_MS = 20U;         // 底盘控制与里程计周期
+    static constexpr uint32_t PIT_CH2_PERIOD_MS = 15U;         // 视觉修正周期（独立于 20ms 慢环，贴合 ~66fps 帧率，免混叠）
     static constexpr float PIT_CH0_DT_S = static_cast<float>(PIT_CH0_PERIOD_MS) * 0.001f;  // 转换为秒
     static constexpr float PIT_CH1_DT_S = static_cast<float>(PIT_CH1_PERIOD_MS) * 0.001f;  // 转换为秒
+    static constexpr float PIT_CH2_DT_S = static_cast<float>(PIT_CH2_PERIOD_MS) * 0.001f;  // 转换为秒
+
+    // 停车/保持解冻后取新帧黑窗 ms：≈视觉管线延时（DEFAULT_VISION_LATENCY_MS）。长时保持解冻后，
+    // 在该窗口内只推进帧序号、不应用修正，杜绝把"停车途中采集的延时旧帧"喂进控制环→起步冲一下。
+    static constexpr uint32_t VISION_RESTART_BLACKOUT_MS = 320U;
 
     // 轮速内环(快环)：跑在 1ms 定时器里分频，规划/yaw 仍在 20ms 慢环
     static constexpr uint32_t SPEED_LOOP_PERIOD_MS = 5U;          // 快环周期 ms（200Hz）

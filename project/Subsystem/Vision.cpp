@@ -181,9 +181,12 @@ namespace {
 
             vis.art1_pose = next_pose;
             vis.art1_pose_publish_idx = write_idx;
-            vis.art1_pose_seq++;
             vis.art1_pose_tick_ms = now;
             vis.art1_pose_updated = true;
+            // 发布顺序加固：buffer→idx→tick 全部落定后再自增 seq。读者（PIT_CH2 视觉修正）以 seq
+            // 判新帧，这样一旦看到新 seq，必配套已写好的 tick/帧，取新帧黑窗按 tick 计时才可靠。
+            __asm volatile("" ::: "memory");   // 编译器屏障：禁止把 seq 自增重排到上面几条 store 之前
+            vis.art1_pose_seq++;
         }
     }
 

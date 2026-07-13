@@ -48,6 +48,14 @@ namespace {
     DTCM_DATA Point2D s_stop_settle_target = {0.0f, 0.0f};
     DTCM_DATA bool s_final_lock_active = false;  // 终点粘滞锁：进过终点半径后锁死原地刹车，直到停稳
 
+    // === 15ms 视觉修正节拍（PIT_CH2）冻结状态机 ===
+    // 停车/保持时冻结视觉修正（不写 pose，只推进帧序号"边收边丢"），起步/长保持解冻后走一段
+    // 取新帧黑窗，杜绝把"停车途中采集的延时旧帧"喂进控制环导致刹停后冲一下。
+    DTCM_DATA bool s_vision_frozen = true;            // 是否处于冻结态（开机默认冻结，直到真正开始追踪）
+    DTCM_DATA bool s_vision_hold_freeze = true;       // 本次冻结是否为"长保持/起步"型（解冻需走黑窗；拐点刹停 blip 不走）
+    DTCM_DATA uint32_t s_vision_restart_tick = 0U;    // 上次从保持态解冻的时刻，供黑窗计时
+    DTCM_DATA bool s_vision_blackout_active = false;  // 解冻后取新帧黑窗是否生效中
+
     [[gnu::always_inline]] inline int sign_delta(int delta) {
         return (delta > 0) - (delta < 0);
     }
@@ -590,6 +598,85 @@ __attribute__((section(".ramfunc"))) void update_vision_assist(const Point2D& ta
 }
 
 
+/// \brief 15ms 视觉修正节拍（PIT_CH2 中断调用）
+///
+/// \details
+/// 从 20ms 慢环解耦出来的纯 2D 视觉纠偏，按 ~15ms 贴合帧率跑，并叠加"停车冻结 + 起步取新帧"：
+///  - 冻结（停车保持/AUTO 已完成/视觉不可用/爆炸屏蔽）：不写 pose，但每拍把
+///    vision_last_correction_seq 同步到最新（边收边丢），防解冻瞬间爆发一串积压旧帧。
+///  - 解冻：长保持/起步型冻结解冻后开一段 VISION_RESTART_BLACKOUT_MS 黑窗，窗内继续只推进
+///    序号、不应用——保证第一帧应用的是"起步之后采集"的新帧（黑窗≈管线延时，滤掉停车途中采集的
+///    延时帧）。拐点刹停的短暂 hard_lock blip 不走黑窗，靠切段 reset_vision_assist 的序号重同步即可，
+///    避免每个弯起步都 320ms 不纠偏。
+///
+__attribute__((section(".ramfunc"))) void vision_correction_tick() {
+    if (!TRACKING_VISION_ASSIST_ENABLED) {
+        return;
+    }
+
+    const auto& ctrl = App::g_state.control;
+    const auto& vision = App::g_state.vision;
+    auto& plan = App::g_state.planning;
+    uint32_t now = Core::Scheduler::get_sys_tick_ms();
+
+    // 长保持/起步型冻结原因（解冻需走取新帧黑窗）
+    bool hold_freeze =
+        s_vision_correction_suppressed ||
+        !vision.art1_map_ready ||
+        (ctrl.mode == ControlMode::AUTO_TRACKING && ctrl.tracker_state != TrackerState::TRACKING) ||
+        (ctrl.mode == ControlMode::POINT_TRACKING && App::g_state.physical.is_stopped &&
+         !s_force_vision_assist_current_segment);
+    // 拐点刹停/原地锁死型冻结（短暂，解冻不走黑窗）
+    bool brake_freeze = ctrl.hard_lock;
+    bool freeze = hold_freeze || brake_freeze;
+
+    // 摄像头连续推流；仅 force-assist 段保留按需请求兜底（只置 pending 位，主循环发包）
+    if (s_force_vision_assist_current_segment) {
+        request_forced_vision_pose(now);
+    }
+
+    if (freeze) {
+        plan.vision_last_correction_seq = vision.art1_pose_seq;  // 边收边丢，防积压
+        s_vision_frozen = true;
+        s_vision_hold_freeze = hold_freeze;   // hold 型优先记账，供解冻判定是否开黑窗
+        return;
+    }
+
+    // 冻结→运动 边沿：再同步一次序号丢掉保持期间所有帧；hold 型解冻开黑窗
+    if (s_vision_frozen) {
+        s_vision_frozen = false;
+        plan.vision_last_correction_seq = vision.art1_pose_seq;
+        if (s_vision_hold_freeze) {
+            s_vision_restart_tick = now;
+            s_vision_blackout_active = true;
+        } else {
+            s_vision_blackout_active = false;
+        }
+        s_vision_hold_freeze = false;
+    }
+
+    // 取新帧黑窗：窗内只推进序号、不应用，等一帧"起步之后采集"的新帧
+    if (s_vision_blackout_active) {
+        if ((uint32_t)(now - s_vision_restart_tick) < SystemConfig::VISION_RESTART_BLACKOUT_MS) {
+            plan.vision_last_correction_seq = vision.art1_pose_seq;
+            return;
+        }
+        s_vision_blackout_active = false;
+    }
+
+    if (!art1_pose_recent(now)) {
+        return;
+    }
+
+    Subsystem::PoseEstimator::apply_vision_axis_correction(
+        plan.vision_segment_start,
+        {ctrl.current_target.x, ctrl.current_target.y},
+        plan.vision_last_correction_seq,
+        true
+    );
+}
+
+
 /// \brief 更新当前跟踪目标，供底盘控制周期调用
 ///
 /// \details
@@ -695,8 +782,7 @@ __attribute__((section(".ramfunc"))) void update_target() {
         }
 
         if (!arrived) {
-            update_vision_assist(target_phys);
-
+            // 视觉修正已移到 PIT_CH2 的 15ms 节拍（vision_correction_tick），此处不再触发。
             // 普通拐点(brief_pause)冲过头也算到达 → arm stop_settle 原地刹车，不反向追点。
             // 推箱补点/不停顿终点保持严格半径，保精度不变。
             bool reached = check_arrival(target_phys, current_radius);
@@ -724,7 +810,7 @@ __attribute__((section(".ramfunc"))) void update_target() {
         if (!push_extra_wp && !finish_without_stop_at_last) {
             ctrl.segment_end_speed = corner_pass_speed();
         }
-        update_vision_assist(target_phys);
+        // 视觉修正已移到 PIT_CH2 的 15ms 节拍（vision_correction_tick），此处不再触发。
         arrived = check_arrival(target_phys, current_radius) ||
                   (!push_extra_wp && check_corner_switch(plan.vision_segment_start, target_phys));
     }
