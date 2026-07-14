@@ -13,18 +13,18 @@
 
 extern "C" void PIT_IRQHandler(void) {
 
-    // PIT_CH0 ��ʱ���жϣ������� SystemConfig::PIT_CH0_PERIOD_MS ���ã����������������ݶ�ȡ�����
+    // PIT_CH0 锟斤拷时锟斤拷锟叫断ｏ拷锟斤拷锟斤拷锟斤拷 SystemConfig::PIT_CH0_PERIOD_MS 锟斤拷锟矫ｏ拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟捷讹拷取锟斤拷锟斤拷锟�
     if(pit_flag_get(PIT_CH0)) 
     {
         pit_flag_clear(PIT_CH0);
 
-        // ���������ݶ�ȡ��ת��
+        // 锟斤拷锟斤拷锟斤拷锟斤拷锟捷讹拷取锟斤拷转锟斤拷
         imu_icm42688.update_all();  
 
-        // yaw ��Ƕȸ���
+        // yaw 锟斤拷嵌雀锟斤拷锟�
         Subsystem::PoseEstimator::update_yaw_1ms_tick();
 
-        // 轮速内环快环：1ms 定时器分频到 5ms(200Hz)，先测速再跑速度 PID 出占空比
+        // 杞€熷唴鐜揩鐜細1ms 瀹氭椂鍣ㄥ垎棰戝埌 5ms(200Hz)锛屽厛娴嬮€熷啀璺戦€熷害 PID 鍑哄崰绌烘瘮
         static uint8_t s_speed_loop_div = 0;
         if (++s_speed_loop_div >= SystemConfig::SPEED_LOOP_PERIOD_MS) {
             s_speed_loop_div = 0;
@@ -33,27 +33,27 @@ extern "C" void PIT_IRQHandler(void) {
         }
     }
     
-    // PIT_CH1 ��ʱ���жϣ������� SystemConfig::PIT_CH1_PERIOD_MS ���ã������ڵ��̿����㷨���º���̼�����
+    // PIT_CH1 锟斤拷时锟斤拷锟叫断ｏ拷锟斤拷锟斤拷锟斤拷 SystemConfig::PIT_CH1_PERIOD_MS 锟斤拷锟矫ｏ拷锟斤拷锟斤拷锟节碉拷锟教匡拷锟斤拷锟姐法锟斤拷锟铰猴拷锟斤拷碳锟斤拷锟斤拷锟�
     if(pit_flag_get(PIT_CH1)) 
     {
         pit_flag_clear(PIT_CH1);
 
-        // ��������������
+        // 锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷
         encoders.update_encoders_20ms_tick();
 
-        // ���µ����Ƿ���ȫֹͣ��״̬
+        // 锟斤拷锟铰碉拷锟斤拷锟角凤拷锟斤拷全停止锟斤拷状态
         Subsystem::Chassis::check_is_stopped(); 
 
-        // ȫ�ֶ�λ��̼����� 
+        // 全锟街讹拷位锟斤拷碳锟斤拷锟斤拷锟� 
         Subsystem::PoseEstimator::update_position_20ms_tick(encoders.getAllCounts(), App::g_state.physical.pose.yaw);
 
-        // ���̿����㷨����
+        // 锟斤拷锟教匡拷锟斤拷锟姐法锟斤拷锟斤拷
         Subsystem::Chassis::update_20ms_tick();      
     }
     
-    // PIT_CH2 定时器中断：周期为 SystemConfig::PIT_CH2_PERIOD_MS(15ms)，专跑视觉位姿修正。
-    // 必须放在 CH1 分支之后：同一次中断里若 20ms 也到期，先让里程计更新 s_encoder_pose，
-    // CH2 再拿最新编码器位姿去纠偏。与 CH1 同属一个 PIT_IRQ、串行执行，写 pose.x/y 免锁。
+    // PIT_CH2 瀹氭椂鍣ㄤ腑鏂細鍛ㄦ湡涓� SystemConfig::PIT_CH2_PERIOD_MS(15ms)锛屼笓璺戣瑙変綅濮夸慨姝ｃ€�
+    // 蹇呴』鏀惧湪 CH1 鍒嗘敮涔嬪悗锛氬悓涓€娆′腑鏂噷鑻� 20ms 涔熷埌鏈燂紝鍏堣閲岀▼璁℃洿鏂� s_encoder_pose锛�
+    // CH2 鍐嶆嬁鏈€鏂扮紪鐮佸櫒浣嶅Э鍘荤籂鍋忋€備笌 CH1 鍚屽睘涓€涓� PIT_IRQ銆佷覆琛屾墽琛岋紝鍐� pose.x/y 鍏嶉攣銆�
     if(pit_flag_get(PIT_CH2))
     {
         pit_flag_clear(PIT_CH2);
@@ -74,75 +74,75 @@ extern "C" void LPUART1_IRQHandler(void)
 {
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART1))
     {
-        // �����жϴ��������� uart_cam1 ���жϷ�����
+        // 锟斤拷锟斤拷锟叫断达拷锟斤拷锟斤拷锟斤拷锟斤拷 uart_cam1 锟斤拷锟叫断凤拷锟斤拷锟斤拷
         uart_cam2.rxisr();
         
 
-    // #if DEBUG_UART_USE_INTERRUPT                        // ������� debug �����ж�
-    //     debug_interrupr_handler();                      // ���� debug ���ڽ��մ������� ���ݻᱻ debug ���λ�������ȡ
-    // #endif                                              // ����޸��� DEBUG_UART_INDEX ����δ�����Ҫ�ŵ���Ӧ�Ĵ����ж�ȥ
+    // #if DEBUG_UART_USE_INTERRUPT                        // 锟斤拷锟斤拷锟斤拷锟� debug 锟斤拷锟斤拷锟叫讹拷
+    //     debug_interrupr_handler();                      // 锟斤拷锟斤拷 debug 锟斤拷锟节斤拷锟秸达拷锟斤拷锟斤拷锟斤拷 锟斤拷锟捷会被 debug 锟斤拷锟轿伙拷锟斤拷锟斤拷锟斤拷取
+    // #endif                                              // 锟斤拷锟斤拷薷锟斤拷锟� DEBUG_UART_INDEX 锟斤拷锟斤拷未锟斤拷锟斤拷锟揭拷诺锟斤拷锟接︼拷拇锟斤拷锟斤拷卸锟饺�
     }
         
-    LPUART_ClearStatusFlags(LPUART1, kLPUART_RxOverrunFlag);    // ������ɾ��
+    LPUART_ClearStatusFlags(LPUART1, kLPUART_RxOverrunFlag);    // 锟斤拷锟斤拷锟斤拷删锟斤拷
 }
 
 void LPUART2_IRQHandler(void)
 {
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART2))
     {
-        // �����ж�
+        // 锟斤拷锟斤拷锟叫讹拷
         
     }
         
-    LPUART_ClearStatusFlags(LPUART2, kLPUART_RxOverrunFlag);    // ������ɾ��
+    LPUART_ClearStatusFlags(LPUART2, kLPUART_RxOverrunFlag);    // 锟斤拷锟斤拷锟斤拷删锟斤拷
 }
 
 void LPUART3_IRQHandler(void)
 {
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART3))
     {
-        // �����ж�
+        // 锟斤拷锟斤拷锟叫讹拷
         
     }
         
-    LPUART_ClearStatusFlags(LPUART3, kLPUART_RxOverrunFlag);    // ������ɾ��
+    LPUART_ClearStatusFlags(LPUART3, kLPUART_RxOverrunFlag);    // 锟斤拷锟斤拷锟斤拷删锟斤拷
 }
 
 extern "C" void LPUART4_IRQHandler(void)
 {
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART4))
     {
-        // �����жϴ��������� uart_cam2 ���жϷ�����
+        // 锟斤拷锟斤拷锟叫断达拷锟斤拷锟斤拷锟斤拷锟斤拷 uart_cam2 锟斤拷锟叫断凤拷锟斤拷锟斤拷
         uart_cam1.rxisr();
 
-        // �����ж� 
+        // 锟斤拷锟斤拷锟叫讹拷 
         // flexio_camera_uart_handler();
         // gnss_uart_callback();
     }
         
-    LPUART_ClearStatusFlags(LPUART4, kLPUART_RxOverrunFlag);    // ������ɾ��
+    LPUART_ClearStatusFlags(LPUART4, kLPUART_RxOverrunFlag);    // 锟斤拷锟斤拷锟斤拷删锟斤拷
 }
 
 void LPUART5_IRQHandler(void)
 {
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART5))
     {
-        // �����ж�
+        // 锟斤拷锟斤拷锟叫讹拷
         camera_uart_handler();
     }
         
-    LPUART_ClearStatusFlags(LPUART5, kLPUART_RxOverrunFlag);    // ������ɾ��
+    LPUART_ClearStatusFlags(LPUART5, kLPUART_RxOverrunFlag);    // 锟斤拷锟斤拷锟斤拷删锟斤拷
 }
 
 void LPUART6_IRQHandler(void)
 {
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART6))
     {
-        // �����ж�
+        // 锟斤拷锟斤拷锟叫讹拷
         
     }
         
-    LPUART_ClearStatusFlags(LPUART6, kLPUART_RxOverrunFlag);    // ������ɾ��
+    LPUART_ClearStatusFlags(LPUART6, kLPUART_RxOverrunFlag);    // 锟斤拷锟斤拷锟斤拷删锟斤拷
 }
 
 
@@ -150,14 +150,14 @@ extern "C" void LPUART8_IRQHandler(void)
 {
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART8))
     {
-        // �����ж�
+        // 锟斤拷锟斤拷锟叫讹拷
         if(NULL != wireless_module_uart_handler)
         {
             wireless_module_uart_handler();
         }
     }
         
-    LPUART_ClearStatusFlags(LPUART8, kLPUART_RxOverrunFlag);    // ������ɾ��
+    LPUART_ClearStatusFlags(LPUART8, kLPUART_RxOverrunFlag);    // 锟斤拷锟斤拷锟斤拷删锟斤拷
 }
 
 
@@ -165,7 +165,7 @@ void GPIO1_Combined_0_15_IRQHandler(void)
 {
     if(exti_flag_get(B0))
     {
-        exti_flag_clear(B0);// ����жϱ�־λ
+        exti_flag_clear(B0);// 锟斤拷锟斤拷卸媳锟街疚�
     }
     
 }
@@ -176,7 +176,7 @@ void GPIO1_Combined_16_31_IRQHandler(void)
     wireless_module_spi_handler();
     if(exti_flag_get(B16))
     {
-        exti_flag_clear(B16); // ����жϱ�־λ
+        exti_flag_clear(B16); // 锟斤拷锟斤拷卸媳锟街疚�
     }
 
     
@@ -188,20 +188,20 @@ void GPIO2_Combined_0_15_IRQHandler(void)
     
     if(exti_flag_get(C0))
     {
-        exti_flag_clear(C0);// ����жϱ�־λ
+        exti_flag_clear(C0);// 锟斤拷锟斤拷卸媳锟街疚�
     }
 
 }
 
 void GPIO2_Combined_16_31_IRQHandler(void)
 {
-    // -----------------* ToF INT �����ж� Ԥ���жϴ������� *-----------------
+    // -----------------* ToF INT 锟斤拷锟斤拷锟叫讹拷 预锟斤拷锟叫断达拷锟斤拷锟斤拷锟斤拷 *-----------------
     tof_module_exti_handler();
-    // -----------------* ToF INT �����ж� Ԥ���жϴ������� *-----------------
+    // -----------------* ToF INT 锟斤拷锟斤拷锟叫讹拷 预锟斤拷锟叫断达拷锟斤拷锟斤拷锟斤拷 *-----------------
     
     if(exti_flag_get(C16))
     {
-        exti_flag_clear(C16); // ����жϱ�־λ
+        exti_flag_clear(C16); // 锟斤拷锟斤拷卸媳锟街疚�
     }
     
 }
@@ -214,7 +214,7 @@ void GPIO3_Combined_0_15_IRQHandler(void)
 
     if(exti_flag_get(D4))
     {
-        exti_flag_clear(D4);// ����жϱ�־λ
+        exti_flag_clear(D4);// 锟斤拷锟斤拷卸媳锟街疚�
     }
 }
 
@@ -222,8 +222,8 @@ void GPIO3_Combined_0_15_IRQHandler(void)
 
 void CSI_IRQHandler(void)
 {
-    CSI_DriverIRQHandler();     // ����SDK�Դ����жϺ��� ���������������������õĻص�����
-    __DSB();                    // ����ͬ������
+    CSI_DriverIRQHandler();     // 锟斤拷锟斤拷SDK锟皆达拷锟斤拷锟叫断猴拷锟斤拷 锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟矫的回碉拷锟斤拷锟斤拷
+    __DSB();                    // 锟斤拷锟斤拷同锟斤拷锟斤拷锟斤拷
 }
 
 
@@ -231,14 +231,14 @@ void CSI_IRQHandler(void)
 
 
 /*
-�жϺ������ƣ��������ö�Ӧ���ܵ��жϺ���
-Sample usage:��ǰ���������ڶ�ʱ���ж�
+锟叫断猴拷锟斤拷锟斤拷锟狡ｏ拷锟斤拷锟斤拷锟斤拷锟矫讹拷应锟斤拷锟杰碉拷锟叫断猴拷锟斤拷
+Sample usage:锟斤拷前锟斤拷锟斤拷锟斤拷锟斤拷锟节讹拷时锟斤拷锟叫讹拷
 void PIT_IRQHandler(void)
 {
-    //��������־λ
+    //锟斤拷锟斤拷锟斤拷锟斤拷志位
     __DSB();
 }
-�ǵý����жϺ������־λ
+锟角得斤拷锟斤拷锟叫断猴拷锟斤拷锟斤拷锟街疚�
 CTI0_ERROR_IRQHandler
 CTI1_ERROR_IRQHandler
 CORE_IRQHandler

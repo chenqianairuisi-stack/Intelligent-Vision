@@ -3,6 +3,7 @@
 #include <array>
 
 #define DTCM_DATA __attribute__((section(".dtcm_data")))
+#define OCRAM_BSS __attribute__((section(".ocram_bss")))
 
 //---------------------------------------------------------------------------------
 //全局坐标系：x 轴正方向为右，y 轴正方向为前，逆时针为正旋转（x 轴设为 0 度）

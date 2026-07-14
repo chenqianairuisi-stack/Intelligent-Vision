@@ -105,6 +105,8 @@ namespace PlanningCommon {
 
 // --- 地图与实体查询 ---
 bool in_bounds(point p);
+bool is_inner_map_cell(point p);
+bool is_blastable_wall(const SokobanLevel& lvl, point p);
 bool has_box(const SokobanLevel& lvl, point p);
 bool has_bomb(const SokobanLevel& lvl, point p, int ignored_bomb = -1);
 bool has_entity(const SokobanLevel& lvl, int x, int y, int ignored_bomb = -1);
@@ -113,6 +115,7 @@ bool is_obstacle(const SokobanLevel& lvl, point p, point ignored_obj = {-1, -1})
 // --- 地图状态更新 ---
 void apply_box_push_task_effect(SokobanLevel& lvl, const BoxPushTask& task);
 void apply_box_push_action_effect(SokobanLevel& lvl, const BoxPushAction& action);
+void apply_blast_effect(SokobanLevel& lvl, point target_wall);
 void apply_bomb_task_effect(SokobanLevel& lvl, const BombTask& task);
 void apply_bomb_push_action_effect(SokobanLevel& lvl, const BombPushAction& action);
 
@@ -153,6 +156,7 @@ bool is_box_position_safe(const SokobanLevel& lvl, uint8_t box_id, uint16_t cand
 
 // --- 推物体路径生成 ---
 bool append_box_push_path(SokobanLevel& lvl, point& player_pos, const BoxPushTask& task, StaticArray<point, MAX_PATH_LENGTH>& out_path);
+bool get_direct_bomb_push_path_cost(const SokobanLevel& lvl, point player_start, const BombTask& task, uint16_t& out_cost, point& out_final_player);
 bool get_bomb_push_path(const SokobanLevel& lvl, point player_start, const BombTask& task, StaticArray<point, MAX_PATH_LENGTH>& out_path);
 
 }

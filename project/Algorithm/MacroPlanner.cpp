@@ -511,6 +511,42 @@ MacroPlanner::SemanticInferenceStatus MacroPlanner::infer_semantics(const Sokoba
     return SemanticInferenceStatus::INVALID;
 }
 
+/// \brief 为旧版 Phase2 求解器导出一个确定的 box -> target_id 兼容映射
+/// \param level 当前逻辑地图
+/// \param labels Macro 已推断出的完整语义标签
+/// \param out_matched_ids 输出映射，out_matched_ids[box_id] 为目标点编号
+/// \return 所有箱子均能在同语义目标集合中分配到目标时返回 true
+///
+/// \details
+/// 这是兼容层，不是 Macro 的语义模型。重复语义下会按同语义目标的自然顺序
+/// 给旧求解器生成一个一一匹配；后续 Sokoban 融合成语义组后，这层可以移除。
+bool MacroPlanner::build_semantic_matched_ids(const SokobanLevel& level,
+                                              const int8_t* labels,
+                                              uint8_t* out_matched_ids) const {
+    if (!labels || !out_matched_ids) return false;
+    if (level.box_count != level.target_count) return false;
+
+    bool used_targets[MAX_BOXES] = {false};
+    for (int b = 0; b < level.box_count; ++b) {
+        int8_t box_sem = labels[b];
+        if (!is_valid_semantic_id(box_sem)) return false;
+
+        int chosen = -1;
+        for (int t = 0; t < level.target_count; ++t) {
+            int8_t target_sem = labels[level.box_count + t];
+            if (used_targets[t] || target_sem != box_sem) continue;
+            chosen = t;
+            break;
+        }
+        if (chosen < 0) return false;
+
+        used_targets[chosen] = true;
+        out_matched_ids[b] = static_cast<uint8_t>(chosen);
+    }
+
+    return true;
+}
+
 // 将推断出的完整语义写回 Macro 状态，并同步到 semantic_labels。
 // 这样后续 sync_semantics 再次运行时，不会把补充观测失败后的回退结果冲掉。
 bool MacroPlanner::apply_inferred_semantics(const SokobanLevel& level, const int8_t* inferred_labels) {
@@ -533,22 +569,13 @@ bool MacroPlanner::apply_inferred_semantics(const SokobanLevel& level, const int
     knowledge_state.semantics_ready = true;
     knowledge_state.needs_supplemental_observe = false;
 
-    // 完成式推箱若重新打开，需要一份临时自然顺序目标；最终 Sokoban 只看语义组
-    bool used_targets[MAX_BOXES] = {false};
-    for (int b = 0; b < box_count; ++b) {
-        int chosen = -1;
-        int8_t box_sem = knowledge_state.inferred_semantics[b];
-        for (int t = 0; t < target_count; ++t) {
-            int8_t target_sem = knowledge_state.inferred_semantics[box_count + t];
-            if (used_targets[t] || target_sem != box_sem) continue;
-            chosen = t;
-            break;
-        }
-        if (chosen < 0) return false;
+    uint8_t matched[MAX_BOXES];
+    if (!build_semantic_matched_ids(level, knowledge_state.inferred_semantics, matched)) return false;
 
-        used_targets[chosen] = true;
-        knowledge_state.candidate_targets[b] = (1U << chosen);
-        knowledge_state.bound_target[b] = static_cast<uint8_t>(chosen);
+    for (int b = 0; b < box_count; ++b) {
+        if (matched[b] >= target_count) continue;
+        knowledge_state.candidate_targets[b] = (1U << matched[b]);
+        knowledge_state.bound_target[b] = matched[b];
         knowledge_state.is_bound[b] = true;
     }
 
@@ -584,7 +611,7 @@ void MacroPlanner::apply_observation(const SokobanLevel& level, uint32_t mask) {
 ///
 /// \details
 /// 函数先同步 vision 语义池，再按“同语义数量相等”的规则做实体语义推断。
-/// 语义完整后只额外生成完成式推箱候选位需要的临时自然顺序映射。
+/// 只有语义完整后，才额外生成旧版 Sokoban 所需的兼容匹配，避免重复语义时留下脏绑定。
 void MacroPlanner::sync_semantics(const int8_t* labels) {
     if (!labels) return;
     for (int i = 0; i < MAX_ENTITIES; ++i) {
@@ -628,22 +655,49 @@ bool MacroPlanner::ready_for_sokoban(const SokobanLevel& level) const {
     return true;
 }
 
-/// \brief 将 Macro 推断出的完整实体语义写回关卡
-/// \param level 当前逻辑地图
+/// \brief 输出第二阶段需要的 box -> target 配对
+/// \param out_ids 输出数组，out_ids[box_id] = target_id
+/// \param count 当前箱子数量
+/// \return 配对完整时返回 true
+bool MacroPlanner::fill_matched_ids(uint8_t* out_ids, uint8_t count) {
+    if (!semantics_ready()) return false;
+    for (int b = 0; b < count; ++b) {
+        if (!knowledge_state.is_bound[b]) return false;
+        if (knowledge_state.bound_target[b] >= target_count) return false;
+        out_ids[b] = knowledge_state.bound_target[b];
+    }
+    return true;
+}
+
+/// \brief 输出 Macro 推断出的完整实体语义
+/// \param out_labels 输出数组，前 box_count 项为箱子，后 target_count 项为目标点
 /// \return 语义推断完整时返回 true
+bool MacroPlanner::fill_semantic_labels(int8_t* out_labels) const {
+    if (!out_labels || !semantics_ready()) return false;
+    for (int i = 0; i < box_count + target_count; ++i) {
+        if (!is_valid_semantic_id(knowledge_state.inferred_semantics[i])) return false;
+        out_labels[i] = knowledge_state.inferred_semantics[i];
+    }
+    return true;
+}
+
+/// \brief 将 Macro 推断语义写回当前地图
+/// \param level 当前逻辑地图
+/// \return 推断语义完整且数量匹配时返回 true
 bool MacroPlanner::apply_semantics_to_level(SokobanLevel& level) const {
     if (!semantics_ready()) return false;
     if (level.box_count != box_count || level.target_count != target_count) return false;
 
-    for (int b = 0; b < box_count; ++b) {
-        int8_t sem = knowledge_state.inferred_semantics[b];
-        if (!is_valid_semantic_id(sem)) return false;
-        level.box_semantics[b] = static_cast<uint8_t>(sem);
+    for (int b = 0; b < level.box_count; ++b) {
+        int8_t label = knowledge_state.inferred_semantics[b];
+        if (!is_valid_semantic_id(label)) return false;
+        level.box_semantics[b] = static_cast<uint8_t>(label);
     }
-    for (int t = 0; t < target_count; ++t) {
-        int8_t sem = knowledge_state.inferred_semantics[box_count + t];
-        if (!is_valid_semantic_id(sem)) return false;
-        level.target_semantics[t] = static_cast<uint8_t>(sem);
+    for (int t = 0; t < level.target_count; ++t) {
+        int idx = box_count + t;
+        int8_t label = knowledge_state.inferred_semantics[idx];
+        if (!is_valid_semantic_id(label)) return false;
+        level.target_semantics[t] = static_cast<uint8_t>(label);
     }
     return true;
 }
@@ -866,6 +920,55 @@ bool MacroPlanner::build_reference_clearance(const MacroPlanContext& ctx, const 
     SlotCandidate best;
     best.score = -kInfScore;
 
+    auto possible_target_mask_for_box = [&](uint8_t box_id) -> uint16_t {
+        if (box_id >= ctx.level.box_count) return 0;
+        if (box_id < box_count && knowledge_state.is_bound[box_id]) {
+            return static_cast<uint16_t>(1U << knowledge_state.bound_target[box_id]);
+        }
+
+        int8_t box_sem = semantic_labels[box_id];
+        if (!is_valid_semantic_id(box_sem)) return default_candidate_mask();
+
+        uint16_t mask = 0;
+        for (int t = 0; t < ctx.level.target_count; ++t) {
+            int target_entity = ctx.level.box_count + t;
+            int8_t target_sem = target_entity < MAX_ENTITIES ? semantic_labels[target_entity] : -1;
+            if (target_sem == -1 || target_sem == box_sem) {
+                mask = static_cast<uint16_t>(mask | (1U << t));
+            }
+        }
+        return mask;
+    };
+
+    auto single_box_can_reach_target = [&](const SokobanLevel& level, point player, uint8_t box_id, uint8_t target_id) -> bool {
+        if (box_id >= level.box_count || target_id >= level.target_count) return false;
+        if (level.boxes[box_id] == level.targets[target_id]) return true;
+
+        SokobanLevel soft = level;
+        soft.box_count = 1;
+        soft.boxes[0] = level.boxes[box_id];
+        soft.box_semantics[0] = level.box_semantics[box_id];
+        soft.bomb_count = 0;
+
+        point soft_player = player;
+        StaticArray<point, MAX_PATH_LENGTH> path;
+        BoxPushTask task{soft.boxes[0], level.targets[target_id]};
+        return PlanningCommon::append_box_push_path(soft, soft_player, task, path);
+    };
+
+    auto clearance_keeps_semantic_options = [&](const SokobanLevel& level, point player, uint8_t box_id) -> bool {
+        uint16_t candidate_mask = possible_target_mask_for_box(box_id);
+        if (candidate_mask == 0) return false;
+        if (!PlanningCommon::is_box_position_safe(level, box_id, candidate_mask)) return false;
+
+        // 清障发生在语义完整前，不能把箱子推入只适配单一目标的不可逆位置
+        for (int t = 0; t < level.target_count; ++t) {
+            if ((candidate_mask & (1U << t)) == 0) continue;
+            if (!single_box_can_reach_target(level, player, box_id, static_cast<uint8_t>(t))) return false;
+        }
+        return true;
+    };
+
     auto consider_box_push = [&](uint8_t box_id, point target, int bonus) {
         if (box_id >= ctx.level.box_count) return;
         if (!PlanningCommon::in_bounds(target)) return;
@@ -880,11 +983,7 @@ bool MacroPlanner::build_reference_clearance(const MacroPlanContext& ctx, const 
         if (path.size() > MacroConfig::REFERENCE_CLEAR_MAX_PATH) return;
         uint16_t push_cost = PlanningCommon::path_time_cost(ctx.player, path);
 
-        uint16_t safe_mask = default_candidate_mask();
-        if (box_id < box_count && knowledge_state.is_bound[box_id]) {
-            safe_mask = (1U << knowledge_state.bound_target[box_id]);
-        }
-        if (!PlanningCommon::is_box_position_safe(probe, box_id, safe_mask)) return;
+        if (!clearance_keeps_semantic_options(probe, probe_player, box_id)) return;
 
         int after_access = reference_access_cost(probe, probe_player, ctx.yaw, reference_action);
         if (after_access >= kInfScore) return;
@@ -937,6 +1036,7 @@ bool MacroPlanner::build_reference_clearance(const MacroPlanContext& ctx, const 
         StaticArray<point, MAX_PATH_LENGTH> first_path;
         if (!PlanningCommon::append_box_push_path(first_probe, first_player, first_task, first_path)) return;
         if (first_path.size() > MacroConfig::REFERENCE_CLEAR_MAX_PATH) return;
+        if (!clearance_keeps_semantic_options(first_probe, first_player, static_cast<uint8_t>(box_id))) return;
 
         SokobanLevel seq_probe = first_probe;
         point seq_player = first_player;

@@ -1,60 +1,87 @@
-/*
-Strategy 模块业务逻辑说明
-
-模块定位：
-Strategy 是规划链路里的“炸弹战略层”。它不负责输出最终逐步行走路径，也不直接完成推箱子的完整求解；
-它负责从当前地图快照中判断哪些墙值得用炸弹打开，并把这些选择整理成BombTask 序列，后续进行融合与执行。
-
-核心目标：
-1. 找出阻断箱子到目标点通路的关键墙体。
-2. 在有限炸弹数量内选择收益最高的爆破顺序。
-3. 尽量优先返回可直接执行的炸弹任务。
-4. 当炸弹路线被箱子挡住时，尝试生成少量前置推箱清障任务，使候选炸弹任务变成真实可执行任务。
-
-业务流程：
-    1. evaluate_and_assign_bombs 是对外入口。调用方传入 SokobanLevel 后，Strategy 先缓存地图，
-然后从空炸弹序列开始做 DFS 搜索。
-    2. DFS 每一层代表“已经使用若干颗炸弹后的地图状态”。模块会先评估当前状态中箱子到目标点
-的可达性、剩余死锁数量和综合距离成本，再枚举下一颗炸弹可以炸开的墙体。
-    3. 枚举候选墙体时，Strategy 会评估墙体是否打开新区域、是否靠近孤立箱子/目标点、是否改善
-箱子到目标点的连通性，以及推动炸弹到该墙体的代价。候选按收益排序，只展开高分分支，
-以控制单片机上的搜索时间。
-    4. 每选择一个候选炸弹任务后，模块会模拟爆炸效果，更新地图并继续递归。全局最优结果按
-“剩余死锁更少优先，其次净收益更高优先”更新。
-    5. 快速 DFS 失败、仍有死锁，或结果任务不能直接执行时，Strategy 会启用软障碍/动态回退：
-先把箱子视作带惩罚的软障碍寻找拓扑上可能的炸弹路线，再用 local_clear_bomb_route 验证
-是否能通过少量真实推箱动作清出路线。
-    6. materialize_bomb_task 用于把策略层的候选 BombTask 补全为可执行任务。若炸弹到墙体之间
-需要先移动箱子，它会把这些前置动作写入 BombTask::box_pushes。
-
-阶段差异：
-- PHASE1_ANY：语义绑定尚未完成，任意箱子可以匹配任意目标点。评估时用箱子-目标集合匹配
-    来衡量地图整体可解性，重点是打开“让更多箱子能到更多目标”的通路。
-- PHASE2_SPECIFIC：箱子和目标点语义已经确定。评估时必须检查每个箱子能否到达任一同语义目标，
-    对语义目标不可达的情况施加更高惩罚，适合作为最终 Sokoban 求解前的炸弹补救策略。
-
-输出约定：
-- 返回的 StaticArray<BombTask, MAX_BOMBS> 是建议炸弹序列，可能为空。
-- BombTask::is_essential 表示该序列是否已经把当前评估中的死锁全部解除。
-- BombTask::net_profit 是 Strategy 的综合评分，供上层调度比较任务价值。
-- BombTask::box_pushes 非空时，表示执行炸弹前必须先完成这些推箱让路动作。
-
-实现约束：
-- 核心搜索和缓存数组面向 RT1064/单片机移植，避免动态内存分配。
-- DFS、距离场和局部清障都使用固定容量 StaticArray 与静态缓存，调整 MAX_* 常量时需要同步关注 RAM/DTCM 占用。
-*/
-
 #pragma once
 
 #include "PlanningCommon.h"
 
 using namespace SystemConfig;
 
+#ifndef STRATEGY_ENABLE_SHADOW_CLEAR_DECISION
+#define STRATEGY_ENABLE_SHADOW_CLEAR_DECISION 1
+#endif
+
 namespace StrategyConfig {
-    inline constexpr bool ENABLE_PROFILE = true;
-    inline constexpr int PROFILE_EVAL_LIMIT = 8;
-    inline constexpr int PROFILE_TOP_CANDIDATES = 3;
+    // ------------------------------------------------------------------------
+    // 清障候选开关：shadow decision 会影响候选来源，调参需回归清障图
+    // ------------------------------------------------------------------------
+    inline constexpr bool ENABLE_SHADOW_CLEAR_DECISION = STRATEGY_ENABLE_SHADOW_CLEAR_DECISION != 0; // 候选剪枝：shadow 决策开关，调参需回归清障图
+    inline constexpr int REAL_CLEAR_TRACE_LIMIT = 8;              // 接口约束：真实清障搜索保留的推箱链长度
+
+    // ------------------------------------------------------------------------
+    // DFS 搜索宽度：候选剪枝，调大更稳但更慢
+    // ------------------------------------------------------------------------
+    inline constexpr uint8_t PHASE1_SELECTION_RESTRICTIONS = 3;   // 候选剪枝：Phase1 每层最多展开的高分爆破候选数，可调但要回归重点图
+    inline constexpr uint8_t PHASE2_SELECTION_RESTRICTIONS = 3;   // 候选剪枝：Phase2 每层最多展开的高分爆破候选数，可调但要回归重点图
+
+    // ------------------------------------------------------------------------
+    // 距离与收益阈值：结构评分与执行代价的分界
+    // ------------------------------------------------------------------------
+    inline constexpr int16_t INF_DIST = 9999;                     // 接口约束：不可达距离占位值，必须大于地图内任何真实路径代价，不建议手调
+    inline constexpr int PHASE1_SOFT_REPLACE_PROFIT_MARGIN = 20;  // 结构评分/执行代价：soft pass 替换 hard pass 的最低收益边际，可调
+
+    // ------------------------------------------------------------------------
+    // 局部清障实体化：执行代价与候选剪枝
+    // ------------------------------------------------------------------------
+    inline constexpr int LOCAL_CLEAR_MAX_TASKS = 8;               // 执行代价：单个炸弹任务最多补充的推箱清障动作数，可调
+    inline constexpr int LOCAL_CLEAR_MAX_ITER = 5;                // 执行代价：局部清障最多迭代轮数，限制链式搬箱深度，可调
+    inline constexpr int LOCAL_CLEAR_CANDIDATE_LIMIT = 10;        // 候选剪枝：每轮清障最多尝试的候选停车点数，可调
+    inline constexpr int LOCAL_CLEAR_OPEN_VERIFY_LIMIT = 24;      // 候选剪枝：便宜评分后进入真实开路验证的候选数，可调
+    inline constexpr int LOCAL_CLEAR_CHAIN_DEPTH = 1;             // 执行代价：递归搬箱清障深度，过大容易生成长任务链，谨慎调
+    inline constexpr int LOCAL_CLEAR_FAILURE_CACHE_LIMIT = 128;   // 候选剪枝：单进程局部清障失败缓存容量，可调
+    inline constexpr int SHADOW_CLEAR_NEAR_STAND_MAX_DIST = 3;    // 候选剪枝：shadow 近邻站位候选的最大曼哈顿半径，可调
+    inline constexpr int SHADOW_CLEAR_NEAR_STAND_LIMIT = 2;       // 候选剪枝：每段软路线最多保留的近邻站位候选数，可调
+    inline constexpr int REAL_CLEAR_SOURCE_SUPPORT_LIMIT = 2;     // 候选剪枝：真实清障源箱子离软路线的近邻阈值，可调
+    inline constexpr int REAL_CLEAR_TARGET_STEP_LIMIT = 4;        // 候选剪枝：真实清障停车点沿单方向最多外推步数，可调
+    inline constexpr int REAL_CLEAR_CANDIDATE_POOL = 48;          // 候选剪枝：真实清障轻量筛选后的候选池容量，可调
+    inline constexpr int REAL_CLEAR_VERIFY_SCAN_LIMIT = 24;       // 候选剪枝：真实清障单阶段最多验证的候选数，可调
+    inline constexpr int REAL_CLEAR_BRANCH_LIMIT = 14;            // 候选剪枝：真实清障单阶段最多递归展开的分支数，可调
+    inline constexpr int REAL_CLEAR_MEMO_LIMIT = 256;             // 候选剪枝：真实清障失败状态记忆容量，可调
+
+    // ------------------------------------------------------------------------
+    // Phase1 soft pass 实体化预算：候选剪枝与执行代价平衡
+    // ------------------------------------------------------------------------
+    inline constexpr int PHASE1_CLEAR_DIVERSITY_SCAN_LIMIT = 5;   // 候选剪枝：根层全断联时额外扫描的低推箱成本候选数，可调
+    inline constexpr int PHASE1_EXECUTABLE_BRANCH_SCAN_LIMIT = 18; // 候选剪枝：非根层 soft pass 真实 successor 扫描上限，可调
+    inline constexpr int PHASE1_EXECUTABLE_ROOT_SCAN_LIMIT = 24;   // 候选剪枝：根层 soft pass 真实 successor 扫描上限，可调
+    inline constexpr int PHASE1_EXECUTABLE_FINAL_SCAN_LIMIT = 48;  // 候选剪枝：最后一颗炸弹放宽扫描，避免排序误差漏掉闭环墙，可调
+    inline constexpr int PHASE1_EXECUTABLE_FINAL_BRANCH_LIMIT = 4;  // 执行代价：最后一层只比较少量真实分支，避免清障实体化拖慢热图，可调
+
+    // ------------------------------------------------------------------------
+    // Phase1 任意匹配缓存：接口/缓存容量
+    // ------------------------------------------------------------------------
+    inline constexpr int PHASE1_MATCH_MASKS = 1 << MAX_BOXES;     // 接口约束：任意箱-目标匹配 DP 的状态掩码数量，由 MAX_BOXES 决定，不手调
 }
+
+// ============================================================================
+// 策略 cpp 共享 helper 与缓存结构
+// ============================================================================
+// 这些声明由 StrategyCommon.cpp 提供实现，Phase1/Phase2 只使用，不再各自重复声明
+
+int strategy_box_at(const SokobanLevel& lvl, point p);
+bool strategy_target_allowed_for_box(const SokobanLevel& lvl, int box_id, int target_id, bool phase2_specific);
+bool strategy_is_goal_for_box(const SokobanLevel& lvl, int box_id, point p, bool phase2_specific);
+bool strategy_is_any_target_cell(const SokobanLevel& lvl, point p);
+int strategy_nearest_goal_distance(const SokobanLevel& lvl, int box_id, point p, bool phase2_specific);
+int strategy_bomb_count(const SokobanLevel& lvl);
+int strategy_direct_bomb_cost_for_score(const SokobanLevel& lvl, point player, point bomb_start, point target_wall, int fallback_dist);
+int16_t strategy_clamp_i16(int value);
+void mark_soft_deadlock_boxes(const SokobanLevel& lvl, bool out_hard[MAX_BOXES]);
+
+struct LogicBlastScores {
+    int16_t score[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+    uint8_t l1_hits[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+    uint8_t l2_hits[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+    uint8_t l3_hits[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+    uint8_t bomb_unlock_hits[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+};
 
 // ============================================================================
 // 策略层内部数据结构
@@ -70,6 +97,41 @@ struct BombCandidate {
     }
 };
 
+struct StrategyDfsScratch {
+    StaticArray<BombCandidate, 256> preliminary[MAX_BOMBS + 1];
+    StaticArray<BombCandidate, 256> candidates[MAX_BOMBS + 1];
+    bool probe_valid[MAX_BOMBS + 1][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+    uint8_t probe_bomb_idx[MAX_BOMBS + 1][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+    int probe_deadlocks[MAX_BOMBS + 1][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+    int probe_unreachable[MAX_BOMBS + 1][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+    int probe_distance[MAX_BOMBS + 1][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+};
+
+using StrategyBoxDepthDistances = int16_t[MAX_BOMBS + 1][MAX_BOXES][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+using StrategyBombDepthDistances = int16_t[MAX_BOMBS + 1][MAX_BOMBS][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+using StrategyPlayerReachDepthMap = bool[MAX_BOMBS + 1][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+using StrategyBoxDistances = int16_t[MAX_BOXES][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+using StrategyBombDistances = int16_t[MAX_BOMBS][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+using StrategyMatchDp = int[StrategyConfig::PHASE1_MATCH_MASKS];
+
+struct StrategySearchWorkspace {
+    StrategyBoxDepthDistances& dfs_dist_box;
+    StrategyBombDepthDistances& dfs_dist_bomb;
+    StrategyPlayerReachDepthMap& dfs_player_vis;
+    StrategyBoxDepthDistances& soft_box_dist_by_depth;
+    StrategyBoxDistances& probe_box_dist;
+    StrategyBombDistances& probe_bomb_dist;
+    StrategyBombDepthDistances& hard_bomb_dist_by_depth;
+    StrategyBombDepthDistances& strict_bomb_dist_by_depth;
+    StrategyMatchDp& matching_dp;
+    StrategyMatchDp& matching_next;
+    StrategyDfsScratch& dfs;
+    LogicBlastScores& logic;
+};
+
+// Phase1/Phase2 顺序复用同一块搜索工作区，避免两个阶段各持有一整份大缓存
+StrategySearchWorkspace& strategy_search_workspace();
+
 struct DFSResult {
     StaticArray<BombTask, MAX_BOMBS> tasks;
     int deadlocks_remaining;  // 执行 tasks 后仍未解除的死锁数量，越少越好
@@ -78,78 +140,110 @@ struct DFSResult {
     int bomb_supply_score = 0;              // Phase1：当前炸弹对关键缺陷墙的可执行供给
 };
 
-// ============================================================================
-// 炸弹战略规划器
-// ============================================================================
+enum class StrategyRescueObligationKind : uint8_t {
+    NONE = 0,
+    EXPLICIT_PHASE1_TASK,
+    EXPLICIT_FUTURE_BOMB,
+    UNRESOLVED
+};
 
-struct StrategyCandidateProfile {
-    int8_t bomb_x = -1;
-    int8_t bomb_y = -1;
-    int8_t wall_x = -1;
-    int8_t wall_y = -1;
+enum class StrategyClearReason : uint8_t {
+    NONE = 0,
+    BOMB_CORRIDOR_BLOCKER,
+    BOMB_REAL_PATH_BLOCKER,
+    PUSH_STAND_NEARBY,
+    ROUTE_NEARBY,
+    RECURSIVE_BOX_BLOCKER,
+    REAL_CLEAR_SUPPORT
+};
+
+enum class StrategyClearParking : uint8_t {
+    UNKNOWN = 0,
+    DIRECT_SAFE,
+    THEORETICAL_RESCUE,
+    OPEN_PATH_ONLY,
+    DEAD_PARKING
+};
+
+struct StrategyClearObligation {
+    uint8_t box_id = 255;
+    StrategyClearReason reason = StrategyClearReason::NONE;
+    StrategyClearParking parking = StrategyClearParking::UNKNOWN;
+    StrategyRescueObligationKind obligation = StrategyRescueObligationKind::NONE;
+    uint8_t creator_task_index = 255;
+    uint8_t owner_task_index = 255;
+    point box_start = {-1, -1};
+    point box_target = {-1, -1};
+    point owner_bomb_start = {-1, -1};
+    point owner_target_wall = {-1, -1};
+};
+
+enum class StrategyClearMethod : uint8_t {
+    NONE = 0,
+    DIRECT_BOMB_PATH,
+    SOFT_ROUTE_CLEAR,
+    REAL_CLEAR_SEARCH
+};
+
+struct StrategyClearPushTrace {
+    uint8_t box_id = 255;
+    StrategyClearReason reason = StrategyClearReason::NONE;
+    StrategyClearParking parking = StrategyClearParking::UNKNOWN;
+    StrategyRescueObligationKind obligation = StrategyRescueObligationKind::NONE;
+    uint8_t owner_task_index = 255;
+    point box_start = {-1, -1};
+    point box_target = {-1, -1};
+    point owner_bomb_start = {-1, -1};
+    point owner_target_wall = {-1, -1};
+    uint8_t depth = 0;
+    uint8_t opens_bomb_path = 0;
+    uint8_t safe_without_open_path = 0;
     int16_t score = 0;
 };
 
-struct StrategyPassProfile {
-    int16_t result_deadlocks = 9999;
-    int32_t result_profit = -999999;
-    uint8_t result_tasks = 0;
-    uint16_t root_candidates = 0;
-    uint8_t root_branch_limit = 0;
-    uint16_t dfs_nodes = 0;
-    uint16_t fast_bfs_calls = 0;
-    uint16_t candidate_evals = 0;
-    uint16_t candidate_kept = 0;
-    uint16_t child_branches = 0;
-    uint8_t logic_builds = 0;
-    uint16_t post_refine_tests = 0;
-    uint8_t top_count = 0;
-    StrategyCandidateProfile top[StrategyConfig::PROFILE_TOP_CANDIDATES];
-    uint16_t local_clear_calls = 0;
-    uint16_t local_clear_successes = 0;
-    uint16_t materialize_calls = 0;
-    uint16_t materialize_successes = 0;
+struct StrategyClearRouteTrace {
+    uint8_t push_count = 0;
 };
 
-struct StrategyEvalProfile {
-    uint8_t mode = 0;
-    uint8_t force_dynamic = 0;
-    uint8_t selected_pass = 255;
-    int16_t selected_deadlocks = 9999;
-    int32_t selected_profit = -999999;
-    uint8_t selected_tasks = 0;
-    StrategyPassProfile passes[3];
-};
-
-struct StrategyProfile {
-    uint8_t eval_count = 0;
-    uint16_t dropped_evals = 0;
-    StrategyEvalProfile evals[StrategyConfig::PROFILE_EVAL_LIMIT];
-};
+// ============================================================================
+// 炸弹战略规划器
+// ============================================================================
 
 class StrategicPlanner {
 public:
     StrategicPlanner() = default;
 
-    void set_phase2_dynamic_fallback(bool enabled) { force_phase2_dynamic = enabled; }
-    void reset_profile();
-    const StrategyProfile& get_profile() const { return profile; }
+    StaticArray<BombTask, MAX_BOMBS> plan_phase1_bombs(const SokobanLevel& level);
+    StaticArray<BombTask, MAX_BOMBS> plan_phase2_bombs(
+        const SokobanLevel& level,
+        const StaticArray<BombTask, MAX_BOMBS>& inherited_tasks);
 
-    template <GameMode Mode>
-    StaticArray<BombTask, MAX_BOMBS> evaluate_and_assign_bombs(const SokobanLevel& level);
-
-    bool materialize_bomb_task(const SokobanLevel& level, point player_start, const BombTask& task, BombTask& out_task, bool phase2_specific = false);
+    bool materialize_bomb_task(
+        const SokobanLevel& level,
+        point player_start,
+        const BombTask& task,
+        BombTask& out_task,
+        bool phase2_specific = false,
+        StaticArray<StrategyClearObligation, 8>* out_obligations = nullptr,
+        uint8_t creator_task_index = 255);
 
 private:
     // --- 当前规划上下文 ---
     SokobanLevel cached_level;
-    bool force_phase2_dynamic = false;
     bool phase1_soft_bomb_eval = false;
+    bool phase1_defer_soft_successor = false;
     bool phase2_soft_bomb_eval = false;
+    StaticArray<BombTask, MAX_BOMBS> phase1_phase2_inherited_candidates;
 
     // --- DFS 策略搜索 ---
-    template <GameMode Mode, bool Dynamic>
-    void dfs_bomb_sequence(
+    void dfs_phase1_bomb_sequence(
+        const SokobanLevel& current_lvl,
+        point player_start,
+        StaticArray<BombTask, MAX_BOMBS> current_seq,
+        int cost_so_far,
+        int depth,
+        DFSResult& best_res);
+    void dfs_phase2_bomb_sequence(
         const SokobanLevel& current_lvl,
         point player_start,
         StaticArray<BombTask, MAX_BOMBS> current_seq,
@@ -157,12 +251,66 @@ private:
         int depth,
         DFSResult& best_res);
 
+    void execute_phase1_search_pass(const SokobanLevel& level, uint8_t pass, DFSResult& out_res);
+    void execute_phase2_search_pass(const SokobanLevel& level, uint8_t pass, DFSResult& out_res);
+
+    void stamp_selected_tasks(DFSResult& result);
+
+    bool apply_executable_bomb_task(SokobanLevel& work, point& player, const BombTask& task, int* sequence_cost = nullptr);
+    bool materialize_phase1_sequence(
+        const SokobanLevel& level,
+        StaticArray<BombTask, MAX_BOMBS>& seq,
+        int* out_sequence_cost = nullptr,
+        StaticArray<StrategyClearObligation, MAX_BOMBS * 8>* out_obligations = nullptr);
+    bool evaluate_phase1_task_sequence(
+        const SokobanLevel& level,
+        const StaticArray<BombTask, MAX_BOMBS>& seq,
+        int& out_deadlocks,
+        int& out_unreachable,
+        int& out_distance,
+        const StaticArray<StrategyClearObligation, MAX_BOMBS * 8>* obligations = nullptr,
+        int* out_unresolved_obligations = nullptr);
+    void evaluate_phase1_matching_pairs(
+        const SokobanLevel& level,
+        point player,
+        int selected_count,
+        bool soft_boxes,
+        bool strict_soft_boxes,
+        int16_t out_dist[MAX_BOXES][MAP_MAX_HEIGHT][MAP_MAX_WIDTH],
+        int& out_deadlocks,
+        int& out_distance);
+    bool materialize_phase2_sequence(const SokobanLevel& level, StaticArray<BombTask, MAX_BOMBS>& seq);
+    bool apply_phase2_task_sequence(
+        const SokobanLevel& level,
+        const StaticArray<BombTask, MAX_BOMBS>& seq,
+        SokobanLevel& out_level,
+        point& out_player,
+        int* out_sequence_cost = nullptr);
+    void evaluate_phase2_level_matching(
+        const SokobanLevel& level,
+        point player,
+        int& out_deadlocks,
+        int& out_distance);
+    bool evaluate_phase2_task_sequence(
+        const SokobanLevel& level,
+        const StaticArray<BombTask, MAX_BOMBS>& seq,
+        int& out_deadlocks,
+        int& out_distance,
+        int* out_sequence_cost = nullptr);
+
     // --- 推物体距离场与可执行性验证 ---
-    void fast_push_bfs(const SokobanLevel& lvl, point start_obj, point player_start, bool is_bomb, int16_t out_dist[MAP_MAX_HEIGHT][MAP_MAX_WIDTH], bool soft_boxes = false);
+    void fast_push_bfs(
+        const SokobanLevel& lvl,
+        point start_obj,
+        point player_start,
+        bool is_bomb,
+        int16_t out_dist[MAP_MAX_HEIGHT][MAP_MAX_WIDTH],
+        bool soft_boxes = false,
+        bool strict_soft_boxes = false);
     void macro_soft_dijkstra(const SokobanLevel& lvl, point start_obj, int16_t out_dist[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]);
     bool are_fast_bomb_tasks_directly_executable(const SokobanLevel& level, const StaticArray<BombTask, MAX_BOMBS>& tasks);
 
-    // --- 轻量局部清障回退 ---
+    // --- 轻量局部清障实体化 ---
     bool local_clear_bomb_route(
         const SokobanLevel& start_lvl,
         int bomb_idx,
@@ -170,7 +318,10 @@ private:
         bool phase2_specific,
         SokobanLevel& out_lvl,
         int& out_cost,
-        StaticArray<BoxPushTask, 8>& out_box_pushes);
+        StaticArray<BoxPushTask, 8>& out_box_pushes,
+        bool include_player_access_clear = false,
+        StaticArray<StrategyClearObligation, 8>* out_obligations = nullptr,
+        uint8_t creator_task_index = 255);
 
     void begin_profile_eval(uint8_t mode);
     void set_profile_pass(uint8_t pass);
@@ -186,15 +337,75 @@ private:
     void record_profile_candidate_kept();
     void record_profile_child_branch();
     void record_profile_logic_build();
-    void record_profile_post_refine_test();
     void record_profile_local_clear_call();
     void record_profile_local_clear_success();
+    void record_profile_local_clear_time(uint32_t elapsed_us);
     void record_profile_materialize_call();
     void record_profile_materialize_success();
+    void record_profile_fast_bfs_detail(
+        uint32_t elapsed_us,
+        uint32_t player_reach_calls,
+        uint32_t state_pops,
+        uint16_t max_queue);
+    void record_profile_macro_soft_call();
+    void record_profile_macro_soft_detail(
+        uint32_t elapsed_us,
+        uint32_t state_pops,
+        uint16_t max_queue);
+    void record_profile_soft_route_build(int route_len);
+    void record_profile_box_push_check(bool success);
+    void record_profile_bomb_path_check(bool success);
+    void record_profile_player_path_check();
+    void record_profile_real_clear_node(int depth);
+    void record_profile_real_clear_candidates(int candidate_count, int try_limit);
+    void record_shadow_clear_route_attempt(bool success, int blocker_count);
+    void record_shadow_clear_blocker(StrategyClearReason reason);
+    void record_shadow_push_stand_blocker(int stand_dist);
+    void record_shadow_clear_accept(StrategyClearReason reason, StrategyClearParking parking);
+    void record_shadow_clear_decision(StrategyClearReason reason, StrategyClearParking parking, int support_dist, bool accepted);
+    void record_shadow_real_node();
+    void record_shadow_real_source_distance(int source_support_dist);
+    void record_shadow_real_push_candidate();
+    void record_shadow_real_push_executable();
+    void record_shadow_real_opens_path();
+    void record_shadow_real_parking(StrategyClearParking parking, bool accepted);
 
-    StrategyProfile profile;
-    StrategyEvalProfile* active_profile_eval = nullptr;
-    uint8_t active_profile_pass = 0;
+    StrategyClearRouteTrace* begin_profile_clear(
+        const SokobanLevel& level,
+        int bomb_idx,
+        point target_wall,
+        bool phase2_specific,
+        bool include_player_access_clear);
+    void record_profile_clear_route(
+        StrategyClearRouteTrace* diag,
+        int route_len,
+        int blocker_count);
+    void record_profile_clear_push(
+        StrategyClearRouteTrace* diag,
+        uint8_t box_id,
+        StrategyClearReason reason,
+        StrategyClearParking parking,
+        StrategyRescueObligationKind obligation,
+        uint8_t owner_task_index,
+        point box_start,
+        point box_target,
+        point owner_bomb_start,
+        point owner_target_wall,
+        int depth,
+        bool opens_bomb_path,
+        bool safe_without_open_path,
+        int score);
+    void finish_profile_clear(
+        StrategyClearRouteTrace* diag,
+        bool success,
+        StrategyClearMethod method,
+        int cost);
+    static void merge_clear_obligation(
+        StaticArray<StrategyClearObligation, MAX_BOMBS * 8>& obligations,
+        const StrategyClearObligation& obligation);
+    static int count_unresolved_clear_obligations(
+        const StaticArray<StrategyClearObligation, MAX_BOMBS * 8>& obligations,
+        int resolved_task_count);
 };
 
 extern StrategicPlanner strategic_planner;

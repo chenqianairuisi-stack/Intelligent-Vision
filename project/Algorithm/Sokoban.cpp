@@ -9,42 +9,159 @@
 // ============================================================================
 
 namespace SokobanConfig {
-    // ------------------------------------------------------------------------
     // 搜索功能开关
-    // ------------------------------------------------------------------------
-    inline constexpr bool ENABLE_PROFILE = false;      // 是否记录 expanded/generated/TT 命中等 profile 数据 (用于PC端调试)
-    inline constexpr bool ENABLE_PATH_POSTOPT = true;  // 是否在成功后优化纯行走段转弯
-    inline constexpr bool ENABLE_BOMB_MACRO = true;    // 是否启用炸弹宏动作
-
-    // ------------------------------------------------------------------------
+    inline constexpr bool ENABLE_PATH_POSTOPT = true;   // 是否在成功后优化纯行走段转弯
+    
     // IDA* 阈值与启发式权重
-    // ------------------------------------------------------------------------
-    inline constexpr int INITIAL_THRESHOLD_BOOST = 0;  // 初始 threshold 额外增量：默认为0，交给启发式决定，也可直接设置一个较大的值来跳过过多的无效迭代
-    inline constexpr int HEURISTIC_WEIGHT_DEN = 10;    // f = g + h * weight / denominator
-    inline constexpr int HEURISTIC_WEIGHT_GE_8 = 30;   // active_entities >= 8 时的权重分子
-    inline constexpr int HEURISTIC_WEIGHT_GE_6 = 25;   // active_entities >= 6 时的权重分子
-    inline constexpr int HEURISTIC_WEIGHT_GE_5 = 20;   // active_entities >= 5 时的权重分子
-    inline constexpr int HEURISTIC_WEIGHT_GE_4 = 18;   // active_entities >= 4 时的权重分子
-    inline constexpr int HEURISTIC_WEIGHT_BASE = 10;   // active_entities < 4 时的权重分子
+    inline constexpr int INITIAL_THRESHOLD_BOOST = 0;   // 初始 threshold 额外增量；默认交给启发式本身决定
+    inline constexpr int HEURISTIC_WEIGHT_DEN = 10;     // f = g + h * weight / denominator
+    inline constexpr int HEURISTIC_WEIGHT_BASE = 12;    // active_entities < 4
+    inline constexpr int HEURISTIC_WEIGHT_GE_4 = 18;    // active_entities >= 4
+    inline constexpr int HEURISTIC_WEIGHT_GE_5 = 20;    // active_entities >= 5
+    inline constexpr int HEURISTIC_WEIGHT_GE_6 = 25;    // active_entities >= 6
+    inline constexpr int HEURISTIC_WEIGHT_GE_8 = 30;    // active_entities >= 8
 
-    // ------------------------------------------------------------------------
+    // 多轮失败后的阈值推进
+    inline constexpr bool ENABLE_LATE_THRESHOLD_ACCEL = true;      // 是否启用快速阈值推进
+    inline constexpr int LATE_THRESHOLD_ACCEL_MIN_ITERATION = 32;  // 迭代次数达到该值后，开始加快 threshold 前进
+    inline constexpr int LATE_THRESHOLD_ACCEL_STEP = 2;            // 加快时每轮至少推进的 threshold 步数
+
+    // 等价玩家位置 TT
+    inline constexpr bool ENABLE_CANONICAL_TT = true;              // 是否将归一化玩家位置写入 TT
+    inline constexpr int CANONICAL_TT_MIN_THRESHOLD = 120;         // 迭代次数达到该值后启用，避免浅图 TT 命中结构被扰动
+
+    // 单箱到目标总代价下界
+    inline constexpr bool ENABLE_BOX_TARGET_COST_LB = true;        // 是否启用基于预计算 box_target_cost 的更精细排序
+    inline constexpr int BOX_TARGET_COST_MIN_ITERATION = 40;       // 迭代次数达到该值后启用，避免前期预计算的误导
+
     // 炸弹宏动作
-    // ------------------------------------------------------------------------
-    inline constexpr int BOMB_MACRO_MAX_PATH = 80;          // 宏动作真实展开路径长度上限
-    inline constexpr int BOMB_MACRO_THRESHOLD_MARGIN = 32;  // 过滤贴近阈值、通常会被真实路径立即剪掉的宏动作
+    inline constexpr bool ENABLE_BOMB_MACRO = true;                // 是否将推炸弹宏动作加入搜索
+    inline constexpr int BOMB_MACRO_MAX_PATH = 80;                 // 宏动作真实展开路径长度上限
+    inline constexpr int BOMB_MACRO_THRESHOLD_MARGIN = 32;         // 过滤贴近阈值、通常会被真实路径立即剪掉的宏动作
+    inline constexpr int BOMB_MACRO_SORT_BONUS = 120;              // 动作排序中给予宏动作的优先级补偿
+    inline constexpr int BOMB_MACRO_MIN_BENEFIT = -9999;           // 宏动作启发式收益门槛；默认只做合法性过滤
+
+    // 小规模推箱宏层
+    inline constexpr bool ENABLE_SMALL_BOX_MACRO_LAYER = true;     // 是否在根部尝试少箱宏层快解
+    inline constexpr int SMALL_BOX_MACRO_MAX_BOXES = 4;            // 只处理极小规模纯推箱局面，避免入口开销扩散
+    inline constexpr int SMALL_BOX_MACRO_MIN_COST_LB = 0;          // 静态下界会错杀长通道图，默认不用于预拒绝
+
+    // 小规模箱子/炸弹混合宏层
+    inline constexpr bool ENABLE_MIXED_SMALL_ENTITY_MACRO_LAYER = true; // 是否启用箱子部分推进与炸弹任务统一宏搜索
+    inline constexpr int MIXED_MACRO_MAX_BOXES = 4;                     // 只处理少箱 + 少量炸弹的语义求解尾段
+    inline constexpr int MIXED_MACRO_MAX_DEPTH = 12;                    // 宏任务深度上限，避免退化成全局规划器
+    inline constexpr int MIXED_MACRO_NODE_BUDGET = 700;                 // 宏状态展开预算
+    inline constexpr int MIXED_MACRO_PROGRESS_CANDIDATES = 16;          // 每个宏状态最多保留的部分推进候选
+    inline constexpr int MIXED_MACRO_BOX_PROGRESS_LIMIT = 6;            // 共享阻塞阶段最多尝试的推箱部分推进数
+    inline constexpr int MIXED_MACRO_BOX_FINISH_LIMIT = 4;              // 单层最多尝试的直接完成候选数
+    inline constexpr int MIXED_MACRO_BOMB_PROGRESS_LIMIT = 3;           // 单层最多尝试的炸弹续推候选数
+    inline constexpr int MIXED_MACRO_GLOBAL_CORRIDOR_MIN_PCT = 55;      // 走廊占比高时给共享依赖额外加分
+    inline constexpr int MIXED_MACRO_COUPLING_MIN_SCORE = 3;            // 局部箱子-炸弹耦合评分下限
+
 }
 
 // ============================================================================
 // 编译器分支预测提示
 // ============================================================================
+
 #define likely(x)   __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
 
 // ============================================================================
 // 全局实例与哈希随机数生成
 // ============================================================================
+
 DTCM_DATA Sokoban solver;
 DTCM_DATA TTEntry TT[TT_SIZE];  
+OCRAM_BSS static uint8_t RELAXED_PUSH_STAND_DIST[MAP_CELL_COUNT][MAP_CELL_COUNT];
+OCRAM_BSS static uint16_t DYNAMIC_BOX_EVAL_SEEN[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+static uint16_t dynamic_box_eval_gen = 0;
+
+namespace {
+    inline constexpr bool ENABLE_STRICT_COST_REPAIR = true;
+    inline constexpr uint32_t STRICT_REPAIR_NODE_BUDGET = 1000;
+    inline constexpr uint32_t SMALL_BOX_MACRO_IDA_NODE_BUDGET = 6000;
+    inline constexpr bool ENABLE_TURN_ACCESS_DEBT_SORT = true;
+    inline constexpr bool ENABLE_DYNAMIC_BLOCK_SORT = true;
+
+    struct PathQualityStats {
+        int steps = 0;
+        int reversals = 0;
+        int repeated_cells = 0;
+    };
+
+    int path_step_count(const StaticArray<point, MAX_PATH_LENGTH>& path) {
+        int steps = 0;
+        for (int i = 1; i < path.size(); ++i) {
+            int dx = std::abs(path[i].x - path[i - 1].x);
+            int dy = std::abs(path[i].y - path[i - 1].y);
+            if (dx + dy == 1) ++steps;
+        }
+        return steps;
+    }
+
+    // 与可视化面板总代价一致，仅用于已完成候选之间择优
+    inline constexpr int DISPLAY_TURN_COST = 4;
+    int path_display_cost(const StaticArray<point, MAX_PATH_LENGTH>& path) {
+        int steps = 0;
+        int turns = 0;
+        uint8_t last_dir = 4;
+        for (int i = 1; i < path.size(); ++i) {
+            int dx = path[i].x - path[i - 1].x;
+            int dy = path[i].y - path[i - 1].y;
+            if (std::abs(dx) + std::abs(dy) != 1) continue;
+            uint8_t dir = 4;
+            if (dx == 1) dir = 1;
+            else if (dx == -1) dir = 3;
+            else if (dy == 1) dir = 0;
+            else if (dy == -1) dir = 2;
+            ++steps;
+            if (last_dir < 4 && dir != last_dir) ++turns;
+            last_dir = dir;
+        }
+        return steps + turns * DISPLAY_TURN_COST;
+    }
+
+    PathQualityStats analyze_path_quality(const StaticArray<point, MAX_PATH_LENGTH>& path) {
+        PathQualityStats stats;
+        uint8_t seen[MAP_MAX_HEIGHT][MAP_MAX_WIDTH] = {};
+        uint8_t last_dir = 4;
+
+        for (int i = 0; i < path.size(); ++i) {
+            point p = path[i];
+            if (p.x >= 0 && p.x < MAP_MAX_WIDTH && p.y >= 0 && p.y < MAP_MAX_HEIGHT) {
+                if (seen[p.y][p.x]) ++stats.repeated_cells;
+                else seen[p.y][p.x] = 1;
+            }
+            if (i == 0) continue;
+
+            int dx = path[i].x - path[i - 1].x;
+            int dy = path[i].y - path[i - 1].y;
+            if (std::abs(dx) + std::abs(dy) != 1) continue;
+
+            uint8_t dir = 4;
+            if (dx == 1) dir = 1;
+            else if (dx == -1) dir = 3;
+            else if (dy == 1) dir = 0;
+            else if (dy == -1) dir = 2;
+
+            ++stats.steps;
+            if (last_dir < 4 && dir == ((last_dir + 2) & 3)) ++stats.reversals;
+            last_dir = dir;
+        }
+        return stats;
+    }
+
+    bool should_run_strict_repair(const StaticArray<point, MAX_PATH_LENGTH>& path) {
+        PathQualityStats stats = analyze_path_quality(path);
+        if (stats.steps < 55) return false;
+        if (stats.steps >= 100 && stats.repeated_cells * 100 >= stats.steps * 32) return true;
+        if (stats.reversals >= 4 && stats.repeated_cells * 100 >= stats.steps * 38) return true;
+        if (stats.steps >= 90 && stats.reversals >= 3 && stats.repeated_cells * 100 >= stats.steps * 42) return true;
+        if (stats.repeated_cells * 100 >= stats.steps * 46) return true;
+        return false;
+    }
+}
 
 static uint32_t xor_state = 123456789;
 
@@ -56,10 +173,6 @@ static uint32_t xorshift32() {
     return xor_state;
 }
 
-// 热路径计数统一走宏；ENABLE_PROFILE=false 时由 if constexpr 编译掉。
-#define SOKOBAN_PROFILE_INC(field) do { if constexpr (SokobanConfig::ENABLE_PROFILE) { ++profile.field; } } while (0)
-#define SOKOBAN_PROFILE_ADD(field, value) do { if constexpr (SokobanConfig::ENABLE_PROFILE) { profile.field += (value); } } while (0)
-#define SOKOBAN_PROFILE_MAX(field, value) do { if constexpr (SokobanConfig::ENABLE_PROFILE) { if ((value) > profile.field) profile.field = (value); } } while (0)
 
 
 // ============================================================================
@@ -71,6 +184,30 @@ static uint32_t xorshift32() {
 /// \return 找到可行推箱路径时返回 true
 bool Sokoban::solve() {
     return solve_internal();
+}
+
+bool Sokoban::solve_macro_candidate() {
+    if (initial_state.num_boxes > initial_targets.size()) return false;
+
+    initial_state.hash = compute_hash(initial_state);
+    std::memset(TT, 0, sizeof(TT));
+    std::memset(macro_cost_cache, 0, sizeof(macro_cost_cache));
+    std::memset(mixed_macro_tt, 0xFF, sizeof(mixed_macro_tt));
+    current_threshold_iteration = 0;
+
+    if (try_small_box_macro_solution()) return true;
+
+    StaticArray<point, MAX_PATH_LENGTH> macro_candidate;
+    if (try_bomb_then_small_box_macro_solution(macro_candidate)) {
+        final_path = macro_candidate;
+        try_strict_cost_repair(final_path);
+        if constexpr (SokobanConfig::ENABLE_PATH_POSTOPT) {
+            optimize_final_path_turns();
+        }
+        return true;
+    }
+
+    return false;
 }
 
 /// \brief 从视觉或 PC 测试输入导入初始地图和炸弹任务
@@ -100,6 +237,16 @@ bool Sokoban::load_from_vision(const SokobanLevel& level, const BombTask* tasks,
         initial_targets.push_back(level.targets[i]);
         target_semantics[i] = level.target_semantics[i];
     }
+    std::memset(target_semantic_mask, 0, sizeof(target_semantic_mask));
+    std::memset(target_cell_mask, 0, sizeof(target_cell_mask));
+    for (int i = 0; i < level.target_count; ++i) {
+        uint8_t sem = level.target_semantics[i];
+        if (sem < 10) {
+            target_semantic_mask[sem] = static_cast<uint16_t>(target_semantic_mask[sem] | (1U << i));
+            target_cell_mask[sem][level.targets[i].y][level.targets[i].x] =
+                static_cast<uint16_t>(target_cell_mask[sem][level.targets[i].y][level.targets[i].x] | (1U << i));
+        }
+    }
     
     initial_bombs.clear();
     for (int i = 0; i < level.bomb_count; ++i) {
@@ -119,14 +266,19 @@ bool Sokoban::load_from_vision(const SokobanLevel& level, const BombTask* tasks,
         bool found = false;
         for (int t = 0; t < count; ++t) {
             if (tasks[t].bomb_start == initial_bombs[b]) {
+                point tw = tasks[t].target_wall;
+                if (!PlanningCommon::is_blastable_wall(level, tw)) continue;
+
                 bomb_tasks[b] = tasks[t];
                 found = true;
-                point tw = tasks[t].target_wall;
                 for (int dy = -1; dy <= 1; ++dy) {
                     for (int dx = -1; dx <= 1; ++dx) {
-                        int ny = tw.y + dy, nx = tw.x + dx;
-                        if (ny >= 0 && ny < MAP_MAX_HEIGHT && nx >= 0 && nx < MAP_MAX_WIDTH) {
-                            wall_clear_mask[ny][nx] |= (1 << b);
+                        point p = {
+                            static_cast<int8_t>(tw.x + dx),
+                            static_cast<int8_t>(tw.y + dy)
+                        };
+                        if (PlanningCommon::is_inner_map_cell(p)) {
+                            wall_clear_mask[p.y][p.x] |= (1 << b);
                         }
                     }
                 }
@@ -209,8 +361,10 @@ bool Sokoban::bind_semantics() {
     initial_state.target_mask = remaining_target_mask;
 
     init_zobrist();
+    precompute_solid_masks();
     precompute_target_distances();
     precompute_walk_distances();
+    precompute_box_target_costs();
     precompute_bomb_distances();
     precompute_bomb_macro_costs();
     precompute_deadlocks();
@@ -219,11 +373,6 @@ bool Sokoban::bind_semantics() {
     initial_state.hash = compute_hash(initial_state);
     return true;
 }
-
-bool Sokoban::profile_enabled() const {
-    return SokobanConfig::ENABLE_PROFILE;
-}
-
 
 // ============================================================================
 // 模块 2：IDA* 主流程与搜索热路径
@@ -244,9 +393,59 @@ bool Sokoban::solve_internal() {
     
     initial_state.hash = compute_hash(initial_state);
     std::memset(TT, 0, sizeof(TT)); // 清空置换表。
-    if constexpr (SokobanConfig::ENABLE_PROFILE) {
-        profile = SokobanProfile{};
+    std::memset(macro_cost_cache, 0, sizeof(macro_cost_cache));
+    std::memset(mixed_macro_tt, 0xFF, sizeof(mixed_macro_tt));
+    current_threshold_iteration = 0;
+
+    if (try_small_box_macro_solution()) {
+        return true;
     }
+
+    StaticArray<point, MAX_PATH_LENGTH> macro_candidate;
+    if (try_bomb_then_small_box_macro_solution(macro_candidate)) {
+        // 宏层已枚举炸弹顺序与少箱完成顺序，和快速 IDA* 各自收尾后再择优
+        StaticArray<point, MAX_PATH_LENGTH> ida_path;
+        bool have_ida = run_ida_search(false, MAX_PATH_LENGTH, ida_path, SMALL_BOX_MACRO_IDA_NODE_BUDGET);
+        select_cheaper_finalized(macro_candidate, have_ida ? &ida_path : nullptr);
+        return true;
+    }
+
+    if (should_use_mixed_small_entity_macro_layer(initial_state) &&
+        try_mixed_small_entity_macro_solution(macro_candidate)) {
+        final_path = macro_candidate;
+        try_strict_cost_repair(final_path);
+        if constexpr (SokobanConfig::ENABLE_PATH_POSTOPT) {
+            optimize_final_path_turns();
+        }
+        return true;
+    }
+
+    StaticArray<point, MAX_PATH_LENGTH> candidate_path;
+    if (!run_ida_search(false, MAX_PATH_LENGTH, candidate_path)) {
+        return false;
+    }
+
+    final_path = candidate_path;
+    try_strict_cost_repair(candidate_path);
+    if constexpr (SokobanConfig::ENABLE_PATH_POSTOPT) {
+        optimize_final_path_turns();
+    }
+    return true;
+}
+
+bool Sokoban::run_ida_search(
+    bool strict_cost,
+    int max_threshold,
+    StaticArray<point, MAX_PATH_LENGTH>& out_path,
+    uint32_t node_budget) {
+    std::memset(TT, 0, sizeof(TT));
+    std::memset(macro_cost_cache, 0, sizeof(macro_cost_cache));
+    current_threshold_iteration = 0;
+    strict_cost_search = strict_cost;
+    force_box_target_cost_lb = strict_cost;
+    search_node_budget = node_budget;
+    search_node_count = 0;
+    search_aborted = false;
 
     int threshold = get_heuristic(initial_state);
     StaticArray<point, MAX_PATH_LENGTH> rev_path;             
@@ -259,33 +458,162 @@ bool Sokoban::solve_internal() {
         }
     }
     int root_active_entities = initial_state.num_boxes + root_active_bombs;
-    int root_W_num = heuristic_weight_num(root_active_entities);
-    threshold = (threshold * root_W_num + SokobanConfig::HEURISTIC_WEIGHT_DEN - 1) /
-                SokobanConfig::HEURISTIC_WEIGHT_DEN;
-    if constexpr (SokobanConfig::INITIAL_THRESHOLD_BOOST > 0) {
-        threshold += SokobanConfig::INITIAL_THRESHOLD_BOOST;
-    }
-    while (threshold <= MAX_PATH_LENGTH) {
-        SOKOBAN_PROFILE_INC(threshold_iterations);
-        if constexpr (SokobanConfig::ENABLE_PROFILE) {
-            profile.final_threshold = static_cast<uint16_t>(threshold);
+    if (!strict_cost_search && root_active_entities <= 5) {
+        bool saved_force_lb = force_box_target_cost_lb;
+        force_box_target_cost_lb = true;
+        int strong_threshold = get_heuristic(initial_state);
+        force_box_target_cost_lb = saved_force_lb;
+        if (strong_threshold > threshold && strong_threshold < 9999) {
+            force_box_target_cost_lb = true;
+            threshold = strong_threshold;
         }
+    }
+    int effective_max_threshold = max_threshold;
+    if (!strict_cost_search) {
+        int root_W_num = heuristic_weight_num(root_active_entities);
+        threshold = (threshold * root_W_num + SokobanConfig::HEURISTIC_WEIGHT_DEN - 1) /
+                    SokobanConfig::HEURISTIC_WEIGHT_DEN;
+        // max_threshold 是真实路径上限，加权 f 需要同步放大否则会把可行解误判无解
+        effective_max_threshold =
+            (max_threshold * root_W_num + SokobanConfig::HEURISTIC_WEIGHT_DEN - 1) /
+            SokobanConfig::HEURISTIC_WEIGHT_DEN;
+    }
+    if constexpr (SokobanConfig::INITIAL_THRESHOLD_BOOST > 0) {
+        if (!strict_cost_search) threshold += SokobanConfig::INITIAL_THRESHOLD_BOOST;
+    }
+    while (threshold <= effective_max_threshold) {
+        ++current_threshold_iteration;
         int res = ida_star_search(initial_state, 0, 0, threshold, rev_path, -1);
         
         if (res == -1) {                                      
             rev_path.push_back(initial_state.player);         
             std::reverse(rev_path.begin(), rev_path.end());   
-            final_path = rev_path;
-            if constexpr (SokobanConfig::ENABLE_PATH_POSTOPT) {
-                optimize_final_path_turns();
-            }
+            out_path = rev_path;
+            strict_cost_search = false;
+            force_box_target_cost_lb = false;
+            search_node_budget = 0;
             return true;
         }
+        if (search_aborted) break;
         if (res >= 9999) break;                               
-        threshold = res;
+        int next_threshold = res;
+        if constexpr (SokobanConfig::ENABLE_LATE_THRESHOLD_ACCEL) {
+            if (!strict_cost_search &&
+                current_threshold_iteration >= SokobanConfig::LATE_THRESHOLD_ACCEL_MIN_ITERATION &&
+                next_threshold < threshold + SokobanConfig::LATE_THRESHOLD_ACCEL_STEP) {
+                next_threshold = threshold + SokobanConfig::LATE_THRESHOLD_ACCEL_STEP;
+            }
+        }
+        threshold = next_threshold;
     }
 
+    strict_cost_search = false;
+    force_box_target_cost_lb = false;
+    search_node_budget = 0;
     return false;
+}
+
+bool Sokoban::run_bounded_strict_search(
+    int max_cost,
+    StaticArray<point, MAX_PATH_LENGTH>& out_path,
+    uint32_t node_budget) {
+    if (max_cost <= 0) return false;
+
+    std::memset(TT, 0, sizeof(TT));
+    std::memset(macro_cost_cache, 0, sizeof(macro_cost_cache));
+    current_threshold_iteration = 0;
+    strict_cost_search = true;
+    force_box_target_cost_lb = true;
+    search_node_budget = node_budget;
+    search_node_count = 0;
+    search_aborted = false;
+
+    StaticArray<point, MAX_PATH_LENGTH> rev_path;
+    int threshold = max_cost;
+
+    // strict 修复阶段已有首解上界，直接从上界向下找改进解
+    // 这比从 h 下界逐轮证明不可行更适合 MCU 上的小预算搜索
+    while (threshold > 0) {
+        ++current_threshold_iteration;
+
+        rev_path.clear();
+        int res = ida_star_search(initial_state, 0, 0, threshold, rev_path, -1);
+        if (res == -1) {
+            rev_path.push_back(initial_state.player);
+            std::reverse(rev_path.begin(), rev_path.end());
+            int improved_cost = path_step_count(rev_path);
+            if (improved_cost <= 0 || improved_cost > threshold) break;
+            out_path = rev_path;
+            threshold = improved_cost - 1;
+
+            std::memset(TT, 0, sizeof(TT));
+            std::memset(macro_cost_cache, 0, sizeof(macro_cost_cache));
+            continue;
+        }
+
+        if (search_aborted) break;
+        break;
+    }
+
+    strict_cost_search = false;
+    force_box_target_cost_lb = false;
+    search_node_budget = 0;
+    return out_path.size() > 0;
+}
+
+bool Sokoban::try_strict_cost_repair(const StaticArray<point, MAX_PATH_LENGTH>& candidate_path) {
+    if constexpr (!ENABLE_STRICT_COST_REPAIR) {
+        (void)candidate_path;
+        return false;
+    }
+    int candidate_cost = path_step_count(candidate_path);
+    if (candidate_cost <= 1) return false;
+    if (!should_run_strict_repair(candidate_path)) return false;
+
+    bool saved_strict = strict_cost_search;
+    bool saved_force_lb = force_box_target_cost_lb;
+    strict_cost_search = true;
+    force_box_target_cost_lb = true;
+    int lower_bound = get_heuristic(initial_state);
+    strict_cost_search = saved_strict;
+    force_box_target_cost_lb = saved_force_lb;
+    if (lower_bound >= 9999 || lower_bound >= candidate_cost) return false;
+
+    int strict_max = candidate_cost - 1;
+
+    StaticArray<point, MAX_PATH_LENGTH> repaired_path;
+    if (!run_bounded_strict_search(strict_max, repaired_path, STRICT_REPAIR_NODE_BUDGET)) {
+        return false;
+    }
+    if (repaired_path.size() > 0 && path_step_count(repaired_path) < candidate_cost) {
+        final_path = repaired_path;
+        return true;
+    }
+    return false;
+}
+
+// 对候选路径执行完整收尾后，用面板总代价返回比较值
+int Sokoban::finalize_path_candidate(const StaticArray<point, MAX_PATH_LENGTH>& candidate) {
+    final_path = candidate;
+    try_strict_cost_repair(candidate);
+    if constexpr (SokobanConfig::ENABLE_PATH_POSTOPT) {
+        optimize_final_path_turns();
+    }
+    return path_display_cost(final_path);
+}
+
+// 宏层候选与 IDA* 候选都收尾后再比较，避免用后处理前的粗略长度误判
+void Sokoban::select_cheaper_finalized(
+    const StaticArray<point, MAX_PATH_LENGTH>& macro_candidate,
+    const StaticArray<point, MAX_PATH_LENGTH>* ida_candidate) {
+    int macro_cost = finalize_path_candidate(macro_candidate);
+    if (ida_candidate == nullptr) return;
+
+    StaticArray<point, MAX_PATH_LENGTH> macro_final = final_path;
+    int ida_cost = finalize_path_candidate(*ida_candidate);
+    if (macro_cost < ida_cost) {
+        final_path = macro_final;
+    }
 }
 
 
@@ -302,30 +630,72 @@ bool Sokoban::solve_internal() {
 /// 函数内部完成置换表剪枝、启发式剪枝、玩家可达区域 BFS、可推动作生成、
 /// 动作排序、状态转移和成功路径回溯，是 Sokoban 求解器最核心的递归热路径。
 
-int Sokoban::ida_star_search(const GameState& state, int g, int depth, int threshold, StaticArray<point, MAX_PATH_LENGTH>& path, int last_entity, uint8_t last_push_dir) {
-    if (unlikely(state.num_boxes == 0)) return -1;  // 搜索成功。
+int Sokoban::ida_star_search(const GameState& state, int g, int depth, int threshold, StaticArray<point, MAX_PATH_LENGTH>& path, int last_entity, uint8_t last_push_dir, int known_h, int known_active_bombs, bool tt_already_clear) {
+    if (unlikely(state.num_boxes == 0)) {
+        return (g <= threshold) ? -1 : g;
+    }
     if (unlikely(depth >= MAX_PATH_LENGTH)) return 9999; // 保护 path_hashes 和深度相关工作数组的索引。
-    SOKOBAN_PROFILE_MAX(max_depth, static_cast<uint16_t>(depth));
 
-    int tt_probe = probe_transposition(state.hash, g, threshold);
-    if (tt_probe != 0) return tt_probe;
+    if (!tt_already_clear) {
+        int tt_probe = probe_transposition(state.hash, g, threshold);
+        if (tt_probe != 0) return tt_probe;
+    }
 
-    int h = get_heuristic(state);
+    int h = (known_h >= 0) ? known_h : get_heuristic(state);
     if (unlikely(h >= 9999)) {                
-        SOKOBAN_PROFILE_INC(heuristic_dead_prunes);
-        TT[state.hash & (TT_SIZE - 1)].sig = static_cast<uint16_t>(state.hash >> 16);
-        TT[state.hash & (TT_SIZE - 1)].value = 9999;
+        store_transposition(state.hash, g, g + 9999);
         return 9999;
     }
 
-    int active_bombs = count_active_bomb_tasks(state);
+    int active_bombs = (known_active_bombs >= 0) ? known_active_bombs : count_active_bomb_tasks(state);
     int active_entities = state.num_boxes + active_bombs;
     int box_push_lb_sum = box_push_lb_sum_if_needed(state, active_bombs);
-    int W_num = heuristic_weight_num(active_entities);
-
+    int W_num = strict_cost_search ? SokobanConfig::HEURISTIC_WEIGHT_DEN
+                                   : heuristic_weight_num(active_entities);
+    bool use_box_target_cost_sort = false;
+    if constexpr (SokobanConfig::ENABLE_BOX_TARGET_COST_LB) {
+        use_box_target_cost_sort =
+            strict_cost_search ||
+            current_threshold_iteration >= SokobanConfig::BOX_TARGET_COST_MIN_ITERATION;
+    }
+    auto nearest_active_target_push_dist = [&](uint8_t semantic_id, point box_pos) {
+        int best = 9999;
+        uint16_t candidates = static_cast<uint16_t>(state.target_mask & target_semantic_mask[semantic_id]);
+        for (uint16_t mask = candidates; mask != 0; mask = static_cast<uint16_t>(mask & (mask - 1))) {
+            uint16_t bit = static_cast<uint16_t>(mask & -mask);
+            int t = __builtin_ctz(static_cast<unsigned int>(bit));
+            int d = t_dist[t][box_pos.y][box_pos.x];
+            if (d >= 0 && d < best) best = d;
+        }
+        return best == 9999 ? -1 : best;
+    };
+    auto nearest_active_target_box_cost = [&](uint8_t semantic_id, point box_pos) {
+        int best = 9999;
+        uint16_t candidates = static_cast<uint16_t>(state.target_mask & target_semantic_mask[semantic_id]);
+        for (uint16_t mask = candidates; mask != 0; mask = static_cast<uint16_t>(mask & (mask - 1))) {
+            uint16_t bit = static_cast<uint16_t>(mask & -mask);
+            int t = __builtin_ctz(static_cast<unsigned int>(bit));
+            int d = static_cast<int>(box_target_cost[t][box_pos.y][box_pos.x]);
+            if (d != 255 && d < best) best = d;
+        }
+        return best == 9999 ? -1 : best;
+    };
+    auto nearest_active_target_sort_cost = [&](uint8_t semantic_id, point box_pos) {
+        int best = 9999;
+        uint16_t candidates = static_cast<uint16_t>(state.target_mask & target_semantic_mask[semantic_id]);
+        for (uint16_t mask = candidates; mask != 0; mask = static_cast<uint16_t>(mask & (mask - 1))) {
+            uint16_t bit = static_cast<uint16_t>(mask & -mask);
+            int t = __builtin_ctz(static_cast<unsigned int>(bit));
+            int d = use_box_target_cost_sort
+                        ? static_cast<int>(box_target_cost[t][box_pos.y][box_pos.x])
+                        : t_dist[t][box_pos.y][box_pos.x];
+            if (use_box_target_cost_sort && d == 255) d = -1;
+            if (d >= 0 && d < best) best = d;
+        }
+        return best == 9999 ? -1 : best;
+    };
     int f = g + (h * W_num) / SokobanConfig::HEURISTIC_WEIGHT_DEN;
     if (f > threshold) {
-        SOKOBAN_PROFILE_INC(threshold_prunes);
         return f;
     }
 
@@ -356,7 +726,7 @@ int Sokoban::ida_star_search(const GameState& state, int g, int depth, int thres
             point np = curr + MOVE[dir];
             if(!is_overstep(np)) {
                 if(bfs_visited_gen[np.y][np.x] != current_gen && !is_solid(np, state.blown_mask)) {
-                    if(occupancy.box_at(np) == -1 && occupancy.bomb_at(np) == -1) {
+                    if(occupancy.cell[np.y][np.x] == NodeOccupancy::EMPTY) {
                         bfs_visited_gen[np.y][np.x] = current_gen;
                         bfs_dist[np.y][np.x] = bfs_dist[curr.y][curr.x] + 1;
                         bfs_q[tail++] = np;
@@ -367,30 +737,336 @@ int Sokoban::ida_star_search(const GameState& state, int g, int depth, int thres
     }
 
     uint32_t canon_hash = state.hash ^ ZOBRIST_PLAYER[state.player.y][state.player.x] ^ ZOBRIST_PLAYER[canon_player.y][canon_player.x];
+    bool use_canonical_tt = false;
+    if constexpr (SokobanConfig::ENABLE_CANONICAL_TT) {
+        use_canonical_tt = !strict_cost_search &&
+                           threshold >= SokobanConfig::CANONICAL_TT_MIN_THRESHOLD;
+    }
+    if (use_canonical_tt && canon_hash != state.hash) {
+        int tt_probe = probe_transposition(canon_hash, g, threshold);
+        if (tt_probe != 0) return tt_probe;
+    }
+    uint32_t cycle_hash = strict_cost_search ? state.hash : canon_hash;
     for (int i = 0; i < depth; ++i) {
-        if (path_hashes[i] == canon_hash) {
-            SOKOBAN_PROFILE_INC(path_cycle_prunes);
+        if (path_hashes[i] == cycle_hash) {
             return 9999; // 剪掉当前路径上的环路。
         }
     }
-    path_hashes[depth] = canon_hash;
-    SOKOBAN_PROFILE_INC(expanded_nodes);
+    path_hashes[depth] = cycle_hash;
+    ++search_node_count;
+    if (search_node_budget != 0 && search_node_count > search_node_budget) {
+        search_aborted = true;
+        return 9999;
+    }
 
-    // 每层约几百字节，32KB 栈足够承受当前 profile 中 40~50 层的典型深度。
+    // 每层约几百字节，32KB 栈足够承受当前 40~50 层的典型深度。
     // 保持局部数组还能避免长期占用宝贵的 DTCM 全局空间。
     TinyMove moves[MAX_NODE_MOVES];
     int num_moves = generate_moves(state, occupancy, active_bombs, moves);
     MacroMove macro_moves[MAX_NODE_MACROS];
-    int num_macros = generate_bomb_macros(state, h, active_entities, g, threshold, macro_moves);
-    SOKOBAN_PROFILE_ADD(generated_moves, static_cast<uint32_t>(num_moves + num_macros));
+    int num_macros = strict_cost_search
+                         ? 0
+                         : generate_bomb_macros(state, occupancy, h, active_entities, g, threshold, macro_moves);
 
     int min_next_threshold = 9999;
+    auto precheck_child = [&](const GameState& child, int child_g, int& out_h, int& out_active_bombs) {
+        if (child.num_boxes == 0) {
+            return (child_g <= threshold) ? 0 : child_g;
+        }
+
+        int tt_probe = probe_transposition(child.hash, child_g, threshold);
+        if (tt_probe != 0) return tt_probe;
+
+        out_h = get_heuristic(child);
+        if (unlikely(out_h >= 9999)) {
+            store_transposition(child.hash, child_g, child_g + 9999);
+            return 9999;
+        }
+
+        out_active_bombs = count_active_bomb_tasks(child);
+        int child_active_entities = child.num_boxes + out_active_bombs;
+        int child_weight = strict_cost_search ? SokobanConfig::HEURISTIC_WEIGHT_DEN
+                                              : heuristic_weight_num(child_active_entities);
+        int child_f = child_g +
+                      (out_h * child_weight) / SokobanConfig::HEURISTIC_WEIGHT_DEN;
+        if (child_f > threshold) {
+            return child_f;
+        }
+        return 0;
+    };
 
     EvalMove sorted_moves[MAX_NODE_ACTIONS];
     int action_count = 0;
 
+    auto cell_free_after_moving_box = [&](point p, uint8_t moving_box_idx) {
+        if (is_overstep(p) || is_solid(p, state.blown_mask)) return false;
+        int8_t occ = occupancy.cell[p.y][p.x];
+        if (occ == NodeOccupancy::EMPTY) return true;
+        return occ == static_cast<int8_t>(moving_box_idx);
+    };
+
+    auto static_push_improves = [&](uint8_t sem, point to, int from_push_dist, int from_box_cost) {
+        int to_push_dist = nearest_active_target_push_dist(sem, to);
+        if (from_push_dist >= 0 && to_push_dist >= 0 && to_push_dist < from_push_dist) return true;
+        int to_box_cost = nearest_active_target_box_cost(sem, to);
+        if (from_box_cost >= 0 && to_box_cost >= 0 && to_box_cost < from_box_cost) return true;
+        return false;
+    };
+
+    // 只作为动作排序信号：其他箱子和炸弹是可移动障碍，不能写进 admissible h 里硬剪
+    auto dynamic_box_push_distance = [&](uint8_t moving_box_idx, uint8_t sem, point start) {
+        uint16_t candidates = static_cast<uint16_t>(state.target_mask & target_semantic_mask[sem]);
+        if (candidates == 0) return 9999;
+
+        ++dynamic_box_eval_gen;
+        if (dynamic_box_eval_gen == 0) {
+            std::memset(DYNAMIC_BOX_EVAL_SEEN, 0, sizeof(DYNAMIC_BOX_EVAL_SEEN));
+            dynamic_box_eval_gen = 1;
+        }
+
+        point q[MAP_CELL_COUNT];
+        uint8_t q_dist[MAP_CELL_COUNT];
+        int head = 0;
+        int tail = 0;
+        q[tail] = start;
+        q_dist[tail++] = 0;
+        DYNAMIC_BOX_EVAL_SEEN[start.y][start.x] = dynamic_box_eval_gen;
+
+        auto box_cell_free = [&](point p) {
+            if (is_overstep(p) || is_solid(p, state.blown_mask)) return false;
+            int8_t occ = occupancy.cell[p.y][p.x];
+            return occ == NodeOccupancy::EMPTY || occ == static_cast<int8_t>(moving_box_idx);
+        };
+
+        auto player_stand_free = [&](point p, point box_pos) {
+            if (is_overstep(p) || is_solid(p, state.blown_mask)) return false;
+            if (p == box_pos) return false;
+            int8_t occ = occupancy.cell[p.y][p.x];
+            return occ == NodeOccupancy::EMPTY || occ == static_cast<int8_t>(moving_box_idx);
+        };
+
+        while (head < tail) {
+            point curr = q[head];
+            uint8_t curr_dist = q_dist[head++];
+            if ((target_cell_mask[sem][curr.y][curr.x] & candidates) != 0) {
+                return static_cast<int>(curr_dist);
+            }
+
+            for (uint8_t d = 0; d < 4; ++d) {
+                point next = curr + MOVE[d];
+                point stand = curr - MOVE[d];
+                if (!box_cell_free(next) || !player_stand_free(stand, curr)) continue;
+                if (DYNAMIC_BOX_EVAL_SEEN[next.y][next.x] == dynamic_box_eval_gen) continue;
+
+                DYNAMIC_BOX_EVAL_SEEN[next.y][next.x] = dynamic_box_eval_gen;
+                q[tail] = next;
+                q_dist[tail++] = static_cast<uint8_t>(curr_dist + 1);
+            }
+        }
+        return 9999;
+    };
+
+    int committed_bomb_idx = -1;
+    int committed_bomb_dist = 9999;
+    for (uint8_t b = 0; b < state.num_bombs; ++b) {
+        if (state.blown_mask & (1 << b)) continue;
+        if (bomb_tasks[b].target_wall.x == -1) continue;
+        point bomb_pos = {state.bomb_x[b], state.bomb_y[b]};
+        if (bomb_pos == bomb_tasks[b].bomb_start) continue;
+        int d = b_dist[b][bomb_pos.y][bomb_pos.x];
+        if (d > 4) continue;
+        if (d >= 0 && d < committed_bomb_dist) {
+            committed_bomb_dist = d;
+            committed_bomb_idx = b;
+        }
+    }
+
+    auto turn_access_debt_penalty = [&](uint8_t box_idx,
+                                        uint8_t sem,
+                                        uint8_t first_dir,
+                                        point first_to,
+                                        int first_push_dist,
+                                        int first_box_cost) {
+        if constexpr (!ENABLE_TURN_ACCESS_DEBT_SORT) {
+            (void)box_idx;
+            (void)sem;
+            (void)first_dir;
+            (void)first_to;
+            (void)first_push_dist;
+            (void)first_box_cost;
+            return 0;
+        }
+        if (!strict_cost_search) return 0;
+        if (first_push_dist == 0) return 0;
+        if (first_push_dist < 0 && first_box_cost < 0) return 0;
+
+        int turn_probe_horizon = 4;
+        int free_turn_walk = 2;
+        int turn_walk_penalty = 7;
+        int no_turn_penalty = 42;
+        int max_turn_penalty = 84;
+
+        point probe_box = first_to;
+        point probe_player = first_to - MOVE[first_dir];
+        int probe_push_dist = first_push_dist;
+        int probe_box_cost = first_box_cost;
+
+        int straight_steps = 0;
+        while (straight_steps < turn_probe_horizon) {
+            point straight_to = probe_box + MOVE[first_dir];
+            if (!cell_free_after_moving_box(straight_to, box_idx)) break;
+            int straight_push_dist = nearest_active_target_push_dist(sem, straight_to);
+            int straight_box_cost = nearest_active_target_box_cost(sem, straight_to);
+            bool straight_improves =
+                (probe_push_dist >= 0 && straight_push_dist >= 0 && straight_push_dist < probe_push_dist) ||
+                (probe_box_cost >= 0 && straight_box_cost >= 0 && straight_box_cost < probe_box_cost);
+            if (!straight_improves) break;
+
+            probe_player = probe_box;
+            probe_box = straight_to;
+            probe_push_dist = straight_push_dist;
+            probe_box_cost = straight_box_cost;
+            ++straight_steps;
+            if (probe_push_dist == 0) return 0;
+        }
+
+        if (straight_steps == turn_probe_horizon) {
+            point straight_to = probe_box + MOVE[first_dir];
+            if (cell_free_after_moving_box(straight_to, box_idx) &&
+                static_push_improves(sem, straight_to, probe_push_dist, probe_box_cost)) {
+                return 0;
+            }
+        }
+
+        auto dynamic_walk_after_moving_box = [&](point start, point goal, point future_box) {
+            if (start == goal) return 0;
+            if (is_overstep(goal) || is_solid(goal, state.blown_mask)) return 9999;
+
+            uint8_t seen[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+            int8_t dist[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+            std::memset(seen, 0, sizeof(seen));
+
+            int head = 0;
+            int tail = 0;
+            bfs_q[tail++] = start;
+            seen[start.y][start.x] = 1;
+            dist[start.y][start.x] = 0;
+
+            while (head < tail) {
+                point curr = bfs_q[head++];
+                if (curr == goal) return static_cast<int>(dist[curr.y][curr.x]);
+
+                for (uint8_t d = 0; d < 4; ++d) {
+                    point np = curr + MOVE[d];
+                    if (is_overstep(np) || seen[np.y][np.x]) continue;
+                    if (is_solid(np, state.blown_mask)) continue;
+                    if (np == future_box) continue;
+
+                    int8_t occ = occupancy.cell[np.y][np.x];
+                    if (occ != NodeOccupancy::EMPTY && occ != static_cast<int8_t>(box_idx)) continue;
+
+                    seen[np.y][np.x] = 1;
+                    dist[np.y][np.x] = static_cast<int8_t>(dist[curr.y][curr.x] + 1);
+                    bfs_q[tail++] = np;
+                }
+            }
+            return 9999;
+        };
+
+        int best_turn_walk = 9999;
+        for (uint8_t turn_dir = 0; turn_dir < 4; ++turn_dir) {
+            if (turn_dir == first_dir) continue;
+            point turn_to = probe_box + MOVE[turn_dir];
+            point turn_stand = probe_box - MOVE[turn_dir];
+            if (!cell_free_after_moving_box(turn_to, box_idx)) continue;
+            if (!cell_free_after_moving_box(turn_stand, box_idx)) continue;
+            if (!static_push_improves(sem, turn_to, probe_push_dist, probe_box_cost)) continue;
+
+            int walk = dynamic_walk_after_moving_box(probe_player, turn_stand, probe_box);
+            if (walk < best_turn_walk) best_turn_walk = walk;
+        }
+
+        if (best_turn_walk == 9999) return no_turn_penalty;
+        if (best_turn_walk <= free_turn_walk) return 0;
+
+        int penalty = (best_turn_walk - free_turn_walk) * turn_walk_penalty;
+        return penalty > max_turn_penalty ? max_turn_penalty : penalty;
+    };
+
     // 热路径性能优先：动作评分直接留在 IDA* 主循环所在函数内。
     // 这样编译器能同时看见 moves、state 和递归参数，减少寄存器溢出和重复取址。
+    int nearest_box_move_walk = 9999;
+    for (int m = 0; m < num_moves; ++m) {
+        const TinyMove& mv = moves[m];
+        if (mv.entity_idx < state.num_boxes && mv.walk_dist < nearest_box_move_walk) {
+            nearest_box_move_walk = mv.walk_dist;
+        }
+    }
+    // 同一节点内每个箱子的移动前动态距离相同，缓存 old 值减少重复 BFS
+    int16_t dynamic_box_start_dist[MAX_BOXES];
+    for (uint8_t i = 0; i < MAX_BOXES; ++i) dynamic_box_start_dist[i] = -2;
+    auto cached_dynamic_box_start_distance = [&](uint8_t box_idx, uint8_t sem, point pos) {
+        int16_t cached = dynamic_box_start_dist[box_idx];
+        if (cached == -2) {
+            int d = dynamic_box_push_distance(box_idx, sem, pos);
+            cached = static_cast<int16_t>(d >= 9999 ? 9999 : d);
+            dynamic_box_start_dist[box_idx] = cached;
+        }
+        return static_cast<int>(cached);
+    };
+    auto static_descent_has_dynamic_pressure = [&](uint8_t box_idx, uint8_t sem, point start) {
+        int moving_obstacles = static_cast<int>(state.num_boxes) - 1;
+        for (uint8_t b = 0; b < state.num_bombs; ++b) {
+            if (!(state.blown_mask & (1 << b))) ++moving_obstacles;
+        }
+        if (moving_obstacles <= 0) return false;
+
+        int static_edges = 0;
+        int blocked_edges = 0;
+        int free_edges = 0;
+
+        int curr_push_dist = nearest_active_target_push_dist(sem, start);
+        int curr_box_cost = nearest_active_target_box_cost(sem, start);
+        if (curr_push_dist == 0 || curr_box_cost == 0) return false;
+
+        for (uint8_t d = 0; d < 4; ++d) {
+            point next = start + MOVE[d];
+            point stand = start - MOVE[d];
+            if (is_overstep(next) || is_overstep(stand)) continue;
+            if (is_solid(next, state.blown_mask) || is_solid(stand, state.blown_mask)) continue;
+
+            int next_push_dist = nearest_active_target_push_dist(sem, next);
+            int next_box_cost = nearest_active_target_box_cost(sem, next);
+            bool static_descent =
+                (curr_push_dist >= 0 && next_push_dist >= 0 && next_push_dist < curr_push_dist) ||
+                (curr_box_cost >= 0 && next_box_cost >= 0 && next_box_cost < curr_box_cost);
+            if (!static_descent) continue;
+
+            ++static_edges;
+            if (!cell_free_after_moving_box(next, box_idx) ||
+                !cell_free_after_moving_box(stand, box_idx)) {
+                ++blocked_edges;
+            } else {
+                ++free_edges;
+            }
+        }
+
+        if (static_edges == 0) return false;
+        return blocked_edges > 0 && (free_edges == 0 || blocked_edges >= 2);
+    };
+    auto no_task_bomb_move_saving = [&](point bomb_pos, point push_from, point push_to) {
+        int best_saving = 0;
+        if (bfs_dist[push_from.y][push_from.x] <= nearest_box_move_walk + 2) best_saving = 6;
+        for (uint8_t dir = 0; dir < 4; ++dir) {
+            point np = bomb_pos + MOVE[dir];
+            if (np == push_from || np == push_to) continue;
+            if (is_overstep(np) || is_solid(np, state.blown_mask)) continue;
+            if (occupancy.cell[np.y][np.x] != NodeOccupancy::EMPTY) continue;
+            if (bfs_visited_gen[np.y][np.x] != current_gen) best_saving = 10;
+        }
+        return best_saving;
+    };
+
     for (int m = 0; m < num_moves; ++m) {
         TinyMove& mv = moves[m];
         bool is_bomb_entity = (mv.entity_idx >= state.num_boxes);
@@ -398,6 +1074,7 @@ int Sokoban::ida_star_search(const GameState& state, int g, int depth, int thres
         point pos = is_bomb_entity ? point{state.bomb_x[b_idx], state.bomb_y[b_idx]}
                                     : point{state.box_x[mv.entity_idx], state.box_y[mv.entity_idx]};
         point push_to = pos + MOVE[mv.dir];
+        point push_from = pos - MOVE[mv.dir];
         point eval_push_to = push_to;
         if (mv.slide_dist > 0) {
             eval_push_to.x += MOVE[mv.dir].x * mv.slide_dist;
@@ -405,6 +1082,10 @@ int Sokoban::ida_star_search(const GameState& state, int g, int depth, int thres
         }
 
         int delta_h = 0;
+        int old_push_dist = -1;
+        int new_push_dist = -1;
+        int old_box_cost = -1;
+        int new_box_cost = -1;
         if (!mv.triggers_explosion) {
             if (is_bomb_entity) {
                 if (bomb_tasks[b_idx].target_wall.x != -1) {
@@ -412,8 +1093,12 @@ int Sokoban::ida_star_search(const GameState& state, int g, int depth, int thres
                 }
             } else {
                 uint8_t sem = state.box_semantics[mv.entity_idx];
-                int old_dist = nearest_active_target_distance(state, sem, pos);
-                int new_dist = nearest_active_target_distance(state, sem, eval_push_to);
+                old_push_dist = nearest_active_target_push_dist(sem, pos);
+                new_push_dist = nearest_active_target_push_dist(sem, eval_push_to);
+                old_box_cost = nearest_active_target_box_cost(sem, pos);
+                new_box_cost = nearest_active_target_box_cost(sem, eval_push_to);
+                int old_dist = nearest_active_target_sort_cost(sem, pos);
+                int new_dist = nearest_active_target_sort_cost(sem, eval_push_to);
                 if (old_dist != -1 && new_dist != -1) delta_h = new_dist - old_dist;
             }
         }
@@ -426,9 +1111,55 @@ int Sokoban::ida_star_search(const GameState& state, int g, int depth, int thres
         int switch_entity_penalty = 8;
         int explosion_bonus = 45;
         int slide_bonus = 4;
+        int finish_sort_max_dist = 2;
+        int finish_sort_bonus = 48;
+        int same_box_finish_bonus = 80;
+        int false_progress_penalty = 36;
+        int box_cost_tie_weight = 10;
+        int max_box_cost_tie_bonus = 36;
+        int dynamic_block_penalty = 56;
+        int dynamic_block_delta_weight = 18;
+        int max_dynamic_block_penalty = 160;
 
         int sort_key = mv.walk_dist * walk_weight + 1 + delta_h * progress_weight;
         bool high_box_push_pressure = (state.num_boxes > 0 && box_push_lb_sum >= state.num_boxes * 10);
+        bool is_taskless_bomb = is_bomb_entity && bomb_tasks[b_idx].target_wall.x == -1;
+        bool last_was_taskless_bomb = false;
+        if (last_entity >= state.num_boxes) {
+            int last_bomb_idx = last_entity - state.num_boxes;
+            if (last_bomb_idx >= 0 &&
+                last_bomb_idx < state.num_bombs &&
+                bomb_tasks[last_bomb_idx].target_wall.x == -1) {
+                last_was_taskless_bomb = true;
+            }
+        }
+        if (is_taskless_bomb) {
+            int no_task_bomb_penalty = 240;
+            int shortcut_saving = no_task_bomb_move_saving(pos, push_from, push_to);
+            int shortcut_bonus = shortcut_saving * 14;
+            if (shortcut_bonus > 260) shortcut_bonus = 260;
+            sort_key += no_task_bomb_penalty - shortcut_bonus;
+            if (last_entity == mv.entity_idx) sort_key += 90;
+        }
+        if (is_bomb_entity &&
+            active_bombs > 0 &&
+            bomb_tasks[b_idx].target_wall.x != -1) {
+            int remaining = b_dist[b_idx][eval_push_to.y][eval_push_to.x];
+            int bomb_access_margin = active_entities <= 4 ? 5 : 3;
+            int near_blast_horizon = 2;
+            int near_blast_bonus = 36;
+            int explosion_ready_bonus = 80;
+            int essential_bomb_bonus = 28;
+            // 只有当炸弹接近爆破且接近成本不明显劣于箱子任务时，才提升它的排序
+            bool access_competitive =
+                nearest_box_move_walk == 9999 ||
+                mv.walk_dist <= nearest_box_move_walk + bomb_access_margin;
+            if (access_competitive && remaining >= 0 && remaining <= near_blast_horizon) {
+                sort_key -= (near_blast_horizon + 1 - remaining) * near_blast_bonus;
+                if (bomb_tasks[b_idx].is_essential) sort_key -= essential_bomb_bonus;
+            }
+            if (access_competitive && mv.triggers_explosion) sort_key -= explosion_ready_bonus;
+        }
         if (is_bomb_entity && active_bombs > 0 && high_box_push_pressure) {
             // 箱子整体离目标很远时，先鼓励完成炸弹清墙，避免箱子在未开路区域里盲搜。
             sort_key -= 40;
@@ -438,14 +1169,110 @@ int Sokoban::ida_star_search(const GameState& state, int g, int depth, int thres
             }
             if (mv.triggers_explosion) sort_key -= 100;
         }
-        if (last_entity != -1 && mv.entity_idx == last_entity) sort_key -= same_entity_bonus;
-        else if (last_entity != -1) sort_key += switch_entity_penalty;
+        if (!is_bomb_entity && !mv.triggers_explosion) {
+            uint8_t sem = state.box_semantics[mv.entity_idx];
+            int finish_dist = nearest_active_target_sort_cost(sem, eval_push_to);
+            int turn_penalty = 0;
+            if (!use_box_target_cost_sort &&
+                old_push_dist >= 0 &&
+                new_push_dist >= 0 &&
+                new_push_dist <= old_push_dist &&
+                old_box_cost >= 0 &&
+                new_box_cost >= 0) {
+                int cost_progress_bonus = (old_box_cost - new_box_cost) * box_cost_tie_weight;
+                if (cost_progress_bonus > max_box_cost_tie_bonus) cost_progress_bonus = max_box_cost_tie_bonus;
+                if (cost_progress_bonus < -max_box_cost_tie_bonus) cost_progress_bonus = -max_box_cost_tie_bonus;
+                sort_key -= cost_progress_bonus;
+            }
+            if (old_push_dist >= 0 &&
+                new_push_dist >= 0 &&
+                new_push_dist < old_push_dist &&
+                old_box_cost >= 0 &&
+                new_box_cost >= old_box_cost &&
+                new_push_dist > finish_sort_max_dist) {
+                sort_key += false_progress_penalty;
+                if (new_box_cost > old_box_cost) sort_key += (new_box_cost - old_box_cost) * 4;
+            }
+            bool static_distance_non_worse =
+                (old_push_dist >= 0 && new_push_dist >= 0 && new_push_dist <= old_push_dist) ||
+                (old_box_cost >= 0 && new_box_cost >= 0 && new_box_cost <= old_box_cost);
+            bool static_metric_conflict =
+                old_push_dist >= 0 &&
+                new_push_dist >= 0 &&
+                new_push_dist < old_push_dist &&
+                old_box_cost >= 0 &&
+                new_box_cost >= old_box_cost &&
+                new_push_dist > finish_sort_max_dist;
+            bool needs_dynamic_block_eval = false;
+            if constexpr (ENABLE_DYNAMIC_BLOCK_SORT) {
+                needs_dynamic_block_eval =
+                    strict_cost_search &&
+                    static_distance_non_worse &&
+                    static_descent_has_dynamic_pressure(mv.entity_idx, sem, eval_push_to);
+            }
+            if (needs_dynamic_block_eval) {
+                int dynamic_old = cached_dynamic_box_start_distance(mv.entity_idx, sem, pos);
+                int dynamic_new = dynamic_box_push_distance(mv.entity_idx, sem, eval_push_to);
+                int penalty = 0;
+                if (dynamic_old < 9999 && dynamic_new >= 9999) {
+                    penalty = max_dynamic_block_penalty;
+                } else if (dynamic_old < 9999 && dynamic_new > dynamic_old) {
+                    penalty = dynamic_block_penalty +
+                              (dynamic_new - dynamic_old) * dynamic_block_delta_weight;
+                } else if (dynamic_old >= 9999 && dynamic_new >= 9999 &&
+                           new_push_dist >= 0 && old_push_dist >= 0 &&
+                           new_push_dist >= old_push_dist) {
+                    penalty = dynamic_block_penalty;
+                }
+                if (penalty > max_dynamic_block_penalty) penalty = max_dynamic_block_penalty;
+                sort_key += penalty;
+            }
+            if ((old_push_dist >= 0 && new_push_dist >= 0 && new_push_dist < old_push_dist) ||
+                (old_box_cost >= 0 && new_box_cost >= 0 && new_box_cost < old_box_cost)) {
+                turn_penalty = turn_access_debt_penalty(
+                    mv.entity_idx,
+                    sem,
+                    mv.dir,
+                    eval_push_to,
+                    new_push_dist,
+                    new_box_cost);
+                sort_key += turn_penalty;
+            }
+            if (last_entity != -1 &&
+                mv.entity_idx == last_entity &&
+                finish_dist >= 0 &&
+                finish_dist <= finish_sort_max_dist) {
+                sort_key -= (finish_sort_max_dist + 1 - finish_dist) * finish_sort_bonus;
+                sort_key -= same_box_finish_bonus;
+            }
+        }
+        if (last_entity != -1 && mv.entity_idx == last_entity) {
+            if (!is_taskless_bomb) sort_key -= same_entity_bonus;
+        } else if (last_entity != -1 && !last_was_taskless_bomb) {
+            sort_key += switch_entity_penalty;
+        }
         if (last_push_dir < 4) {
-            if (mv.dir == last_push_dir) sort_key -= same_dir_bonus;
+            if (mv.dir == last_push_dir) {
+                if (!is_taskless_bomb) sort_key -= same_dir_bonus;
+            }
             else sort_key += dir_change_penalty;
         }
         if (mv.triggers_explosion) sort_key -= explosion_bonus;
-        sort_key -= mv.slide_dist * slide_bonus;
+        if (!strict_cost_search) {
+            sort_key += mv.slide_dist * slide_bonus;
+        }
+
+        if (committed_bomb_idx >= 0) {
+            int commit_bomb_bonus = 180;
+            int commit_other_box_penalty = 170;
+            int commit_other_bomb_penalty = 70;
+            if (is_bomb_entity) {
+                if (b_idx == committed_bomb_idx) sort_key -= commit_bomb_bonus;
+                else sort_key += commit_other_bomb_penalty;
+            } else {
+                sort_key += commit_other_box_penalty;
+            }
+        }
 
         sorted_moves[action_count++] = {static_cast<uint8_t>(m), 0, static_cast<int16_t>(sort_key)};
     }
@@ -467,14 +1294,103 @@ int Sokoban::ida_star_search(const GameState& state, int g, int depth, int thres
     for (int m = 0; m < action_count; ++m) {
         if (sorted_moves[m].is_macro) {
             MacroMove& macro = macro_moves[sorted_moves[m].move_idx];
+            int b = macro.bomb_idx;
+            point bomb_pos = {state.bomb_x[b], state.bomb_y[b]};
+
+            uint16_t macro_path_cost = 0;
+            point final_player;
+            uint8_t final_dir = 4;
+            GameState macro_next;
+
+            // exact 宏路径规划比普通推一步贵得多；同一状态下相同炸弹的成功/失败结果
+            // 可以复用，避免在排序后多次进入同一个 expensive 检查。
+            uint32_t cache_mix = state.hash ^ (static_cast<uint32_t>(b) * 0x9E3779B9u);
+            MacroCostCacheEntry& cache = macro_cost_cache[cache_mix & (MACRO_COST_CACHE_SIZE - 1)];
+            bool use_macro_cache = bomb_tasks[b].box_pushes.empty();
+            if (use_macro_cache && (cache.flags & 1) && cache.hash == state.hash && cache.bomb_idx == b) {
+                if ((cache.flags & 2) == 0) continue;
+                macro_path_cost = cache.cost;
+                final_player = {cache.final_x, cache.final_y};
+                final_dir = cache.final_dir;
+                macro_next = state;
+                macro_next.player = final_player;
+                macro_next.blown_mask = static_cast<uint8_t>(state.blown_mask | (1 << b));
+
+                uint32_t new_hash = state.hash;
+                new_hash ^= ZOBRIST_PLAYER[state.player.y][state.player.x];
+                new_hash ^= ZOBRIST_PLAYER[final_player.y][final_player.x];
+                new_hash ^= ZOBRIST_BLOWN_MASK[state.blown_mask];
+                new_hash ^= ZOBRIST_BLOWN_MASK[macro_next.blown_mask];
+                new_hash ^= ZOBRIST_BOMB[b][state.bomb_y[b]][state.bomb_x[b]];
+                macro_next.hash = new_hash;
+            } else {
+                SokobanLevel macro_level;
+                build_level_from_state(state, macro_level);
+
+                BombTask task = bomb_tasks[b];
+                task.bomb_start = bomb_pos;
+
+                bool ok = false;
+                if (task.box_pushes.empty()) {
+                    ok = PlanningCommon::get_direct_bomb_push_path_cost(
+                        macro_level,
+                        state.player,
+                        task,
+                        macro_path_cost,
+                        final_player);
+                } else {
+                    StaticArray<point, MAX_PATH_LENGTH> macro_path;
+                    ok = PlanningCommon::get_bomb_push_path(macro_level, state.player, task, macro_path);
+                    if (ok) {
+                        macro_path_cost = static_cast<uint16_t>(
+                            macro_path.size() > UINT16_MAX ? UINT16_MAX : macro_path.size());
+                        final_player = macro_path.back();
+                    }
+                }
+                if (ok && (macro_path_cost == 0 || macro_path_cost > SokobanConfig::BOMB_MACRO_MAX_PATH)) ok = false;
+                if (ok) {
+                    final_dir = infer_final_bomb_push_dir(final_player, task.target_wall);
+                    if (final_dir >= 4) ok = false;
+                }
+                if (ok) {
+                    ok = build_bomb_task_successor_state(state, b, task, final_player, macro_next);
+                }
+
+                // 失败结果也缓存：动态障碍不变时，这个宏动作下次仍然不会成功。
+                if (use_macro_cache) {
+                    cache.hash = state.hash;
+                    cache.bomb_idx = b;
+                    cache.flags = ok ? 3 : 1;
+                    if (ok) {
+                        cache.cost = macro_path_cost;
+                        cache.final_x = final_player.x;
+                        cache.final_y = final_player.y;
+                        cache.final_dir = final_dir;
+                    }
+                }
+                if (!ok) continue;
+            }
+
+            int child_g = g + macro_path_cost;
+            int child_h = -1;
+            int child_active_bombs = -1;
+            int early_res = precheck_child(macro_next, child_g, child_h, child_active_bombs);
+            if (early_res != 0) {
+                if (early_res < min_next_threshold) min_next_threshold = early_res;
+                continue;
+            }
+
             int res = ida_star_search(
-                macro.next_state,
-                g + macro.path_cost,
+                macro_next,
+                child_g,
                 depth + 1,
                 threshold,
                 path,
                 macro.entity_idx,
-                macro.final_push_dir);
+                final_dir,
+                child_h,
+                child_active_bombs,
+                true);
 
             if (unlikely(res == -1)) {
                 StaticArray<point, MAX_PATH_LENGTH> macro_path;
@@ -559,10 +1475,29 @@ int Sokoban::ida_star_search(const GameState& state, int g, int depth, int thres
         }
 
         next_state.hash = new_hash;
-        int step_cost = mv.walk_dist + 1; 
+        int step_cost = mv.walk_dist + 1;
+        if (strict_cost_search) step_cost += mv.slide_dist;
+        int child_g = g + step_cost;
+        int child_h = -1;
+        int child_active_bombs = -1;
+        int early_res = precheck_child(next_state, child_g, child_h, child_active_bombs);
+        if (early_res != 0) {
+            if (early_res < min_next_threshold) min_next_threshold = early_res;
+            continue;
+        }
 
         // 递归进入下一层 IDA* 搜索
-        int res = ida_star_search(next_state, g + step_cost, depth + 1, threshold, path, mv.entity_idx, mv.dir);
+        int res = ida_star_search(
+            next_state,
+            child_g,
+            depth + 1,
+            threshold,
+            path,
+            mv.entity_idx,
+            mv.dir,
+            child_h,
+            child_active_bombs,
+            true);
         
         if (unlikely(res == -1)) {
             // 只有找到解时才重建行走路径；放在这里避免每个节点额外穿过 helper 边界。
@@ -585,7 +1520,7 @@ int Sokoban::ida_star_search(const GameState& state, int g, int depth, int thres
                     point np = curr + MOVE[d2];
                     if (!is_overstep(np)) {
                         if (bfs_visited_gen[np.y][np.x] != current_gen && !is_solid(np, state.blown_mask)) {
-                            if (occupancy.box_at(np) == -1 && occupancy.bomb_at(np) == -1) {
+                            if (occupancy.cell[np.y][np.x] == NodeOccupancy::EMPTY) {
                                 bfs_visited_gen[np.y][np.x] = current_gen;
                                 temp_parent[np.y][np.x] = curr;
                                 bfs_q[t2++] = np;
@@ -613,7 +1548,7 @@ int Sokoban::ida_star_search(const GameState& state, int g, int depth, int thres
         if (res < min_next_threshold) min_next_threshold = res;
     }
 
-    store_transposition(state.hash, g, min_next_threshold);
+    store_transposition(use_canonical_tt ? canon_hash : state.hash, g, min_next_threshold);
 
     return min_next_threshold;
 }
@@ -660,15 +1595,13 @@ inline int Sokoban::heuristic_weight_num(int active_entities) const {
 inline int Sokoban::probe_transposition(uint32_t hash, int g, int threshold) {
     int remaining_threshold = threshold - g;
     int tt_idx1 = hash & (TT_SIZE - 1);
-    int tt_idx2 = (hash ^ 0x5BD1E995) & (TT_SIZE - 1);
+    int tt_idx2 = (hash ^ (hash >> 16) ^ 0x5BD1E995) & (TT_SIZE - 1);
     uint16_t sig = static_cast<uint16_t>(hash >> 16);
 
     if (TT[tt_idx1].sig == sig && TT[tt_idx1].value > remaining_threshold) {
-        SOKOBAN_PROFILE_INC(tt_hits);
         return g + TT[tt_idx1].value;
     }
     if (TT[tt_idx2].sig == sig && TT[tt_idx2].value > remaining_threshold) {
-        SOKOBAN_PROFILE_INC(tt_hits);
         return g + TT[tt_idx2].value;
     }
     return 0;
@@ -678,7 +1611,7 @@ inline int Sokoban::probe_transposition(uint32_t hash, int g, int threshold) {
 // 两个候选槽位减少简单 hash 冲突，value 越大剪枝能力越强。
 inline void Sokoban::store_transposition(uint32_t hash, int g, int min_next_threshold) {
     int tt_idx1 = hash & (TT_SIZE - 1);
-    int tt_idx2 = (hash ^ 0x5BD1E995) & (TT_SIZE - 1);
+    int tt_idx2 = (hash ^ (hash >> 16) ^ 0x5BD1E995) & (TT_SIZE - 1);
     uint16_t sig = static_cast<uint16_t>(hash >> 16);
 
     int cost_to_go = min_next_threshold - g;
@@ -699,16 +1632,61 @@ inline void Sokoban::store_transposition(uint32_t hash, int g, int min_next_thre
     }
 }
 
+bool Sokoban::probe_mixed_macro_transposition(uint32_t hash, int path_len) const {
+    const uint32_t tt_idx1 = hash & (MIXED_MACRO_TT_SIZE - 1);
+    const uint32_t tt_idx2 = (hash ^ (hash >> 16) ^ 0x9E3779B9u) & (MIXED_MACRO_TT_SIZE - 1);
+
+    const MixedMacroTTEntry& e1 = mixed_macro_tt[tt_idx1];
+    if (e1.hash == hash && e1.best_path_len <= path_len) return true;
+
+    const MixedMacroTTEntry& e2 = mixed_macro_tt[tt_idx2];
+    if (e2.hash == hash && e2.best_path_len <= path_len) return true;
+
+    return false;
+}
+
+void Sokoban::store_mixed_macro_transposition(uint32_t hash, int path_len) const {
+    const uint16_t best_path_len = static_cast<uint16_t>(
+        path_len < 0 ? 0 : (path_len > 0xFFFF ? 0xFFFF : path_len));
+    const uint32_t tt_idx1 = hash & (MIXED_MACRO_TT_SIZE - 1);
+    const uint32_t tt_idx2 = (hash ^ (hash >> 16) ^ 0x9E3779B9u) & (MIXED_MACRO_TT_SIZE - 1);
+
+    MixedMacroTTEntry& e1 = mixed_macro_tt[tt_idx1];
+    if (e1.hash == hash) {
+        if (best_path_len < e1.best_path_len) e1.best_path_len = best_path_len;
+        return;
+    }
+    MixedMacroTTEntry& e2 = mixed_macro_tt[tt_idx2];
+    if (e2.hash == hash) {
+        if (best_path_len < e2.best_path_len) e2.best_path_len = best_path_len;
+        return;
+    }
+
+    if (e1.hash == 0xFFFFFFFFu) {
+        e1.hash = hash;
+        e1.best_path_len = best_path_len;
+        return;
+    }
+    if (e2.hash == 0xFFFFFFFFu) {
+        e2.hash = hash;
+        e2.best_path_len = best_path_len;
+        return;
+    }
+
+    if (e1.best_path_len > e2.best_path_len) {
+        e1.hash = hash;
+        e1.best_path_len = best_path_len;
+    } else {
+        e2.hash = hash;
+        e2.best_path_len = best_path_len;
+    }
+}
+
 // 查找 p 命中的同语义有效目标编号。
 inline int Sokoban::find_active_target_index(const GameState& state, uint16_t target_mask, point p, int box_idx) const {
     uint8_t semantic_id = state.box_semantics[box_idx];
-    for (size_t t = 0; t < initial_targets.size(); ++t) {
-        if ((target_mask & (1U << t)) &&
-            target_semantics[t] == semantic_id &&
-            initial_targets[t] == p) {
-            return static_cast<int>(t);
-        }
-    }
+    uint16_t candidates = static_cast<uint16_t>(target_mask & target_cell_mask[semantic_id][p.y][p.x]);
+    if (candidates != 0) return __builtin_ctz(static_cast<unsigned int>(candidates));
     return -1;
 }
 
@@ -749,6 +1727,44 @@ __attribute__((always_inline)) inline int Sokoban::generate_moves(
         }
     };
 
+    auto no_task_bomb_push_relevant = [&](point bomb_pos, point push_from, point push_to) {
+        int shortcut_margin = 8;
+        int static_link_limit = 8;
+
+        for (uint8_t i = 0; i < state.num_boxes; ++i) {
+            point box_pos = {state.box_x[i], state.box_y[i]};
+            for (uint8_t dir = 0; dir < 4; ++dir) {
+                point stand = box_pos - MOVE[dir];
+                point box_to = box_pos + MOVE[dir];
+                if (is_overstep(stand) || is_solid(stand, state.blown_mask)) continue;
+                if (is_overstep(box_to) || is_solid(box_to, state.blown_mask)) continue;
+                if (nearest_active_target_distance(state, state.box_semantics[i], box_to) == -1) continue;
+
+                int8_t stand_occ = occupancy.cell[stand.y][stand.x];
+                if (stand_occ != NodeOccupancy::EMPTY && stand != bomb_pos) continue;
+                if (stand == push_to) continue;
+                int8_t to_occ = occupancy.cell[box_to.y][box_to.x];
+                if (to_occ != NodeOccupancy::EMPTY && box_to != bomb_pos) continue;
+                if (box_to == push_to) continue;
+
+                int current_walk = 9999;
+                if (bfs_visited_gen[stand.y][stand.x] == current_gen) {
+                    current_walk = bfs_dist[stand.y][stand.x];
+                }
+
+                int opened_walk = walk_dist_between(bomb_pos, stand);
+                if (opened_walk == 255 || opened_walk > static_link_limit) continue;
+                int after_push_walk = bfs_dist[push_from.y][push_from.x] + 1 + opened_walk;
+
+                // 无任务炸弹只作为可移动障碍参与搜索：生成条件必须连接到真实推箱前沿
+                if (box_to == bomb_pos && current_walk != 9999) return true;
+                if (active_bombs > 0 && current_walk != 9999) continue;
+                if (current_walk == 9999 || after_push_walk + shortcut_margin < current_walk) return true;
+            }
+        }
+        return false;
+    };
+
     // 箱子是绝大多数节点的主路径。单独循环可去掉热路径里的 is_bomb_entity 分支。
     for (uint8_t i = 0; i < state.num_boxes; ++i) {
         point pos = {state.box_x[i], state.box_y[i]};
@@ -759,10 +1775,9 @@ __attribute__((always_inline)) inline int Sokoban::generate_moves(
 
             point push_to = pos + MOVE[dir];
             if (is_overstep(push_to) || is_solid(push_to, state.blown_mask)) continue;
-            if (occupancy.box_at(push_to) != -1 || occupancy.bomb_at(push_to) != -1) continue;
+            if (occupancy.cell[push_to.y][push_to.x] != NodeOccupancy::EMPTY) continue;
 
             if (nearest_active_target_distance(state, state.box_semantics[i], push_to) == -1) {
-                SOKOBAN_PROFILE_INC(static_deadlock_prunes);
                 continue;
             }
 
@@ -776,7 +1791,6 @@ __attribute__((always_inline)) inline int Sokoban::generate_moves(
                 bool horizontal_lock = is_permanent_wall(push_to + MOVE[1]) || is_permanent_wall(push_to + MOVE[3]);
                 bool vertical_lock = is_permanent_wall(push_to + MOVE[0]) || is_permanent_wall(push_to + MOVE[2]);
                 if (horizontal_lock && vertical_lock) {
-                    SOKOBAN_PROFILE_INC(static_deadlock_prunes);
                     continue;
                 }
 
@@ -786,15 +1800,14 @@ __attribute__((always_inline)) inline int Sokoban::generate_moves(
                         if ((wall_clear_mask[cp.y][cp.x] & ((1 << num_bomb_tasks) - 1)) != 0) return 0;
                         return 1;
                     }
-                    int bmb_id = occupancy.bomb_at(cp);
-                    if (bmb_id != -1) {
-                        if (bomb_tasks[bmb_id].target_wall.x != -1) return 0;
-                        return 1;
+                    int8_t occ = occupancy.cell[cp.y][cp.x];
+                    if (occ >= NodeOccupancy::BOMB_BASE) {
+                        return 0;
                     }
                     int box_id = -1;
                     if (cp == push_to) box_id = i;
                     else if (cp == pos) return 0;
-                    else box_id = occupancy.box_at(cp);
+                    else if (occ >= 0 && occ < NodeOccupancy::BOMB_BASE) box_id = occ;
 
                     if (box_id != -1) {
                         int out_idx;
@@ -825,9 +1838,9 @@ __attribute__((always_inline)) inline int Sokoban::generate_moves(
                     if (is_2x2_deadlock) break;
                 }
                 if (is_2x2_deadlock) {
-                    SOKOBAN_PROFILE_INC(block_2x2_prunes);
                     continue;
                 }
+
             }
 
             int slide_dist = 0;
@@ -837,7 +1850,7 @@ __attribute__((always_inline)) inline int Sokoban::generate_moves(
 
                 point next_p = final_push_to + MOVE[dir];
                 if (is_overstep(next_p)) break;
-                if (is_solid(next_p, state.blown_mask) || occupancy.box_at(next_p) != -1 || occupancy.bomb_at(next_p) != -1) break;
+                if (is_solid(next_p, state.blown_mask) || occupancy.cell[next_p.y][next_p.x] != NodeOccupancy::EMPTY) break;
 
                 final_push_to = next_p;
                 slide_dist++;
@@ -847,50 +1860,48 @@ __attribute__((always_inline)) inline int Sokoban::generate_moves(
         }
     }
 
-    // 炸弹规则包含目标墙爆炸，和箱子死锁规则完全不同；拆开后箱子主路径更干净。
-    if (active_bombs > 0) {
-        for (uint8_t b_idx = 0; b_idx < state.num_bombs; ++b_idx) {
-            if (state.blown_mask & (1 << b_idx)) continue;
-            if (bomb_tasks[b_idx].target_wall.x == -1) continue;
+    // 炸弹即使没有炸墙任务也仍是可推动实体；只有引爆和 b_dist 剪枝依赖 target_wall
+    for (uint8_t b_idx = 0; b_idx < state.num_bombs; ++b_idx) {
+        if (state.blown_mask & (1 << b_idx)) continue;
+        bool has_bomb_task = bomb_tasks[b_idx].target_wall.x != -1;
 
-            uint8_t entity_idx = static_cast<uint8_t>(state.num_boxes + b_idx);
-            point pos = {state.bomb_x[b_idx], state.bomb_y[b_idx]};
+        uint8_t entity_idx = static_cast<uint8_t>(state.num_boxes + b_idx);
+        point pos = {state.bomb_x[b_idx], state.bomb_y[b_idx]};
 
-            for (uint8_t dir = 0; dir < 4; ++dir) {
-                point push_from = pos - MOVE[dir];
-                if (is_overstep(push_from) || bfs_visited_gen[push_from.y][push_from.x] != current_gen) continue;
+        for (uint8_t dir = 0; dir < 4; ++dir) {
+            point push_from = pos - MOVE[dir];
+            if (is_overstep(push_from) || bfs_visited_gen[push_from.y][push_from.x] != current_gen) continue;
 
-                point push_to = pos + MOVE[dir];
-                if (is_overstep(push_to)) continue;
+            point push_to = pos + MOVE[dir];
+            if (is_overstep(push_to)) continue;
 
-                bool triggers_explosion = false;
-                if (is_solid(push_to, state.blown_mask)) {
-                    if (push_to == bomb_tasks[b_idx].target_wall) triggers_explosion = true;
-                    else continue;
-                }
-                if (!triggers_explosion && (occupancy.box_at(push_to) != -1 || occupancy.bomb_at(push_to) != -1)) continue;
-
-                if (!triggers_explosion && b_dist[b_idx][push_to.y][push_to.x] == -1) {
-                    SOKOBAN_PROFILE_INC(static_deadlock_prunes);
-                    continue;
-                }
-
-                int slide_dist = 0;
-                if (!triggers_explosion) {
-                    point final_push_to = push_to;
-                    while (is_tunnel_dynamic(final_push_to, dir, state.blown_mask)) {
-                        point next_p = final_push_to + MOVE[dir];
-                        if (is_overstep(next_p)) break;
-                        if (next_p == bomb_tasks[b_idx].target_wall) break;
-                        if (is_solid(next_p, state.blown_mask) || occupancy.box_at(next_p) != -1 || occupancy.bomb_at(next_p) != -1) break;
-
-                        final_push_to = next_p;
-                        slide_dist++;
-                    }
-                }
-
-                add_move(entity_idx, dir, static_cast<uint8_t>(bfs_dist[push_from.y][push_from.x]), static_cast<uint8_t>(slide_dist), triggers_explosion);
+            bool triggers_explosion = false;
+            if (is_solid(push_to, state.blown_mask)) {
+                if (has_bomb_task && push_to == bomb_tasks[b_idx].target_wall) triggers_explosion = true;
+                else continue;
             }
+            if (!triggers_explosion && occupancy.cell[push_to.y][push_to.x] != NodeOccupancy::EMPTY) continue;
+
+            if (has_bomb_task && !triggers_explosion && b_dist[b_idx][push_to.y][push_to.x] == -1) {
+                continue;
+            }
+            if (!has_bomb_task && !no_task_bomb_push_relevant(pos, push_from, push_to)) continue;
+
+            int slide_dist = 0;
+            if (!triggers_explosion) {
+                point final_push_to = push_to;
+                while (is_tunnel_dynamic(final_push_to, dir, state.blown_mask)) {
+                    point next_p = final_push_to + MOVE[dir];
+                    if (is_overstep(next_p)) break;
+                    if (has_bomb_task && next_p == bomb_tasks[b_idx].target_wall) break;
+                    if (is_solid(next_p, state.blown_mask) || occupancy.cell[next_p.y][next_p.x] != NodeOccupancy::EMPTY) break;
+
+                    final_push_to = next_p;
+                    slide_dist++;
+                }
+            }
+
+            add_move(entity_idx, dir, static_cast<uint8_t>(bfs_dist[push_from.y][push_from.x]), static_cast<uint8_t>(slide_dist), triggers_explosion);
         }
     }
 
@@ -929,6 +1940,1645 @@ void Sokoban::build_level_from_state(const GameState& state, SokobanLevel& out_l
     }
 }
 
+bool Sokoban::remove_macro_completed_box_at_index(SokobanLevel& level, int box_idx, point expected_target) const {
+    if (box_idx < 0 || box_idx >= level.box_count) return false;
+    if (level.boxes[box_idx] != expected_target) return false;
+    for (int j = box_idx + 1; j < level.box_count; ++j) {
+        level.boxes[j - 1] = level.boxes[j];
+        level.box_semantics[j - 1] = level.box_semantics[j];
+    }
+    --level.box_count;
+    return true;
+}
+
+bool Sokoban::validate_macro_solution_path(const StaticArray<point, MAX_PATH_LENGTH>& path) const {
+    if (path.empty() || path[0] != initial_state.player) return false;
+
+    point player = initial_state.player;
+    int8_t box_x[MAX_BOXES];
+    int8_t box_y[MAX_BOXES];
+    uint8_t box_sem[MAX_BOXES];
+    bool active[MAX_BOXES] = {};
+    uint16_t remaining_targets = initial_state.target_mask;
+
+    for (int i = 0; i < initial_state.num_boxes; ++i) {
+        box_x[i] = initial_state.box_x[i];
+        box_y[i] = initial_state.box_y[i];
+        box_sem[i] = initial_state.box_semantics[i];
+        active[i] = true;
+    }
+
+    auto active_box_at = [&](point p) {
+        for (int i = 0; i < initial_state.num_boxes; ++i) {
+            if (active[i] && box_x[i] == p.x && box_y[i] == p.y) return i;
+        }
+        return -1;
+    };
+    auto live_bomb_at = [&](point p) {
+        for (int b = 0; b < initial_state.num_bombs; ++b) {
+            if ((initial_state.blown_mask & (1 << b)) == 0 &&
+                initial_state.bomb_x[b] == p.x &&
+                initial_state.bomb_y[b] == p.y) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    for (int i = 1; i < path.size(); ++i) {
+        point to = path[i];
+        uint8_t dir = 4;
+        for (uint8_t d = 0; d < 4; ++d) {
+            if (player + MOVE[d] == to) {
+                dir = d;
+                break;
+            }
+        }
+        if (dir >= 4) return false;
+        if (is_overstep(to) || is_solid(to, initial_state.blown_mask)) return false;
+        if (live_bomb_at(to)) return false;
+
+        int box_idx = active_box_at(to);
+        if (box_idx == -1) {
+            player = to;
+            continue;
+        }
+
+        point next_box = to + MOVE[dir];
+        if (is_overstep(next_box) || is_solid(next_box, initial_state.blown_mask)) return false;
+        if (live_bomb_at(next_box)) return false;
+        if (active_box_at(next_box) != -1) return false;
+
+        box_x[box_idx] = next_box.x;
+        box_y[box_idx] = next_box.y;
+        player = to;
+
+        uint8_t sem = box_sem[box_idx];
+        uint16_t candidates = static_cast<uint16_t>(remaining_targets & target_semantic_mask[sem]);
+        for (uint16_t mask = candidates; mask != 0; mask = static_cast<uint16_t>(mask & (mask - 1))) {
+            uint16_t bit = static_cast<uint16_t>(mask & -mask);
+            int target_idx = __builtin_ctz(static_cast<unsigned int>(bit));
+            if (initial_targets[target_idx] != next_box) continue;
+            active[box_idx] = false;
+            remaining_targets = static_cast<uint16_t>(remaining_targets & ~bit);
+            break;
+        }
+    }
+
+    if (remaining_targets != 0) return false;
+    for (int i = 0; i < initial_state.num_boxes; ++i) {
+        if (active[i]) return false;
+    }
+    return true;
+}
+
+bool Sokoban::search_small_box_macro_order(
+    int depth,
+    const GameState& root_state,
+    int box_count,
+    uint16_t remaining_target_mask,
+    bool used[MAX_BOXES],
+    const SokobanLevel& level,
+    point player_pos,
+    const StaticArray<point, MAX_PATH_LENGTH>& path,
+    StaticArray<point, MAX_PATH_LENGTH>& best_path,
+    int& best_len) const {
+    if (depth == box_count) {
+        if (path.size() < best_len) {
+            best_path = path;
+            best_len = path.size();
+        }
+        return true;
+    }
+
+    bool found = false;
+    for (int i = 0; i < box_count; ++i) {
+        if (used[i]) continue;
+
+        uint8_t sem = root_state.box_semantics[i];
+        point box_start = {root_state.box_x[i], root_state.box_y[i]};
+        uint16_t candidates = static_cast<uint16_t>(remaining_target_mask & target_semantic_mask[sem]);
+        for (uint16_t mask = candidates; mask != 0; mask = static_cast<uint16_t>(mask & (mask - 1))) {
+            uint16_t bit = static_cast<uint16_t>(mask & -mask);
+            uint8_t target_idx = static_cast<uint8_t>(__builtin_ctz(static_cast<unsigned int>(bit)));
+            point box_target = initial_targets[target_idx];
+
+            int y = root_state.box_y[i];
+            int x = root_state.box_x[i];
+            if (t_dist[target_idx][y][x] == -1) continue;
+            if (box_target_cost[target_idx][y][x] == 255) continue;
+
+            int moving_level_idx = -1;
+            for (int b = 0; b < level.box_count; ++b) {
+                if (level.boxes[b] == box_start && level.box_semantics[b] == sem) {
+                    moving_level_idx = b;
+                    break;
+                }
+            }
+            if (moving_level_idx == -1) continue;
+
+            SokobanLevel next_level = level;
+            point next_player = player_pos;
+            StaticArray<point, MAX_PATH_LENGTH> next_path = path;
+            BoxPushTask task{box_start, box_target};
+
+            if (!PlanningCommon::append_box_push_path(next_level, next_player, task, next_path)) continue;
+            if (next_path.size() >= MAX_PATH_LENGTH - 1) continue;
+            if (next_path.size() >= best_len) continue;
+
+            if (!validate_box_macro_segment(
+                    level,
+                    player_pos,
+                    moving_level_idx,
+                    sem,
+                    remaining_target_mask,
+                    bit,
+                    path,
+                    next_path)) {
+                continue;
+            }
+
+            if (!remove_macro_completed_box_at_index(next_level, moving_level_idx, box_target)) continue;
+
+            used[i] = true;
+            if (search_small_box_macro_order(
+                    depth + 1,
+                    root_state,
+                    box_count,
+                    static_cast<uint16_t>(remaining_target_mask & ~bit),
+                    used,
+                    next_level,
+                    next_player,
+                    next_path,
+                    best_path,
+                    best_len)) {
+                found = true;
+            }
+            used[i] = false;
+        }
+    }
+    return found;
+}
+
+bool Sokoban::validate_box_macro_segment(
+    const SokobanLevel& level,
+    point player_pos,
+    int moving_level_idx,
+    uint8_t sem,
+    uint16_t remaining_target_mask,
+    uint16_t target_bit,
+    const StaticArray<point, MAX_PATH_LENGTH>& path,
+    const StaticArray<point, MAX_PATH_LENGTH>& next_path) const {
+    // 单箱完成宏不能推到其它箱子，也不能提前命中其它未完成目标
+    point sim_player = player_pos;
+    point sim_boxes[MAX_BOXES];
+    bool sim_active[MAX_BOXES] = {};
+    for (int b = 0; b < level.box_count; ++b) {
+        sim_boxes[b] = level.boxes[b];
+        sim_active[b] = true;
+    }
+
+    bool segment_ok = false;
+    for (int p = path.size(); p < next_path.size(); ++p) {
+        point to = next_path[p];
+        uint8_t dir = 4;
+        for (uint8_t d = 0; d < 4; ++d) {
+            if (sim_player + MOVE[d] == to) {
+                dir = d;
+                break;
+            }
+        }
+        if (dir >= 4) return false;
+
+        int hit_box = -1;
+        for (int b = 0; b < level.box_count; ++b) {
+            if (sim_active[b] && sim_boxes[b] == to) {
+                hit_box = b;
+                break;
+            }
+        }
+        if (hit_box == -1) {
+            sim_player = to;
+            continue;
+        }
+        if (hit_box != moving_level_idx) return false;
+
+        point next_box = to + MOVE[dir];
+        for (int b = 0; b < level.box_count; ++b) {
+            if (sim_active[b] && sim_boxes[b] == next_box) return false;
+        }
+        sim_boxes[hit_box] = next_box;
+        sim_player = to;
+
+        uint16_t hit_targets = target_cell_mask[sem][next_box.y][next_box.x];
+        hit_targets = static_cast<uint16_t>(hit_targets & remaining_target_mask);
+        if (hit_targets != 0) {
+            if ((hit_targets & target_bit) == 0 || p + 1 != next_path.size()) return false;
+            segment_ok = true;
+        }
+    }
+    return segment_ok;
+}
+
+bool Sokoban::validate_box_progress_segment(
+    const SokobanLevel& level,
+    point player_pos,
+    int moving_level_idx,
+    uint8_t sem,
+    uint16_t remaining_target_mask,
+    const StaticArray<point, MAX_PATH_LENGTH>& path,
+    const StaticArray<point, MAX_PATH_LENGTH>& next_path) const {
+    // 部分推进宏不能推到其它箱子，也不能提前完成任意同语义目标
+    point sim_player = player_pos;
+    point sim_boxes[MAX_BOXES];
+    bool sim_active[MAX_BOXES] = {};
+    for (int b = 0; b < level.box_count; ++b) {
+        sim_boxes[b] = level.boxes[b];
+        sim_active[b] = true;
+    }
+
+    bool moved = false;
+    for (int p = path.size(); p < next_path.size(); ++p) {
+        point to = next_path[p];
+        uint8_t dir = 4;
+        for (uint8_t d = 0; d < 4; ++d) {
+            if (sim_player + MOVE[d] == to) {
+                dir = d;
+                break;
+            }
+        }
+        if (dir >= 4) return false;
+
+        int hit_box = -1;
+        for (int b = 0; b < level.box_count; ++b) {
+            if (sim_active[b] && sim_boxes[b] == to) {
+                hit_box = b;
+                break;
+            }
+        }
+        if (hit_box == -1) {
+            sim_player = to;
+            continue;
+        }
+        if (hit_box != moving_level_idx) return false;
+
+        point next_box = to + MOVE[dir];
+        for (int b = 0; b < level.box_count; ++b) {
+            if (sim_active[b] && sim_boxes[b] == next_box) return false;
+        }
+        sim_boxes[hit_box] = next_box;
+        sim_player = to;
+        moved = true;
+
+        uint16_t hit_targets = target_cell_mask[sem][next_box.y][next_box.x];
+        hit_targets = static_cast<uint16_t>(hit_targets & remaining_target_mask);
+        if (hit_targets != 0) return false;
+    }
+    return moved;
+}
+
+bool Sokoban::build_box_macro_successor_state(
+    const GameState& state,
+    int box_idx,
+    point box_target,
+    int target_idx,
+    point final_player,
+    GameState& out_state) const {
+    if (box_idx < 0 || box_idx >= state.num_boxes) return false;
+    if (target_idx >= 0 && target_idx >= initial_targets.size()) return false;
+
+    out_state = state;
+    out_state.player = final_player;
+
+    uint32_t new_hash = state.hash;
+    new_hash ^= ZOBRIST_PLAYER[state.player.y][state.player.x];
+    new_hash ^= ZOBRIST_PLAYER[final_player.y][final_player.x];
+
+    uint8_t sem = state.box_semantics[box_idx];
+    point old_pos = {state.box_x[box_idx], state.box_y[box_idx]};
+    new_hash ^= ZOBRIST_SPECIFIC_BOX[sem][old_pos.y][old_pos.x];
+
+    if (target_idx >= 0) {
+        if (box_target != initial_targets[target_idx]) return false;
+        if ((state.target_mask & (1U << target_idx)) == 0) return false;
+        if (target_semantics[target_idx] != sem) return false;
+
+        new_hash ^= ZOBRIST_TARGET[target_idx];
+        out_state.target_mask = static_cast<uint16_t>(state.target_mask & ~(1U << target_idx));
+        for (int i = box_idx + 1; i < state.num_boxes; ++i) {
+            out_state.box_x[i - 1] = state.box_x[i];
+            out_state.box_y[i - 1] = state.box_y[i];
+            out_state.box_semantics[i - 1] = state.box_semantics[i];
+        }
+        out_state.num_boxes = static_cast<uint8_t>(state.num_boxes - 1);
+    } else {
+        out_state.box_x[box_idx] = box_target.x;
+        out_state.box_y[box_idx] = box_target.y;
+        new_hash ^= ZOBRIST_SPECIFIC_BOX[sem][box_target.y][box_target.x];
+    }
+
+    out_state.hash = new_hash;
+    return true;
+}
+
+int Sokoban::static_passage_degree(point p, uint8_t blown_mask) const {
+    if (is_overstep(p) || is_solid(p, blown_mask)) return 0;
+
+    int degree = 0;
+    for (uint8_t d = 0; d < 4; ++d) {
+        point n = p + MOVE[d];
+        if (!is_overstep(n) && !is_solid(n, blown_mask)) ++degree;
+    }
+    return degree;
+}
+
+Sokoban::MixedMacroStructureInfo Sokoban::evaluate_mixed_small_entity_macro_structure(const GameState& state) const {
+    MixedMacroStructureInfo info;
+    if (state.num_boxes == 0) return info;
+
+    for (int y = 0; y < MAP_MAX_HEIGHT; ++y) {
+        for (int x = 0; x < MAP_MAX_WIDTH; ++x) {
+            point p = {static_cast<int8_t>(x), static_cast<int8_t>(y)};
+            if (is_solid(p, state.blown_mask)) continue;
+            ++info.open_cells;
+            if (static_passage_degree(p, state.blown_mask) <= 2) ++info.corridor_cells;
+        }
+    }
+    info.corridor_pct = info.open_cells > 0 ? (info.corridor_cells * 100) / info.open_cells : 0;
+
+    int coupling_score = 0;
+    bool has_box_on_bomb_route = false;
+    bool has_bomb_near_box_route = false;
+    bool has_target_path_waiting_wall = false;
+    bool any_box_can_leave_bomb_route = false;
+
+    for (uint8_t i = 0; i < state.num_boxes; ++i) {
+        uint8_t sem = state.box_semantics[i];
+        point box_pos = {state.box_x[i], state.box_y[i]};
+        int box_degree = static_passage_degree(box_pos, state.blown_mask);
+
+        uint16_t targets = static_cast<uint16_t>(state.target_mask & target_semantic_mask[sem]);
+        int best_box_cost = 9999;
+        bool target_path_uses_future_wall = false;
+        for (uint16_t mask = targets; mask != 0; mask = static_cast<uint16_t>(mask & (mask - 1))) {
+            uint16_t bit = static_cast<uint16_t>(mask & -mask);
+            uint8_t t = static_cast<uint8_t>(__builtin_ctz(static_cast<unsigned int>(bit)));
+            int cost = box_target_cost[t][box_pos.y][box_pos.x];
+            if (cost != 255 && cost < best_box_cost) best_box_cost = cost;
+
+            point target = initial_targets[t];
+            for (uint8_t d = 0; d < 4; ++d) {
+                point stand = target - MOVE[d];
+                if (is_overstep(stand)) continue;
+                if ((wall_clear_mask[stand.y][stand.x] & ~state.blown_mask) != 0) {
+                    target_path_uses_future_wall = true;
+                }
+            }
+        }
+
+        bool box_on_bomb_route = false;
+        bool box_can_leave_bomb_route = false;
+        int best_bomb_dist = 9999;
+        for (uint8_t b = 0; b < state.num_bombs; ++b) {
+            if (state.blown_mask & (1 << b)) continue;
+            if (bomb_tasks[b].target_wall.x == -1) continue;
+
+            int d = b_dist[b][box_pos.y][box_pos.x];
+            if (d >= 0) {
+                box_on_bomb_route = true;
+                if (d < best_bomb_dist) best_bomb_dist = d;
+            }
+        }
+
+        for (uint8_t d = 0; d < 4; ++d) {
+            point next = box_pos + MOVE[d];
+            point stand = box_pos - MOVE[d];
+            if (is_overstep(next) || is_overstep(stand)) continue;
+            if (is_solid(next, state.blown_mask) || is_solid(stand, state.blown_mask)) continue;
+
+            int next_box_cost = 9999;
+            for (uint16_t mask = targets; mask != 0; mask = static_cast<uint16_t>(mask & (mask - 1))) {
+                uint16_t bit = static_cast<uint16_t>(mask & -mask);
+                uint8_t t = static_cast<uint8_t>(__builtin_ctz(static_cast<unsigned int>(bit)));
+                int cost = box_target_cost[t][next.y][next.x];
+                if (cost != 255 && cost < next_box_cost) next_box_cost = cost;
+            }
+            bool moves_toward_target =
+                best_box_cost == 9999 ||
+                (next_box_cost != 9999 && next_box_cost < best_box_cost);
+
+            for (uint8_t b = 0; b < state.num_bombs; ++b) {
+                if (state.blown_mask & (1 << b)) continue;
+                if (bomb_tasks[b].target_wall.x == -1) continue;
+
+                int next_bomb_dist = b_dist[b][next.y][next.x];
+                if (box_on_bomb_route &&
+                    (next_bomb_dist == -1 ||
+                     (best_bomb_dist != 9999 && next_bomb_dist > best_bomb_dist + 2))) {
+                    box_can_leave_bomb_route = true;
+                }
+
+                point bomb_pos = {state.bomb_x[b], state.bomb_y[b]};
+                int walk_to_box = walk_dist_between(bomb_pos, box_pos);
+                if (walk_to_box != 255 && walk_to_box <= 4 && moves_toward_target) {
+                    has_bomb_near_box_route = true;
+                }
+            }
+        }
+
+        if (box_on_bomb_route) {
+            has_box_on_bomb_route = true;
+            coupling_score += box_degree <= 2 ? 2 : 1;
+        }
+        if (box_can_leave_bomb_route) {
+            any_box_can_leave_bomb_route = true;
+            coupling_score += 2;
+        }
+        if (target_path_uses_future_wall) {
+            has_target_path_waiting_wall = true;
+            coupling_score += box_degree <= 2 ? 2 : 1;
+        }
+    }
+
+    if (has_bomb_near_box_route) ++coupling_score;
+
+    info.coupling_score = coupling_score;
+    info.has_box_on_bomb_route = has_box_on_bomb_route;
+    info.has_bomb_near_box_route = has_bomb_near_box_route;
+    info.has_target_path_waiting_wall = has_target_path_waiting_wall;
+    info.any_box_can_leave_bomb_route = any_box_can_leave_bomb_route;
+
+    int structure_score = coupling_score;
+    if (has_box_on_bomb_route) structure_score += 2;
+    if (has_target_path_waiting_wall) structure_score += 2;
+    if (any_box_can_leave_bomb_route) structure_score += 1;
+    if (info.corridor_pct >= SokobanConfig::MIXED_MACRO_GLOBAL_CORRIDOR_MIN_PCT) {
+        structure_score += 2;
+    } else if (info.corridor_pct >= 40) {
+        structure_score += 1;
+    }
+    info.structure_score = structure_score;
+    info.prefer_box_first = has_box_on_bomb_route || has_target_path_waiting_wall;
+    return info;
+}
+
+bool Sokoban::should_use_mixed_small_entity_macro_layer(const GameState& state) const {
+    if (state.num_boxes == 0) return false;
+    if (state.num_boxes > SokobanConfig::MIXED_MACRO_MAX_BOXES) return false;
+    if (count_active_bomb_tasks(state) <= 0) return false;
+
+    MixedMacroStructureInfo structure = evaluate_mixed_small_entity_macro_structure(state);
+    // 共享依赖是主信号，走廊只做辅助加分，避免把中等宽度但依赖明显的图挡在外面
+    return structure.structure_score >= SokobanConfig::MIXED_MACRO_COUPLING_MIN_SCORE + 2 &&
+           structure.prefer_box_first;
+}
+
+int Sokoban::collect_box_progress_candidates(
+    const GameState& state,
+    const NodeOccupancy& occupancy,
+    BoxProgressCandidate candidates[16]) const {
+    int count = 0;
+
+    auto add_candidate = [&](uint8_t box_idx, uint8_t target_idx, point waypoint, int sort_key) {
+        if (count >= SokobanConfig::MIXED_MACRO_PROGRESS_CANDIDATES) return;
+        if (is_overstep(waypoint) || is_solid(waypoint, state.blown_mask)) return;
+        int8_t occ = occupancy.cell[waypoint.y][waypoint.x];
+        if (occ != NodeOccupancy::EMPTY && occ != static_cast<int8_t>(box_idx)) return;
+        point start = {state.box_x[box_idx], state.box_y[box_idx]};
+        if (waypoint == start) return;
+        for (int i = 0; i < count; ++i) {
+            if (candidates[i].box_idx == box_idx && candidates[i].waypoint == waypoint) {
+                if (sort_key < candidates[i].sort_key) {
+                    candidates[i].target_idx = target_idx;
+                    candidates[i].sort_key = static_cast<int16_t>(
+                        sort_key < -32000 ? -32000 : (sort_key > 32000 ? 32000 : sort_key));
+                }
+                return;
+            }
+        }
+
+        candidates[count++] = {
+            box_idx,
+            target_idx,
+            waypoint,
+            static_cast<int16_t>(sort_key < -32000 ? -32000 : (sort_key > 32000 ? 32000 : sort_key))
+        };
+    };
+
+    auto best_box_cost_to_active_target = [&](uint8_t box_idx, point box_pos) {
+        uint8_t sem = state.box_semantics[box_idx];
+        uint16_t targets = static_cast<uint16_t>(state.target_mask & target_semantic_mask[sem]);
+        int best = 9999;
+        for (uint16_t mask = targets; mask != 0; mask = static_cast<uint16_t>(mask & (mask - 1))) {
+            uint16_t bit = static_cast<uint16_t>(mask & -mask);
+            uint8_t t = static_cast<uint8_t>(__builtin_ctz(static_cast<unsigned int>(bit)));
+            int cost = box_target_cost[t][box_pos.y][box_pos.x];
+            if (cost != 255 && cost < best) best = cost;
+        }
+        return best;
+    };
+
+    auto candidate_cell_free = [&](uint8_t moving_box_idx, point waypoint, point p) {
+        if (is_overstep(p) || is_solid(p, state.blown_mask)) return false;
+        if (p == waypoint) return false;
+        int8_t occ = occupancy.cell[p.y][p.x];
+        return occ == NodeOccupancy::EMPTY || occ == static_cast<int8_t>(moving_box_idx);
+    };
+
+    auto reachable_after_candidate = [&](uint8_t moving_box_idx,
+                                         point waypoint,
+                                         point final_player,
+                                         point goal) {
+        if (!candidate_cell_free(moving_box_idx, waypoint, final_player)) return false;
+        if (!candidate_cell_free(moving_box_idx, waypoint, goal)) return false;
+        if (final_player == goal) return true;
+
+        uint8_t seen[MAP_MAX_HEIGHT][MAP_MAX_WIDTH] = {};
+        int head = 0;
+        int tail = 0;
+        bfs_q[tail++] = final_player;
+        seen[final_player.y][final_player.x] = 1;
+        while (head < tail) {
+            point curr = bfs_q[head++];
+            for (uint8_t d = 0; d < 4; ++d) {
+                point next = curr + MOVE[d];
+                if (is_overstep(next) || seen[next.y][next.x]) continue;
+                if (!candidate_cell_free(moving_box_idx, waypoint, next)) continue;
+                if (next == goal) return true;
+                seen[next.y][next.x] = 1;
+                bfs_q[tail++] = next;
+            }
+        }
+        return false;
+    };
+
+    auto corridor_unlock_score = [&](uint8_t moving_box_idx, point waypoint, point final_player) {
+        if (!candidate_cell_free(moving_box_idx, waypoint, final_player)) return 0;
+
+        uint8_t seen[MAP_MAX_HEIGHT][MAP_MAX_WIDTH] = {};
+        int head = 0;
+        int tail = 0;
+        bfs_q[tail++] = final_player;
+        seen[final_player.y][final_player.x] = 1;
+
+        int new_cells = 0;
+        int useful_cells = 0;
+        while (head < tail) {
+            point curr = bfs_q[head++];
+            bool was_reachable = bfs_visited_gen[curr.y][curr.x] == current_gen;
+            if (!was_reachable) {
+                ++new_cells;
+                if ((target_cell_mask[0][curr.y][curr.x] |
+                     target_cell_mask[1][curr.y][curr.x] |
+                     target_cell_mask[2][curr.y][curr.x] |
+                     target_cell_mask[3][curr.y][curr.x] |
+                     target_cell_mask[4][curr.y][curr.x] |
+                     target_cell_mask[5][curr.y][curr.x] |
+                     target_cell_mask[6][curr.y][curr.x] |
+                     target_cell_mask[7][curr.y][curr.x] |
+                     target_cell_mask[8][curr.y][curr.x] |
+                     target_cell_mask[9][curr.y][curr.x]) != 0) {
+                    ++useful_cells;
+                }
+                for (uint8_t box = 0; box < state.num_boxes; ++box) {
+                    if (box == moving_box_idx) continue;
+                    point other_pos = {state.box_x[box], state.box_y[box]};
+                    if (std::abs(static_cast<int>(curr.x) - other_pos.x) +
+                        std::abs(static_cast<int>(curr.y) - other_pos.y) <= 1) {
+                        ++useful_cells;
+                        break;
+                    }
+                }
+            }
+
+            for (uint8_t d = 0; d < 4; ++d) {
+                point next = curr + MOVE[d];
+                if (is_overstep(next) || seen[next.y][next.x]) continue;
+                if (!candidate_cell_free(moving_box_idx, waypoint, next)) continue;
+                seen[next.y][next.x] = 1;
+                bfs_q[tail++] = next;
+            }
+        }
+
+        if (new_cells <= 0) return 0;
+        point start = {state.box_x[moving_box_idx], state.box_y[moving_box_idx]};
+        int score = new_cells * 4 + useful_cells * 10;
+        if (static_passage_degree(start, state.blown_mask) <= 2) score += 12;
+        if (static_passage_degree(waypoint, state.blown_mask) <= 1) score -= 8;
+        if (score < 0) return 0;
+        return score > 96 ? 96 : score;
+    };
+
+    auto access_relief_score = [&](uint8_t moving_box_idx, point waypoint, point final_player) {
+        int score = 0;
+        point moving_start = {state.box_x[moving_box_idx], state.box_y[moving_box_idx]};
+        for (uint8_t other = 0; other < state.num_boxes; ++other) {
+            if (other == moving_box_idx) continue;
+            point other_pos = {state.box_x[other], state.box_y[other]};
+            int other_cost = best_box_cost_to_active_target(other, other_pos);
+            if (other_cost == 9999) continue;
+
+            for (uint8_t d = 0; d < 4; ++d) {
+                point stand = other_pos - MOVE[d];
+                point to = other_pos + MOVE[d];
+                if (!candidate_cell_free(moving_box_idx, waypoint, stand)) continue;
+                if (!candidate_cell_free(moving_box_idx, waypoint, to)) continue;
+
+                int next_cost = best_box_cost_to_active_target(other, to);
+                if (next_cost == 9999 || next_cost >= other_cost) continue;
+
+                bool currently_ready =
+                    !is_overstep(stand) &&
+                    bfs_visited_gen[stand.y][stand.x] == current_gen &&
+                    !is_overstep(to) &&
+                    occupancy.cell[to.y][to.x] == NodeOccupancy::EMPTY;
+                if (currently_ready) continue;
+                if (!reachable_after_candidate(moving_box_idx, waypoint, final_player, stand)) continue;
+
+                int local = 24 + (other_cost - next_cost) * 8;
+                if (stand == moving_start || to == moving_start) local += 18;
+                if (static_passage_degree(other_pos, state.blown_mask) <= 2) local += 8;
+                if (local > 56) local = 56;
+                score += local;
+            }
+        }
+        return score;
+    };
+
+    // 生成共享依赖箱的部分推进：炸弹通路、未来炸墙，以及箱子之间的站位/通路阻塞
+    for (uint8_t i = 0; i < state.num_boxes; ++i) {
+        uint8_t sem = state.box_semantics[i];
+        point start = {state.box_x[i], state.box_y[i]};
+
+        uint16_t targets = static_cast<uint16_t>(state.target_mask & target_semantic_mask[sem]);
+        uint8_t best_target = 255;
+        int best_cost = 9999;
+        for (uint16_t mask = targets; mask != 0; mask = static_cast<uint16_t>(mask & (mask - 1))) {
+            uint16_t bit = static_cast<uint16_t>(mask & -mask);
+            uint8_t t = static_cast<uint8_t>(__builtin_ctz(static_cast<unsigned int>(bit)));
+            int cost = box_target_cost[t][start.y][start.x];
+            if (cost == 255) continue;
+            if (cost < best_cost) {
+                best_cost = cost;
+                best_target = t;
+            }
+        }
+        if (best_target == 255) continue;
+
+        bool waits_future_wall = false;
+        point best_target_pos = initial_targets[best_target];
+        for (uint8_t d = 0; d < 4; ++d) {
+            point stand = best_target_pos - MOVE[d];
+            if (is_overstep(stand)) continue;
+            if ((wall_clear_mask[stand.y][stand.x] & ~state.blown_mask) != 0) {
+                waits_future_wall = true;
+                break;
+            }
+        }
+
+        int box_degree = static_passage_degree(start, state.blown_mask);
+        bool box_in_narrow_passage = box_degree <= 2;
+        bool box_blocks_bomb = false;
+        int best_bomb_dist = 9999;
+        int curr_bomb_dist[MAX_BOMBS];
+        for (int b = 0; b < MAX_BOMBS; ++b) curr_bomb_dist[b] = -1;
+        for (uint8_t b = 0; b < state.num_bombs; ++b) {
+            if (state.blown_mask & (1 << b)) continue;
+            if (bomb_tasks[b].target_wall.x == -1) continue;
+            int d = b_dist[b][start.y][start.x];
+            curr_bomb_dist[b] = d;
+            if (d >= 0) {
+                box_blocks_bomb = true;
+                if (d < best_bomb_dist) best_bomb_dist = d;
+            }
+        }
+        auto route_relief_score = [&](point to) {
+            int score = 0;
+            for (uint8_t b = 0; b < state.num_bombs; ++b) {
+                if (state.blown_mask & (1 << b)) continue;
+                if (bomb_tasks[b].target_wall.x == -1) continue;
+
+                int curr_dist = curr_bomb_dist[b];
+                if (curr_dist < 0) continue;
+
+                int next_dist = b_dist[b][to.y][to.x];
+                if (next_dist < 0) {
+                    score += 40;
+                } else if (next_dist > curr_dist + 2) {
+                    score += 24;
+                } else if (next_dist > curr_dist) {
+                    score += 12;
+                } else if (next_dist < curr_dist) {
+                    score -= 18;
+                }
+            }
+            return score;
+        };
+
+        for (uint8_t d = 0; d < 4; ++d) {
+            point one = start + MOVE[d];
+            point stand = start - MOVE[d];
+            if (is_overstep(one) || is_overstep(stand)) continue;
+            if (is_solid(one, state.blown_mask) || is_solid(stand, state.blown_mask)) continue;
+            int8_t one_occ = occupancy.cell[one.y][one.x];
+            if (one_occ != NodeOccupancy::EMPTY) continue;
+
+            int next_cost = box_target_cost[best_target][one.y][one.x];
+            if (next_cost == 255) continue;
+
+            bool target_progress = next_cost < best_cost;
+            bool allow_wait_progress = waits_future_wall && target_progress && !box_blocks_bomb;
+            int relief_score = route_relief_score(one);
+            point one_final_player = one - MOVE[d];
+            int access_score = access_relief_score(i, one, one_final_player);
+            int corridor_score = corridor_unlock_score(i, one, one_final_player);
+            bool allow_access_progress = target_progress && access_score > 0;
+            bool allow_corridor_progress =
+                corridor_score >= 12 &&
+                next_cost <= best_cost + 2 &&
+                (box_in_narrow_passage || target_progress);
+            if (relief_score <= 0 &&
+                !allow_wait_progress &&
+                !allow_access_progress &&
+                !allow_corridor_progress) {
+                continue;
+            }
+            if (!box_in_narrow_passage &&
+                relief_score < 24 &&
+                access_score < 24 &&
+                corridor_score < 24 &&
+                !allow_wait_progress) {
+                continue;
+            }
+
+            int cost_delta = next_cost - best_cost;
+            int sort_key = cost_delta * 12 -
+                           relief_score * 6 -
+                           access_score * 5 -
+                           corridor_score * 4;
+            if (!target_progress && corridor_score > 0) sort_key += 40;
+            if (target_progress) sort_key -= 18;
+            if (box_in_narrow_passage) sort_key -= 6;
+            add_candidate(i, best_target, one, sort_key);
+
+            // 走廊依赖图常需要先把箱子连推到转角或支路口
+            point curr = one;
+            int curr_cost = next_cost;
+            for (int step = 0; step < 3; ++step) {
+                point further = curr + MOVE[d];
+                if (is_overstep(further) || is_solid(further, state.blown_mask)) break;
+                int8_t further_occ = occupancy.cell[further.y][further.x];
+                if (further_occ != NodeOccupancy::EMPTY) break;
+                int further_cost = box_target_cost[best_target][further.y][further.x];
+                if (further_cost == 255 || further_cost > curr_cost) break;
+
+                bool further_progress = further_cost < best_cost;
+                bool further_allow_wait = waits_future_wall && further_progress && !box_blocks_bomb;
+                int further_relief = route_relief_score(further);
+                point further_final_player = further - MOVE[d];
+                int further_access = access_relief_score(i, further, further_final_player);
+                int further_corridor = corridor_unlock_score(i, further, further_final_player);
+                bool further_allow_access = further_progress && further_access > 0;
+                bool further_allow_corridor =
+                    further_corridor >= 12 &&
+                    further_cost <= best_cost + 2 &&
+                    (box_in_narrow_passage || further_progress);
+                if (further_relief <= 0 &&
+                    !further_allow_wait &&
+                    !further_allow_access &&
+                    !further_allow_corridor) {
+                    break;
+                }
+
+                curr = further;
+                curr_cost = further_cost;
+                int further_delta = further_cost - best_cost;
+                int further_key =
+                    further_delta * 12 -
+                    further_relief * 6 -
+                    further_access * 5 -
+                    further_corridor * 4 -
+                    (step + 1) * 8;
+                if (!further_progress && further_corridor > 0) further_key += 40;
+                if (further_progress) further_key -= 18;
+                if (box_in_narrow_passage) further_key -= 6;
+                add_candidate(i, best_target, curr, further_key);
+            }
+        }
+    }
+
+    for (int i = 1; i < count; ++i) {
+        BoxProgressCandidate key = candidates[i];
+        int j = i - 1;
+        while (j >= 0 && candidates[j].sort_key > key.sort_key) {
+            candidates[j + 1] = candidates[j];
+            --j;
+        }
+        candidates[j + 1] = key;
+    }
+    return count;
+}
+
+bool Sokoban::try_small_box_macro_solution() {
+    if constexpr (!SokobanConfig::ENABLE_SMALL_BOX_MACRO_LAYER) {
+        return false;
+    }
+
+    StaticArray<point, MAX_PATH_LENGTH> macro_path;
+    if (!try_small_box_macro_solution_from_state(initial_state, macro_path)) return false;
+
+    // 少箱宏层已枚举完成顺序与目标分配，和快速 IDA* 各自收尾后再择优
+    StaticArray<point, MAX_PATH_LENGTH> ida_path;
+    bool have_ida = run_ida_search(false, MAX_PATH_LENGTH, ida_path, SMALL_BOX_MACRO_IDA_NODE_BUDGET);
+    select_cheaper_finalized(macro_path, have_ida ? &ida_path : nullptr);
+    return true;
+}
+
+bool Sokoban::try_bomb_then_small_box_macro_solution(
+    StaticArray<point, MAX_PATH_LENGTH>& out_path) const {
+    out_path.clear();
+    if constexpr (!SokobanConfig::ENABLE_SMALL_BOX_MACRO_LAYER) {
+        return false;
+    }
+    int active_bombs = count_active_bomb_tasks(initial_state);
+    if (active_bombs <= 0 || active_bombs > MAX_BOMBS) return false;
+    if (initial_state.num_boxes > SokobanConfig::SMALL_BOX_MACRO_MAX_BOXES) return false;
+
+    uint8_t bomb_ids[MAX_BOMBS];
+    int bomb_count = 0;
+    for (uint8_t b = 0; b < initial_state.num_bombs; ++b) {
+        if ((initial_state.blown_mask & (1 << b)) == 0 &&
+            bomb_tasks[b].target_wall.x != -1) {
+            bomb_ids[bomb_count++] = b;
+        }
+    }
+    if (bomb_count != active_bombs) return false;
+
+    StaticArray<point, MAX_PATH_LENGTH> best_path;
+    int best_len = MAX_PATH_LENGTH;
+    bool used[MAX_BOMBS] = {};
+
+    auto search_order = [&](auto&& self,
+                            int depth,
+                            const GameState& state,
+                            const StaticArray<point, MAX_PATH_LENGTH>& path) -> void {
+        if (path.size() >= best_len) return;
+
+        if (depth == bomb_count) {
+            StaticArray<point, MAX_PATH_LENGTH> suffix;
+            if (!try_small_box_macro_solution_from_state(state, suffix)) return;
+
+            StaticArray<point, MAX_PATH_LENGTH> full = path;
+            for (int i = 1; i < suffix.size(); ++i) {
+                if (full.size() >= MAX_PATH_LENGTH) return;
+                full.push_back(suffix[i]);
+            }
+            if (full.size() < best_len) {
+                best_path = full;
+                best_len = full.size();
+            }
+            return;
+        }
+
+        for (int oi = 0; oi < bomb_count; ++oi) {
+            if (used[oi]) continue;
+            uint8_t b = bomb_ids[oi];
+            if (state.blown_mask & (1 << b)) continue;
+            if (bomb_tasks[b].target_wall.x == -1) continue;
+
+            StaticArray<point, MAX_PATH_LENGTH> bomb_path;
+            if (!build_bomb_macro_path(state, b, bomb_path)) continue;
+            if (bomb_path.empty()) continue;
+
+            StaticArray<point, MAX_PATH_LENGTH> next_path = path;
+            for (int i = 0; i < bomb_path.size(); ++i) {
+                if (next_path.size() >= MAX_PATH_LENGTH) return;
+                next_path.push_back(bomb_path[i]);
+            }
+            if (next_path.size() >= best_len) continue;
+
+            BombTask task = bomb_tasks[b];
+            task.bomb_start = {state.bomb_x[b], state.bomb_y[b]};
+            GameState next_state;
+            if (!build_bomb_task_successor_state(state, b, task, bomb_path.back(), next_state)) continue;
+
+            used[oi] = true;
+            self(self, depth + 1, next_state, next_path);
+            used[oi] = false;
+        }
+    };
+
+    StaticArray<point, MAX_PATH_LENGTH> root_path;
+    root_path.push_back(initial_state.player);
+    search_order(search_order, 0, initial_state, root_path);
+
+    if (best_path.empty()) return false;
+    out_path = best_path;
+    return true;
+}
+
+bool Sokoban::try_mixed_small_entity_macro_solution(
+    StaticArray<point, MAX_PATH_LENGTH>& out_path) const {
+    out_path.clear();
+    if constexpr (!SokobanConfig::ENABLE_MIXED_SMALL_ENTITY_MACRO_LAYER) {
+        return false;
+    }
+    if (initial_state.num_boxes == 0) return false;
+    if (initial_state.num_boxes > SokobanConfig::MIXED_MACRO_MAX_BOXES) return false;
+    if (count_active_bomb_tasks(initial_state) <= 0) return false;
+
+    StaticArray<point, MAX_PATH_LENGTH> root_path;
+    root_path.push_back(initial_state.player);
+
+    StaticArray<point, MAX_PATH_LENGTH> best_path;
+    int best_len = MAX_PATH_LENGTH;
+    int node_budget = SokobanConfig::MIXED_MACRO_NODE_BUDGET;
+    uint32_t visited_hashes[16] = {};
+
+    if (!search_mixed_small_entity_macro(
+            initial_state,
+            0,
+            node_budget,
+            visited_hashes,
+            root_path,
+            best_path,
+            best_len)) {
+        return false;
+    }
+    if (best_path.empty()) return false;
+
+    out_path = best_path;
+    return true;
+}
+
+bool Sokoban::search_mixed_small_entity_macro(
+    const GameState& state,
+    int depth,
+    int& node_budget,
+    uint32_t visited_hashes[16],
+    const StaticArray<point, MAX_PATH_LENGTH>& path,
+    StaticArray<point, MAX_PATH_LENGTH>& best_path,
+    int& best_len) const {
+    if (path.size() >= best_len) return false;
+    if (state.num_boxes == 0) {
+        best_path = path;
+        best_len = path.size();
+        return true;
+    }
+
+    int active_bombs = count_active_bomb_tasks(state);
+    if (active_bombs == 0) {
+        StaticArray<point, MAX_PATH_LENGTH> suffix;
+        if (try_small_box_macro_solution_from_state(state, suffix)) {
+            StaticArray<point, MAX_PATH_LENGTH> full = path;
+            for (int i = 1; i < suffix.size(); ++i) {
+                if (full.size() >= MAX_PATH_LENGTH) return false;
+                full.push_back(suffix[i]);
+            }
+            if (full.size() < best_len) {
+                best_path = full;
+                best_len = full.size();
+            }
+            return true;
+        }
+    }
+
+    if (depth >= SokobanConfig::MIXED_MACRO_MAX_DEPTH) return false;
+    if (depth >= 16) return false;
+    if (node_budget <= 0) return false;
+    --node_budget;
+
+    NodeOccupancy occupancy;
+    occupancy.build(state);
+    current_gen++;
+    if (current_gen == 0) {
+        std::memset(bfs_visited_gen, 0, sizeof(bfs_visited_gen));
+        current_gen = 1;
+    }
+
+    int head = 0;
+    int tail = 0;
+    bfs_q[tail++] = state.player;
+    bfs_visited_gen[state.player.y][state.player.x] = current_gen;
+    bfs_dist[state.player.y][state.player.x] = 0;
+
+    point canon_player = state.player;
+    while (head < tail) {
+        point curr = bfs_q[head++];
+        if (curr.y < canon_player.y || (curr.y == canon_player.y && curr.x < canon_player.x)) {
+            canon_player = curr;
+        }
+        for (int dir = 0; dir < 4; ++dir) {
+            point np = curr + MOVE[dir];
+            if (is_overstep(np) || is_solid(np, state.blown_mask)) continue;
+            if (bfs_visited_gen[np.y][np.x] == current_gen) continue;
+            if (occupancy.cell[np.y][np.x] != NodeOccupancy::EMPTY) continue;
+            bfs_visited_gen[np.y][np.x] = current_gen;
+            bfs_dist[np.y][np.x] = bfs_dist[curr.y][curr.x] + 1;
+            bfs_q[tail++] = np;
+        }
+    }
+
+    uint32_t mixed_hash = state.hash ^
+                          ZOBRIST_PLAYER[state.player.y][state.player.x] ^
+                          ZOBRIST_PLAYER[canon_player.y][canon_player.x];
+    for (int i = 0; i < depth; ++i) {
+        if (visited_hashes[i] == mixed_hash) return false;
+    }
+    visited_hashes[depth] = mixed_hash;
+
+    if (probe_mixed_macro_transposition(mixed_hash, static_cast<int>(path.size()))) {
+        return false;
+    }
+
+    MixedMacroStructureInfo structure = evaluate_mixed_small_entity_macro_structure(state);
+    bool box_phase_first =
+        active_bombs == 0 ||
+        (structure.prefer_box_first &&
+         structure.structure_score >= SokobanConfig::MIXED_MACRO_COUPLING_MIN_SCORE + 2);
+
+    auto append_segment = [](StaticArray<point, MAX_PATH_LENGTH>& dst,
+                             const StaticArray<point, MAX_PATH_LENGTH>& segment) {
+        for (int i = 0; i < segment.size(); ++i) {
+            if (dst.size() >= MAX_PATH_LENGTH) return false;
+            if (dst.size() > 0 && dst.back() == segment[i]) continue;
+            dst.push_back(segment[i]);
+        }
+        return true;
+    };
+
+    enum class MixedMacroKind : uint8_t {
+        BOMB_FULL = 0,
+        BOMB_PROGRESS = 1,
+        BOX_PROGRESS = 2,
+        BOX_FINISH = 3,
+    };
+
+    struct MixedMacroCandidate {
+        MixedMacroKind kind;
+        uint8_t bomb_idx;
+        uint8_t box_idx;
+        uint8_t target_idx;
+        point waypoint;
+        int16_t sort_key;
+    };
+
+    MixedMacroCandidate candidates[32];
+    int candidate_count = 0;
+    auto push_candidate = [&](MixedMacroKind kind,
+                              uint8_t bomb_idx,
+                              uint8_t box_idx,
+                              uint8_t target_idx,
+                              point waypoint,
+                              int sort_key) {
+        if (candidate_count >= 32) return;
+        candidates[candidate_count++] = {
+            kind,
+            bomb_idx,
+            box_idx,
+            target_idx,
+            waypoint,
+            static_cast<int16_t>(sort_key < -32000 ? -32000 : (sort_key > 32000 ? 32000 : sort_key))
+        };
+    };
+
+    int box_bias = box_phase_first ? -240 : 180;
+    int bomb_bias = box_phase_first ? 180 : -240;
+    if (structure.has_box_on_bomb_route) box_bias -= 80;
+    if (structure.has_target_path_waiting_wall) box_bias -= 80;
+    if (structure.any_box_can_leave_bomb_route) box_bias -= 40;
+    if (structure.has_bomb_near_box_route) bomb_bias -= 40;
+
+    int progress_count = 0;
+    BoxProgressCandidate progress_candidates[16];
+    if (state.num_boxes > 0) {
+        progress_count = collect_box_progress_candidates(state, occupancy, progress_candidates);
+        for (int pi = 0;
+             pi < progress_count &&
+             pi < SokobanConfig::MIXED_MACRO_BOX_PROGRESS_LIMIT &&
+             candidate_count < 32;
+             ++pi) {
+            const BoxProgressCandidate& cand = progress_candidates[pi];
+            push_candidate(
+                MixedMacroKind::BOX_PROGRESS,
+                255,
+                cand.box_idx,
+                cand.target_idx,
+                cand.waypoint,
+                cand.sort_key + box_bias);
+        }
+    }
+
+    int box_finish_count = 0;
+    for (uint8_t i = 0;
+         i < state.num_boxes &&
+         box_finish_count < SokobanConfig::MIXED_MACRO_BOX_FINISH_LIMIT &&
+         candidate_count < 32;
+         ++i) {
+        uint8_t sem = state.box_semantics[i];
+        uint16_t candidates_mask = static_cast<uint16_t>(state.target_mask & target_semantic_mask[sem]);
+        int best_cost = 9999;
+        uint8_t best_target = 255;
+        for (uint16_t mask = candidates_mask; mask != 0; mask = static_cast<uint16_t>(mask & (mask - 1))) {
+            uint16_t bit = static_cast<uint16_t>(mask & -mask);
+            uint8_t t = static_cast<uint8_t>(__builtin_ctz(static_cast<unsigned int>(bit)));
+            int cost = box_target_cost[t][state.box_y[i]][state.box_x[i]];
+            if (cost == 255) continue;
+            if (cost < best_cost) {
+                best_cost = cost;
+                best_target = t;
+            }
+        }
+        if (best_target == 255) continue;
+        push_candidate(
+            MixedMacroKind::BOX_FINISH,
+            255,
+            i,
+            best_target,
+            initial_targets[best_target],
+            best_cost * 8 + box_bias / 2);
+        ++box_finish_count;
+    }
+
+    int bomb_full_count = 0;
+    for (uint8_t b = 0; b < state.num_bombs && candidate_count < 32; ++b) {
+        if (state.blown_mask & (1 << b)) continue;
+        if (bomb_tasks[b].target_wall.x == -1) continue;
+
+        StaticArray<point, MAX_PATH_LENGTH> bomb_path;
+        if (!build_bomb_macro_path(state, b, bomb_path)) continue;
+        if (bomb_path.empty()) continue;
+
+        int sort_key = static_cast<int>(bomb_path.size()) * 12 + bomb_bias;
+        if (bomb_tasks[b].is_essential) sort_key -= 50;
+        if (state.bomb_x[b] == bomb_tasks[b].bomb_start.x && state.bomb_y[b] == bomb_tasks[b].bomb_start.y) {
+            sort_key += 20;
+        }
+        push_candidate(MixedMacroKind::BOMB_FULL, b, 0, 255, bomb_path.back(), sort_key);
+        ++bomb_full_count;
+    }
+
+    auto bomb_cell_free_after = [&](uint8_t moving_bomb_idx, point waypoint, point p) {
+        if (is_overstep(p) || is_solid(p, state.blown_mask)) return false;
+        if (p == waypoint) return false;
+        int8_t occ = occupancy.cell[p.y][p.x];
+        return occ == NodeOccupancy::EMPTY ||
+               occ == static_cast<int8_t>(NodeOccupancy::BOMB_BASE + moving_bomb_idx);
+    };
+
+    auto bomb_unlock_score = [&](uint8_t moving_bomb_idx, point waypoint, point final_player) {
+        if (!bomb_cell_free_after(moving_bomb_idx, waypoint, final_player)) return 0;
+
+        uint8_t seen[MAP_MAX_HEIGHT][MAP_MAX_WIDTH] = {};
+        int head = 0;
+        int tail = 0;
+        bfs_q[tail++] = final_player;
+        seen[final_player.y][final_player.x] = 1;
+
+        int new_cells = 0;
+        while (head < tail) {
+            point curr = bfs_q[head++];
+            if (bfs_visited_gen[curr.y][curr.x] != current_gen) ++new_cells;
+
+            for (uint8_t d = 0; d < 4; ++d) {
+                point next = curr + MOVE[d];
+                if (is_overstep(next) || seen[next.y][next.x]) continue;
+                if (!bomb_cell_free_after(moving_bomb_idx, waypoint, next)) continue;
+                seen[next.y][next.x] = 1;
+                bfs_q[tail++] = next;
+            }
+        }
+
+        int access_score = new_cells * 3;
+        for (uint8_t box = 0; box < state.num_boxes; ++box) {
+            point box_pos = {state.box_x[box], state.box_y[box]};
+            uint8_t sem = state.box_semantics[box];
+            int curr_cost = 9999;
+            uint16_t targets = static_cast<uint16_t>(state.target_mask & target_semantic_mask[sem]);
+            for (uint16_t mask = targets; mask != 0; mask = static_cast<uint16_t>(mask & (mask - 1))) {
+                uint16_t bit = static_cast<uint16_t>(mask & -mask);
+                uint8_t t = static_cast<uint8_t>(__builtin_ctz(static_cast<unsigned int>(bit)));
+                int cost = box_target_cost[t][box_pos.y][box_pos.x];
+                if (cost != 255 && cost < curr_cost) curr_cost = cost;
+            }
+            if (curr_cost == 9999) continue;
+
+            for (uint8_t d = 0; d < 4; ++d) {
+                point stand = box_pos - MOVE[d];
+                point to = box_pos + MOVE[d];
+                if (!bomb_cell_free_after(moving_bomb_idx, waypoint, stand)) continue;
+                if (!bomb_cell_free_after(moving_bomb_idx, waypoint, to)) continue;
+
+                int next_cost = 9999;
+                for (uint16_t mask = targets; mask != 0; mask = static_cast<uint16_t>(mask & (mask - 1))) {
+                    uint16_t bit = static_cast<uint16_t>(mask & -mask);
+                    uint8_t t = static_cast<uint8_t>(__builtin_ctz(static_cast<unsigned int>(bit)));
+                    int cost = box_target_cost[t][to.y][to.x];
+                    if (cost != 255 && cost < next_cost) next_cost = cost;
+                }
+                if (next_cost == 9999 || next_cost >= curr_cost) continue;
+                if (bfs_visited_gen[stand.y][stand.x] == current_gen) continue;
+                if (!seen[stand.y][stand.x]) continue;
+
+                int local = 28 + (curr_cost - next_cost) * 8;
+                if (local > 72) local = 72;
+                access_score += local;
+            }
+        }
+
+        for (int pi = 0; pi < progress_count; ++pi) {
+            const BoxProgressCandidate& pc = progress_candidates[pi];
+            if (pc.box_idx >= state.num_boxes) continue;
+            point start = {state.box_x[pc.box_idx], state.box_y[pc.box_idx]};
+            int dx = static_cast<int>(pc.waypoint.x) - start.x;
+            int dy = static_cast<int>(pc.waypoint.y) - start.y;
+            uint8_t dir = 4;
+            int straight_len = 0;
+            if (dx == 0 && dy > 0) {
+                dir = 0;
+                straight_len = dy;
+            } else if (dy == 0 && dx > 0) {
+                dir = 1;
+                straight_len = dx;
+            } else if (dx == 0 && dy < 0) {
+                dir = 2;
+                straight_len = -dy;
+            } else if (dy == 0 && dx < 0) {
+                dir = 3;
+                straight_len = -dx;
+            }
+            if (dir >= 4 || straight_len <= 0) continue;
+
+            point first_to = start + MOVE[dir];
+            point stand = start - MOVE[dir];
+            if (!bomb_cell_free_after(moving_bomb_idx, waypoint, first_to)) continue;
+            if (!bomb_cell_free_after(moving_bomb_idx, waypoint, stand)) continue;
+            if (!seen[stand.y][stand.x]) continue;
+
+            // 炸弹停车的核心价值是让已识别的箱子部分推进从不可执行变可执行
+            int local = 120 - straight_len * 8;
+            if (local < 48) local = 48;
+            access_score += local;
+        }
+
+        if (access_score < 0) return 0;
+        return access_score > 160 ? 160 : access_score;
+    };
+
+    int bomb_progress_count = 0;
+    for (uint8_t b = 0; b < state.num_bombs && candidate_count < 32; ++b) {
+        if (state.blown_mask & (1 << b)) continue;
+
+        point bomb_pos = {state.bomb_x[b], state.bomb_y[b]};
+        bool has_task = bomb_tasks[b].target_wall.x != -1;
+        int curr_dist = has_task ? b_dist[b][bomb_pos.y][bomb_pos.x] : -1;
+
+        for (uint8_t d = 0; d < 4 && candidate_count < 32; ++d) {
+            point stand = bomb_pos - MOVE[d];
+            if (is_overstep(stand) || bfs_visited_gen[stand.y][stand.x] != current_gen) continue;
+
+            point next = bomb_pos + MOVE[d];
+            if (is_overstep(next) || is_solid(next, state.blown_mask)) continue;
+            if (occupancy.cell[next.y][next.x] != NodeOccupancy::EMPTY) continue;
+
+            int progress_bonus = 0;
+            if (has_task && curr_dist > 0) {
+                int next_dist = b_dist[b][next.y][next.x];
+                if (next_dist >= 0 && next_dist < curr_dist) {
+                    progress_bonus = (curr_dist - next_dist) * 18 + 12;
+                }
+            }
+
+            point final_player = bomb_pos;
+            int unlock = bomb_unlock_score(b, next, final_player);
+            if (unlock <= 0 && progress_bonus <= 0) continue;
+
+            int sort_key = bomb_bias / 2 + 16 - unlock * 5 - progress_bonus * 4;
+            if (!has_task) sort_key += 24;
+            push_candidate(
+                MixedMacroKind::BOMB_PROGRESS,
+                b,
+                0,
+                255,
+                next,
+                sort_key);
+            ++bomb_progress_count;
+        }
+    }
+
+    for (int i = 1; i < candidate_count; ++i) {
+        MixedMacroCandidate key = candidates[i];
+        int j = i - 1;
+        while (j >= 0 && candidates[j].sort_key > key.sort_key) {
+            candidates[j + 1] = candidates[j];
+            --j;
+        }
+        candidates[j + 1] = key;
+    }
+
+    auto try_candidate = [&](const MixedMacroCandidate& cand) {
+        if (cand.kind == MixedMacroKind::BOMB_FULL) {
+            uint8_t b = cand.bomb_idx;
+            StaticArray<point, MAX_PATH_LENGTH> bomb_path;
+            if (!build_bomb_macro_path(state, b, bomb_path)) return false;
+            if (bomb_path.empty()) return false;
+
+            StaticArray<point, MAX_PATH_LENGTH> next_path = path;
+            if (!append_segment(next_path, bomb_path)) return false;
+            if (next_path.size() >= best_len) return false;
+
+            BombTask task = bomb_tasks[b];
+            task.bomb_start = {state.bomb_x[b], state.bomb_y[b]};
+            GameState next_state;
+            if (!build_bomb_task_successor_state(state, b, task, bomb_path.back(), next_state)) return false;
+
+            return search_mixed_small_entity_macro(
+                next_state,
+                depth + 1,
+                node_budget,
+                visited_hashes,
+                next_path,
+                best_path,
+                best_len);
+        }
+
+        if (cand.kind == MixedMacroKind::BOMB_PROGRESS) {
+            uint8_t b = cand.bomb_idx;
+            point bomb_start = {state.bomb_x[b], state.bomb_y[b]};
+            if (cand.waypoint == bomb_start) return false;
+
+            SokobanLevel level;
+            build_level_from_state(state, level);
+            BombTask task = bomb_tasks[b];
+            task.bomb_start = bomb_start;
+            task.target_wall = cand.waypoint;
+            task.box_pushes.clear();
+
+            StaticArray<point, MAX_PATH_LENGTH> segment;
+            if (!PlanningCommon::get_bomb_push_path(level, state.player, task, segment)) return false;
+            if (segment.empty()) return false;
+
+            StaticArray<point, MAX_PATH_LENGTH> next_path = path;
+            if (!append_segment(next_path, segment)) return false;
+            if (next_path.size() >= best_len) return false;
+
+            GameState next_state = state;
+            point final_player = segment.back();
+            next_state.player = final_player;
+            next_state.bomb_x[b] = cand.waypoint.x;
+            next_state.bomb_y[b] = cand.waypoint.y;
+
+            uint32_t new_hash = state.hash;
+            new_hash ^= ZOBRIST_PLAYER[state.player.y][state.player.x];
+            new_hash ^= ZOBRIST_PLAYER[final_player.y][final_player.x];
+            new_hash ^= ZOBRIST_BOMB[b][bomb_start.y][bomb_start.x];
+            new_hash ^= ZOBRIST_BOMB[b][cand.waypoint.y][cand.waypoint.x];
+            next_state.hash = new_hash;
+
+            return search_mixed_small_entity_macro(
+                next_state,
+                depth + 1,
+                node_budget,
+                visited_hashes,
+                next_path,
+                best_path,
+                best_len);
+        }
+
+        if (cand.kind == MixedMacroKind::BOX_PROGRESS) {
+            uint8_t box_idx = cand.box_idx;
+            if (box_idx >= state.num_boxes) return false;
+            uint8_t sem = state.box_semantics[box_idx];
+            point box_start = {state.box_x[box_idx], state.box_y[box_idx]};
+            if (box_start == cand.waypoint) return false;
+
+            SokobanLevel level_before;
+            build_level_from_state(state, level_before);
+            int moving_level_idx = -1;
+            for (int b = 0; b < level_before.box_count; ++b) {
+                if (level_before.boxes[b] == box_start && level_before.box_semantics[b] == sem) {
+                    moving_level_idx = b;
+                    break;
+                }
+            }
+            if (moving_level_idx == -1) return false;
+
+            SokobanLevel level = level_before;
+            point next_player = state.player;
+            StaticArray<point, MAX_PATH_LENGTH> next_path = path;
+            BoxPushTask task{box_start, cand.waypoint};
+            if (!PlanningCommon::append_box_push_path(level, next_player, task, next_path)) return false;
+            if (next_path.size() >= best_len) return false;
+            if (!validate_box_progress_segment(
+                    level_before,
+                    state.player,
+                    moving_level_idx,
+                    sem,
+                    state.target_mask,
+                    path,
+                    next_path)) {
+                return false;
+            }
+
+            GameState next_state;
+            if (!build_box_macro_successor_state(
+                    state,
+                    box_idx,
+                    cand.waypoint,
+                    -1,
+                    next_player,
+                    next_state)) {
+                return false;
+            }
+
+            return search_mixed_small_entity_macro(
+                next_state,
+                depth + 1,
+                node_budget,
+                visited_hashes,
+                next_path,
+                best_path,
+                best_len);
+        }
+
+        uint8_t box_idx = cand.box_idx;
+        if (box_idx >= state.num_boxes) return false;
+        uint8_t sem = state.box_semantics[box_idx];
+        point box_start = {state.box_x[box_idx], state.box_y[box_idx]};
+        point box_target = initial_targets[cand.target_idx];
+
+        SokobanLevel level_before;
+        build_level_from_state(state, level_before);
+        int moving_level_idx = -1;
+        for (int b = 0; b < level_before.box_count; ++b) {
+            if (level_before.boxes[b] == box_start && level_before.box_semantics[b] == sem) {
+                moving_level_idx = b;
+                break;
+            }
+        }
+        if (moving_level_idx == -1) return false;
+
+        SokobanLevel level = level_before;
+        point next_player = state.player;
+        StaticArray<point, MAX_PATH_LENGTH> next_path = path;
+        BoxPushTask task{box_start, box_target};
+        if (!PlanningCommon::append_box_push_path(level, next_player, task, next_path)) return false;
+        if (next_path.size() >= best_len) return false;
+
+        uint16_t target_bit = static_cast<uint16_t>(1U << cand.target_idx);
+        if (!validate_box_macro_segment(
+                level_before,
+                state.player,
+                moving_level_idx,
+                sem,
+                state.target_mask,
+                target_bit,
+                path,
+                next_path)) {
+            return false;
+        }
+
+        GameState next_state;
+        if (!build_box_macro_successor_state(
+                state,
+                box_idx,
+                box_target,
+                cand.target_idx,
+                next_player,
+                next_state)) {
+            return false;
+        }
+
+        return search_mixed_small_entity_macro(
+            next_state,
+            depth + 1,
+            node_budget,
+            visited_hashes,
+            next_path,
+            best_path,
+            best_len);
+    };
+
+    auto run_group = [&](MixedMacroKind kind, int limit) {
+        int tried = 0;
+        for (int ci = 0; ci < candidate_count; ++ci) {
+            if (candidates[ci].kind != kind) continue;
+            if (tried >= limit) break;
+            ++tried;
+            if (try_candidate(candidates[ci])) return true;
+        }
+        return false;
+    };
+
+    if (progress_count > 0) {
+        if (run_group(MixedMacroKind::BOX_PROGRESS, SokobanConfig::MIXED_MACRO_BOX_PROGRESS_LIMIT)) {
+            return true;
+        }
+        if (run_group(MixedMacroKind::BOMB_PROGRESS, SokobanConfig::MIXED_MACRO_BOMB_PROGRESS_LIMIT)) {
+            return true;
+        }
+        if (run_group(MixedMacroKind::BOX_FINISH, SokobanConfig::MIXED_MACRO_BOX_FINISH_LIMIT)) {
+            return true;
+        }
+        if (run_group(MixedMacroKind::BOMB_FULL, MAX_NODE_MACROS)) {
+            return true;
+        }
+    } else if (box_phase_first) {
+        if (run_group(MixedMacroKind::BOX_FINISH, SokobanConfig::MIXED_MACRO_BOX_FINISH_LIMIT)) {
+            return true;
+        }
+        if (run_group(MixedMacroKind::BOMB_FULL, MAX_NODE_MACROS)) {
+            return true;
+        }
+        if (run_group(MixedMacroKind::BOMB_PROGRESS, SokobanConfig::MIXED_MACRO_BOMB_PROGRESS_LIMIT)) {
+            return true;
+        }
+    } else {
+        if (run_group(MixedMacroKind::BOMB_FULL, MAX_NODE_MACROS)) {
+            return true;
+        }
+        if (run_group(MixedMacroKind::BOMB_PROGRESS, SokobanConfig::MIXED_MACRO_BOMB_PROGRESS_LIMIT)) {
+            return true;
+        }
+        if (run_group(MixedMacroKind::BOX_FINISH, SokobanConfig::MIXED_MACRO_BOX_FINISH_LIMIT)) {
+            return true;
+        }
+    }
+
+    store_mixed_macro_transposition(mixed_hash, static_cast<int>(path.size()));
+    return false;
+}
+
+bool Sokoban::try_small_box_macro_solution_from_state(
+    const GameState& state,
+    StaticArray<point, MAX_PATH_LENGTH>& out_path) const {
+    out_path.clear();
+
+    if (state.num_boxes == 0) {
+        out_path.push_back(state.player);
+        return true;
+    }
+    if (state.num_boxes > SokobanConfig::SMALL_BOX_MACRO_MAX_BOXES) return false;
+    if (count_active_bomb_tasks(state) != 0) return false;
+
+    int macro_cost_lb = 0;
+    for (int i = 0; i < state.num_boxes; ++i) {
+        uint8_t sem = state.box_semantics[i];
+        uint16_t candidates = static_cast<uint16_t>(state.target_mask & target_semantic_mask[sem]);
+        if (candidates == 0) return false;
+
+        int best_pair_cost = 9999;
+        int y = state.box_y[i];
+        int x = state.box_x[i];
+        for (uint16_t mask = candidates; mask != 0; mask = static_cast<uint16_t>(mask & (mask - 1))) {
+            uint16_t bit = static_cast<uint16_t>(mask & -mask);
+            uint8_t target_idx = static_cast<uint8_t>(__builtin_ctz(static_cast<unsigned int>(bit)));
+            if (t_dist[target_idx][y][x] == -1) continue;
+            if (box_target_cost[target_idx][y][x] == 255) continue;
+            if (box_target_cost[target_idx][y][x] < best_pair_cost) {
+                best_pair_cost = box_target_cost[target_idx][y][x];
+            }
+        }
+        if (best_pair_cost == 9999) return false;
+        macro_cost_lb += best_pair_cost;
+    }
+    if (macro_cost_lb < SokobanConfig::SMALL_BOX_MACRO_MIN_COST_LB) return false;
+
+    SokobanLevel root_level;
+    build_level_from_state(state, root_level);
+
+    bool used[MAX_BOXES] = {};
+    StaticArray<point, MAX_PATH_LENGTH> candidate_path;
+    StaticArray<point, MAX_PATH_LENGTH> best_path;
+    int best_len = MAX_PATH_LENGTH;
+
+    if (!search_small_box_macro_order(
+            0,
+            state,
+            state.num_boxes,
+            state.target_mask,
+            used,
+            root_level,
+            state.player,
+            candidate_path,
+            best_path,
+            best_len)) {
+        return false;
+    }
+
+    out_path.push_back(state.player);
+    for (int i = 0; i < best_path.size(); ++i) {
+        out_path.push_back(best_path[i]);
+    }
+    if (&state == &initial_state) {
+        if (!validate_macro_solution_path(out_path)) {
+            out_path.clear();
+            return false;
+        }
+    }
+    return true;
+}
+
 uint8_t Sokoban::infer_final_bomb_push_dir(point final_player, point target_wall) const {
     for (uint8_t d = 0; d < 4; ++d) {
         if (final_player + MOVE[d] == target_wall) return d;
@@ -951,7 +3601,6 @@ bool Sokoban::build_bomb_macro_path(
 
     BombTask task = bomb_tasks[bomb_idx];
     task.bomb_start = {state.bomb_x[bomb_idx], state.bomb_y[bomb_idx]};
-    task.box_pushes.clear();
 
     if (!PlanningCommon::get_bomb_push_path(macro_level, state.player, task, out_path)) return false;
     if (out_path.empty() || out_path.size() > SokobanConfig::BOMB_MACRO_MAX_PATH) return false;
@@ -960,8 +3609,87 @@ bool Sokoban::build_bomb_macro_path(
     return infer_final_bomb_push_dir(final_player, task.target_wall) < 4;
 }
 
+bool Sokoban::build_bomb_task_successor_state(
+    const GameState& state,
+    int bomb_idx,
+    const BombTask& task,
+    point final_player,
+    GameState& out_state) const {
+    out_state = state;
+
+    int8_t box_x[MAX_BOXES];
+    int8_t box_y[MAX_BOXES];
+    uint8_t box_sem[MAX_BOXES];
+    int box_count = state.num_boxes;
+    uint16_t target_mask = state.target_mask;
+
+    for (int i = 0; i < box_count; ++i) {
+        box_x[i] = state.box_x[i];
+        box_y[i] = state.box_y[i];
+        box_sem[i] = state.box_semantics[i];
+    }
+
+    auto finish_target_for_box = [&](uint8_t sem, point p) {
+        uint16_t candidates = static_cast<uint16_t>(target_mask & target_cell_mask[sem][p.y][p.x]);
+        if (candidates == 0) return -1;
+        return __builtin_ctz(static_cast<unsigned int>(candidates));
+    };
+
+    for (int i = 0; i < task.box_pushes.size(); ++i) {
+        const BoxPushTask& bp = task.box_pushes[i];
+        int moving = -1;
+        for (int b = 0; b < box_count; ++b) {
+            if (box_x[b] == bp.box_start.x && box_y[b] == bp.box_start.y) {
+                moving = b;
+                break;
+            }
+        }
+        if (moving == -1) return false;
+
+        box_x[moving] = bp.box_target.x;
+        box_y[moving] = bp.box_target.y;
+
+        int t_idx = finish_target_for_box(box_sem[moving], bp.box_target);
+        if (t_idx != -1) {
+            target_mask = static_cast<uint16_t>(target_mask & ~(1U << t_idx));
+            for (int b = moving + 1; b < box_count; ++b) {
+                box_x[b - 1] = box_x[b];
+                box_y[b - 1] = box_y[b];
+                box_sem[b - 1] = box_sem[b];
+            }
+            --box_count;
+        }
+    }
+
+    out_state.num_boxes = static_cast<uint8_t>(box_count);
+    out_state.target_mask = target_mask;
+    for (int i = 0; i < box_count; ++i) {
+        out_state.box_x[i] = box_x[i];
+        out_state.box_y[i] = box_y[i];
+        out_state.box_semantics[i] = box_sem[i];
+    }
+    out_state.player = final_player;
+    out_state.blown_mask = static_cast<uint8_t>(state.blown_mask | (1 << bomb_idx));
+    out_state.hash = compute_hash(out_state);
+    return true;
+}
+
+/// \brief 生成“直接把炸弹推到目标墙并引爆”的宏动作候选
+/// \param state 当前搜索状态
+/// \param occupancy 当前节点的箱子/炸弹占用表，用于动态通道预筛
+/// \param h_before 执行宏动作前的启发式值，用于动作排序
+/// \param active_entities 当前仍需处理的箱子与炸弹任务总数
+/// \param g 当前已消耗代价
+/// \param threshold 当前 IDA* 阈值
+/// \param macros 输出候选宏动作数组
+/// \return 实际写入 macros 的候选数量
+///
+/// \details
+/// 宏动作只作为额外候选参与排序；普通逐格推炸弹动作仍然保留，因此不会改变可达解空间。
+/// 这里先用静态乐观下界和动态占用通道做预筛，避免大量明显会失败的 exact 宏路径规划。
 int Sokoban::generate_bomb_macros(
     const GameState& state,
+    const NodeOccupancy& occupancy,
     int h_before,
     int active_entities,
     int g,
@@ -969,6 +3697,7 @@ int Sokoban::generate_bomb_macros(
     MacroMove macros[MAX_NODE_MACROS]) const {
     if constexpr (!SokobanConfig::ENABLE_BOMB_MACRO) {
         (void)state;
+        (void)occupancy;
         (void)h_before;
         (void)active_entities;
         (void)g;
@@ -978,12 +3707,58 @@ int Sokoban::generate_bomb_macros(
     }
 
     int count = 0;
-    auto prerequisites_pending = [&](uint8_t bomb_idx) {
-        const BombTask& task = bomb_tasks[bomb_idx];
-        for (int p = 0; p < task.box_pushes.size(); ++p) {
-            point blocker = task.box_pushes[p].box_start;
-            for (int i = 0; i < state.num_boxes; ++i) {
-                if (state.box_x[i] == blocker.x && state.box_y[i] == blocker.y) return true;
+    // 炸弹自身能经过的格子：允许走到目标墙触发爆炸，允许占用当前这颗炸弹的位置，
+    // 但不能穿过箱子、其他炸弹和未炸开的实体墙。
+    auto bomb_cell_passable = [&](uint8_t bomb_idx, point p) {
+        if (is_overstep(p)) return false;
+        if (p == bomb_tasks[bomb_idx].target_wall) return true;
+        if (is_solid(p, state.blown_mask)) return false;
+        int8_t occ = occupancy.cell[p.y][p.x];
+        if (occ >= 0 && occ < NodeOccupancy::BOMB_BASE) return false;
+        return occ == NodeOccupancy::EMPTY || occ == NodeOccupancy::BOMB_BASE + bomb_idx;
+    };
+
+    // 玩家换边站位必须是真正空格；同样允许忽略当前正在推动的那颗炸弹。
+    auto stand_cell_passable = [&](uint8_t bomb_idx, point p) {
+        if (is_overstep(p) || is_solid(p, state.blown_mask)) return false;
+        int8_t occ = occupancy.cell[p.y][p.x];
+        if (occ >= 0 && occ < NodeOccupancy::BOMB_BASE) return false;
+        return occ == NodeOccupancy::EMPTY || occ == NodeOccupancy::BOMB_BASE + bomb_idx;
+    };
+
+    // 动态通道预筛：只证明“在当前箱子/炸弹占用下，炸弹状态图里是否还存在一条通路”。
+    // 它不估计真实路径代价，也不替代 exact 路径规划；失败时才安全地跳过 expensive 检查。
+    auto has_dynamic_bomb_corridor_path = [&](uint8_t bomb_idx, point bomb_pos, uint8_t start_dir_mask) {
+        uint8_t visited[MAP_MAX_HEIGHT][MAP_MAX_WIDTH] = {};
+        struct BombDirNode { int8_t x; int8_t y; uint8_t dir; };
+        BombDirNode q[MAP_CELL_COUNT * 4];
+        int head = 0, tail = 0;
+
+        for (uint8_t d = 0; d < 4; ++d) {
+            if ((start_dir_mask & (1 << d)) == 0) continue;
+            visited[bomb_pos.y][bomb_pos.x] |= static_cast<uint8_t>(1 << d);
+            q[tail++] = {bomb_pos.x, bomb_pos.y, d};
+        }
+
+        while (head < tail) {
+            BombDirNode curr = q[head++];
+            point pos = {curr.x, curr.y};
+            point next = pos + MOVE[curr.dir];
+            if (next == bomb_tasks[bomb_idx].target_wall) return true;
+            if (bomb_cell_passable(bomb_idx, next) && b_dist[bomb_idx][next.y][next.x] != -1) {
+                if ((visited[next.y][next.x] & (1 << curr.dir)) == 0) {
+                    visited[next.y][next.x] |= static_cast<uint8_t>(1 << curr.dir);
+                    q[tail++] = {next.x, next.y, curr.dir};
+                }
+            }
+
+            for (uint8_t nd = 0; nd < 4; ++nd) {
+                if (nd == curr.dir) continue;
+                if ((visited[pos.y][pos.x] & (1 << nd)) != 0) continue;
+                point stand = pos - MOVE[nd];
+                if (!stand_cell_passable(bomb_idx, stand)) continue;
+                visited[pos.y][pos.x] |= static_cast<uint8_t>(1 << nd);
+                q[tail++] = {pos.x, pos.y, nd};
             }
         }
         return false;
@@ -992,27 +3767,42 @@ int Sokoban::generate_bomb_macros(
     for (uint8_t b = 0; b < state.num_bombs && count < MAX_NODE_MACROS; ++b) {
         if (state.blown_mask & (1 << b)) continue;
         if (bomb_tasks[b].target_wall.x == -1) continue;
-        if (prerequisites_pending(b)) continue;
 
         point bomb_pos = {state.bomb_x[b], state.bomb_y[b]};
+        bool has_clear_tasks = !bomb_tasks[b].box_pushes.empty();
+        int direct_lb = b_dist[b][bomb_pos.y][bomb_pos.x];
+        bool bomb_committed = bomb_pos != bomb_tasks[b].bomb_start && direct_lb >= 0 && direct_lb <= 4;
         int macro_path_lb = 9999;
+        uint8_t start_dir_mask = 0;
         for (uint8_t d = 0; d < 4; ++d) {
             uint8_t cost_from_ready = b_macro_cost[b][bomb_pos.y][bomb_pos.x][d];
             if (cost_from_ready == 255) continue;
             point stand = bomb_pos - MOVE[d];
-            if (is_overstep(stand) || bfs_visited_gen[stand.y][stand.x] != current_gen) continue;
-            int walk = bfs_dist[stand.y][stand.x];
-            int cand = walk + cost_from_ready;
+            int walk = 0;
+            if (!has_clear_tasks) {
+                if (is_overstep(stand) || bfs_visited_gen[stand.y][stand.x] != current_gen) continue;
+                start_dir_mask = static_cast<uint8_t>(start_dir_mask | (1 << d));
+                walk = bfs_dist[stand.y][stand.x];
+            }
+            int cand = walk + cost_from_ready + static_cast<int>(bomb_tasks[b].box_pushes.size()) * 2;
             if (cand < macro_path_lb) macro_path_lb = cand;
         }
         if (macro_path_lb == 9999) continue;
 
-        GameState optimistic_after = state;
-        optimistic_after.blown_mask = static_cast<uint8_t>(state.blown_mask | (1 << b));
         int h_after_lb = 9999;
         for (uint8_t d = 0; d < 4; ++d) {
             point final_player = bomb_tasks[b].target_wall - MOVE[d];
-            if (is_overstep(final_player) || is_solid(final_player, optimistic_after.blown_mask)) continue;
+            uint8_t after_mask = static_cast<uint8_t>(state.blown_mask | (1 << b));
+            if (is_overstep(final_player) || is_solid(final_player, after_mask)) continue;
+            GameState optimistic_after;
+            if (!build_bomb_task_successor_state(
+                    state,
+                    b,
+                    bomb_tasks[b],
+                    final_player,
+                    optimistic_after)) {
+                continue;
+            }
             optimistic_after.player = final_player;
             int h_candidate = get_heuristic(optimistic_after);
             if (h_candidate < h_after_lb) h_after_lb = h_candidate;
@@ -1023,45 +3813,28 @@ int Sokoban::generate_bomb_macros(
         int optimistic_f = g + macro_path_lb +
                            (h_after_lb * heuristic_weight_num(active_after)) /
                                 SokobanConfig::HEURISTIC_WEIGHT_DEN;
-        optimistic_f += SokobanConfig::BOMB_MACRO_THRESHOLD_MARGIN;
-        if (optimistic_f > threshold) continue;
-
-        StaticArray<point, MAX_PATH_LENGTH> macro_path;
-        if (!build_bomb_macro_path(state, b, macro_path)) continue;
-
-        point final_player = macro_path.back();
-        uint8_t final_dir = infer_final_bomb_push_dir(final_player, bomb_tasks[b].target_wall);
-        if (final_dir >= 4) continue;
+        if (bomb_committed) {
+            if (g + macro_path_lb > threshold) continue;
+        } else {
+            optimistic_f += SokobanConfig::BOMB_MACRO_THRESHOLD_MARGIN;
+            if (optimistic_f > threshold) continue;
+        }
+        if (!has_clear_tasks && !has_dynamic_bomb_corridor_path(b, bomb_pos, start_dir_mask)) continue;
 
         MacroMove& mv = macros[count];
         mv.bomb_idx = b;
         mv.entity_idx = static_cast<uint8_t>(state.num_boxes + b);
-        mv.final_push_dir = final_dir;
-        mv.path_cost = static_cast<uint16_t>(macro_path.size());
+        mv.final_push_dir = 4;
+        mv.path_cost = static_cast<uint16_t>(macro_path_lb > 65535 ? 65535 : macro_path_lb);
         mv.next_state = state;
-        mv.next_state.player = final_player;
-        mv.next_state.blown_mask = static_cast<uint8_t>(state.blown_mask | (1 << b));
 
-        uint32_t new_hash = state.hash;
-        new_hash ^= ZOBRIST_PLAYER[state.player.y][state.player.x];
-        new_hash ^= ZOBRIST_PLAYER[final_player.y][final_player.x];
-        new_hash ^= ZOBRIST_BLOWN_MASK[state.blown_mask];
-        new_hash ^= ZOBRIST_BLOWN_MASK[mv.next_state.blown_mask];
-        new_hash ^= ZOBRIST_BOMB[b][state.bomb_y[b]][state.bomb_x[b]];
-        mv.next_state.hash = new_hash;
-
-        int h_after = get_heuristic(mv.next_state);
-        if (h_after >= 9999) continue;
-        int macro_f = g + mv.path_cost +
-                      (h_after * heuristic_weight_num(active_after)) /
-                            SokobanConfig::HEURISTIC_WEIGHT_DEN;
-        if (macro_f > threshold) continue;
-
-        int benefit = h_before - h_after;
-        int sort_key = static_cast<int>(mv.path_cost) * 10 -
-                       benefit * heuristic_weight_num(active_entities) - 120;
-        int direct_lb = b_dist[b][state.bomb_y[b]][state.bomb_x[b]];
+        int benefit = h_before - h_after_lb;
+        if (benefit < SokobanConfig::BOMB_MACRO_MIN_BENEFIT) continue;
+        int sort_key = macro_path_lb * 10 -
+                       benefit * heuristic_weight_num(active_entities) -
+                       SokobanConfig::BOMB_MACRO_SORT_BONUS;
         if (direct_lb >= 0 && direct_lb <= 3) sort_key -= (4 - direct_lb) * 35;
+        if (bomb_committed) sort_key -= 520;
         if (bomb_tasks[b].is_essential) sort_key -= 50;
         if (sort_key < -32000) sort_key = -32000;
         if (sort_key > 32000) sort_key = 32000;
@@ -1119,7 +3892,7 @@ bool Sokoban::append_optimized_walk_segment(
         bool used;
     };
 
-    static Node nodes[MAP_MAX_HEIGHT][MAP_MAX_WIDTH][4];
+    OCRAM_BSS static Node nodes[MAP_MAX_HEIGHT][MAP_MAX_WIDTH][4];
     for (int y = 0; y < MAP_MAX_HEIGHT; ++y) {
         for (int x = 0; x < MAP_MAX_WIDTH; ++x) {
             for (int d = 0; d < 4; ++d) {
@@ -1253,8 +4026,14 @@ void Sokoban::optimize_final_path_turns() {
             optimized.push_back(final_path[i]);
             prev_dir = push_dir;
             if (movable_is_bomb) {
-                state.bomb_x[movable_idx] = push_to.x;
-                state.bomb_y[movable_idx] = push_to.y;
+                if (is_solid(push_to, state.blown_mask) &&
+                    bomb_tasks[movable_idx].target_wall == push_to) {
+                    // 后处理复盘必须同步爆破 mask，否则后续行走段仍按旧墙体规划
+                    state.blown_mask = static_cast<uint8_t>(state.blown_mask | (1 << movable_idx));
+                } else {
+                    state.bomb_x[movable_idx] = push_to.x;
+                    state.bomb_y[movable_idx] = push_to.y;
+                }
             } else {
                 int t_idx = find_active_target_index(state, state.target_mask, push_to, movable_idx);
                 bool box_finished = t_idx != -1;
@@ -1496,9 +4275,10 @@ int Sokoban::task_route_walk_lower_bound(
 
 int Sokoban::nearest_active_target_distance(const GameState& state, uint8_t semantic_id, point box_pos) const {
     int best = 9999;
-    for (size_t t = 0; t < initial_targets.size(); ++t) {
-        if ((state.target_mask & (1U << t)) == 0) continue;
-        if (target_semantics[t] != semantic_id) continue;
+    uint16_t candidates = static_cast<uint16_t>(state.target_mask & target_semantic_mask[semantic_id]);
+    for (uint16_t mask = candidates; mask != 0; mask = static_cast<uint16_t>(mask & (mask - 1))) {
+        uint16_t bit = static_cast<uint16_t>(mask & -mask);
+        int t = __builtin_ctz(static_cast<unsigned int>(bit));
         int d = t_dist[t][box_pos.y][box_pos.x];
         if (d >= 0 && d < best) best = d;
     }
@@ -1515,37 +4295,119 @@ int Sokoban::nearest_active_target_distance(const GameState& state, uint8_t sema
 int Sokoban::get_heuristic(const GameState& state) const {
     if (state.num_boxes == 0) return 0; 
 
+    bool use_box_target_cost_lb = false;
+    if constexpr (SokobanConfig::ENABLE_BOX_TARGET_COST_LB) {
+        use_box_target_cost_lb =
+            force_box_target_cost_lb ||
+            strict_cost_search ||
+            current_threshold_iteration >= SokobanConfig::BOX_TARGET_COST_MIN_ITERATION;
+    }
+    auto target_cost = [&](int target_idx, int y, int x) {
+        if (use_box_target_cost_lb) {
+            int cost = box_target_cost[target_idx][y][x];
+            return cost == 255 ? 9999 : cost;
+        }
+        int dist = t_dist[target_idx][y][x];
+        return dist == -1 ? 9999 : dist;
+    };
+
     point starts[MAX_BOXES + MAX_BOMBS];
     point ends[MAX_BOXES + MAX_BOMBS];
     int task_count = 0;
     int sum_push = 0;
+    uint8_t box_count_by_sem[10] = {};
+    uint8_t first_box_by_sem[10];
+    bool processed_sem[10] = {};
 
-    for (uint8_t sem = 0; sem < 10; ++sem) {
-        int box_idx[MAX_BOXES];
-        int target_idx[MAX_BOXES];
-        int n = 0;
-        int m = 0;
+    for (uint8_t sem = 0; sem < 10; ++sem) first_box_by_sem[sem] = 255;
+    for (uint8_t i = 0; i < state.num_boxes; ++i) {
+        uint8_t sem = state.box_semantics[i];
+        if (first_box_by_sem[sem] == 255) first_box_by_sem[sem] = i;
+        ++box_count_by_sem[sem];
+    }
 
-        for (int i = 0; i < state.num_boxes; ++i) {
-            if (state.box_semantics[i] == sem) box_idx[n++] = i;
-        }
-        if (n == 0) continue;
+    for (uint8_t seed = 0; seed < state.num_boxes; ++seed) {
+        uint8_t sem = state.box_semantics[seed];
+        if (processed_sem[sem]) continue;
+        processed_sem[sem] = true;
 
-        for (size_t t = 0; t < initial_targets.size(); ++t) {
-            if ((state.target_mask & (1U << t)) && target_semantics[t] == sem) {
-                target_idx[m++] = static_cast<int>(t);
-            }
-        }
+        int n = box_count_by_sem[sem];
+        uint16_t sem_targets = static_cast<uint16_t>(state.target_mask & target_semantic_mask[sem]);
+        int m = __builtin_popcount(static_cast<unsigned int>(sem_targets));
         if (m != n) return 9999;
 
+        if (n == 1) {
+            int b = first_box_by_sem[sem];
+            int t = __builtin_ctz(static_cast<unsigned int>(sem_targets));
+            int dist = target_cost(t, state.box_y[b], state.box_x[b]);
+            if (dist >= 9999) return 9999;
+            sum_push += dist;
+            starts[task_count] = {state.box_x[b], state.box_y[b]};
+            ends[task_count] = initial_targets[t];
+            task_count++;
+            continue;
+        }
+
+        int box_idx[MAX_BOXES];
+        int target_idx[MAX_BOXES];
+        int bi = 0;
+        for (int i = 0; i < state.num_boxes; ++i) {
+            if (state.box_semantics[i] == sem) box_idx[bi++] = i;
+        }
+        int ti = 0;
+        for (uint16_t mask = sem_targets; mask != 0; mask = static_cast<uint16_t>(mask & (mask - 1))) {
+            uint16_t bit = static_cast<uint16_t>(mask & -mask);
+            target_idx[ti++] = __builtin_ctz(static_cast<unsigned int>(bit));
+        }
+
+        if (n == 2) {
+            int b0 = box_idx[0];
+            int b1 = box_idx[1];
+            int t0 = target_idx[0];
+            int t1 = target_idx[1];
+            int d00 = target_cost(t0, state.box_y[b0], state.box_x[b0]);
+            int d01 = target_cost(t1, state.box_y[b0], state.box_x[b0]);
+            int d10 = target_cost(t0, state.box_y[b1], state.box_x[b1]);
+            int d11 = target_cost(t1, state.box_y[b1], state.box_x[b1]);
+            int c0 = (d00 >= 9999 || d11 >= 9999) ? 9999 : d00 + d11;
+            int c1 = (d01 >= 9999 || d10 >= 9999) ? 9999 : d01 + d10;
+            int min_h = (c0 < c1) ? c0 : c1;
+            if (min_h >= 9999) return 9999;
+            sum_push += min_h;
+
+            for (int i = 0; i < 2; ++i) {
+                int b = box_idx[i];
+                int best_target = target_idx[0];
+                int best_dist = target_cost(best_target, state.box_y[b], state.box_x[b]);
+                int alt_target = target_idx[1];
+                int alt_dist = target_cost(alt_target, state.box_y[b], state.box_x[b]);
+                if (best_dist >= 9999 || (alt_dist < best_dist)) {
+                    best_dist = alt_dist;
+                    best_target = alt_target;
+                }
+                starts[task_count] = {state.box_x[b], state.box_y[b]};
+                ends[task_count] = initial_targets[best_target];
+                task_count++;
+            }
+            continue;
+        }
+
         int cost_matrix[MAX_BOXES][MAX_BOXES];
+        int best_target_for_box[MAX_BOXES];
         for (int i = 0; i < n; ++i) {
             int b = box_idx[i];
+            int best_target = target_idx[0];
+            int best_dist = 9999;
             for (int j = 0; j < n; ++j) {
                 int t = target_idx[j];
-                int dist = t_dist[t][state.box_y[b]][state.box_x[b]];
-                cost_matrix[i][j] = (dist == -1) ? 9999 : dist;
+                int dist = target_cost(t, state.box_y[b], state.box_x[b]);
+                cost_matrix[i][j] = dist;
+                if (dist < best_dist) {
+                    best_dist = dist;
+                    best_target = t;
+                }
             }
+            best_target_for_box[i] = best_target;
         }
 
         int min_h = min_weight_assignment<MAX_BOXES>(cost_matrix, n);
@@ -1555,17 +4417,7 @@ int Sokoban::get_heuristic(const GameState& state) const {
         for (int i = 0; i < n; ++i) {
             int b = box_idx[i];
             starts[task_count] = {state.box_x[b], state.box_y[b]};
-            int best_target = target_idx[0];
-            int best_dist = 9999;
-            for (int j = 0; j < m; ++j) {
-                int t = target_idx[j];
-                int dist = t_dist[t][state.box_y[b]][state.box_x[b]];
-                if (dist >= 0 && dist < best_dist) {
-                    best_dist = dist;
-                    best_target = t;
-                }
-            }
-            ends[task_count] = initial_targets[best_target];
+            ends[task_count] = initial_targets[best_target_for_box[i]];
             task_count++;
         }
     }
@@ -1605,6 +4457,22 @@ void Sokoban::init_zobrist() {
     for (int i = 0; i < MAX_BOXES; ++i) ZOBRIST_TARGET[i] = xorshift32();
 }
 
+/// \brief 预计算不同炸墙状态下的实体墙占用表
+///
+/// \details
+/// blown_mask 会让部分墙在搜索中变为空地。把“墙是否仍然阻挡”提前展开成小表，
+/// 可让热路径里的 is_solid 只做边界检查和一次数组读取。
+void Sokoban::precompute_solid_masks() {
+    for (uint8_t mask = 0; mask < (1 << MAX_BOMBS); ++mask) {
+        for (int y = 0; y < MAP_MAX_HEIGHT; ++y) {
+            for (int x = 0; x < MAP_MAX_WIDTH; ++x) {
+                solid_mask[mask][y][x] =
+                    (map[y][x] == 1 && (wall_clear_mask[y][x] & mask) == 0) ? 1 : 0;
+            }
+        }
+    }
+}
+
 /// \brief 预计算箱子到各目标点的反向推动距离场
 ///
 /// \details
@@ -1615,20 +4483,20 @@ void Sokoban::precompute_target_distances() {
     uint8_t all_blown_mask = (1 << num_bomb_tasks) - 1; 
 
     for (size_t i = 0; i < initial_targets.size(); ++i) {
-            point start = initial_targets[i];
-            point q[MAP_CELL_COUNT];
-            int head = 0, tail = 0;
+        point start = initial_targets[i];
+        point q[MAP_CELL_COUNT];
+        int head = 0, tail = 0;
             
-            q[tail++] = start;
-            t_dist[i][start.y][start.x] = 0; 
+        q[tail++] = start;
+        t_dist[i][start.y][start.x] = 0; 
             
-            while (head < tail) {
-                point curr = q[head++];
-                int dist = t_dist[i][curr.y][curr.x];
+        while (head < tail) {
+            point curr = q[head++];
+            int dist = t_dist[i][curr.y][curr.x];
 
             for (int dir = 0; dir < 4; ++dir) {
                 point box_prev = curr - MOVE[dir];
-                point player_prev = curr - MOVE[dir] - MOVE[dir];  // 反向推导时玩家需要站立的位置。
+                point player_prev = curr - MOVE[dir] - MOVE[dir];
                 
                 if (is_overstep(box_prev) || is_overstep(player_prev)) continue;
 
@@ -1650,6 +4518,7 @@ void Sokoban::precompute_target_distances() {
 /// 结果写入 relaxed_walk_dist[from_cell][to_cell]，255 表示不可达。
 void Sokoban::precompute_walk_distances() {
     std::memset(relaxed_walk_dist, 255, sizeof(relaxed_walk_dist));
+    std::memset(RELAXED_PUSH_STAND_DIST, 255, sizeof(RELAXED_PUSH_STAND_DIST));
     uint8_t all_blown_mask = (1 << num_bomb_tasks) - 1;
 
     for (int sy = 0; sy < MAP_MAX_HEIGHT; ++sy) {
@@ -1677,6 +4546,122 @@ void Sokoban::precompute_walk_distances() {
                         relaxed_walk_dist[start_idx][next_idx] = curr_dist + 1;
                         q[tail++] = np;
                     }
+                }
+            }
+        }
+    }
+
+    for (int from = 0; from < MAP_CELL_COUNT; ++from) {
+        for (int oy = 0; oy < MAP_MAX_HEIGHT; ++oy) {
+            for (int ox = 0; ox < MAP_MAX_WIDTH; ++ox) {
+                uint8_t best = 255;
+                for (int d = 0; d < 4; ++d) {
+                    point stand = {
+                        static_cast<int8_t>(ox - MOVE[d].x),
+                        static_cast<int8_t>(oy - MOVE[d].y)
+                    };
+                    if (is_overstep(stand)) continue;
+                    int stand_idx = stand.y * MAP_MAX_WIDTH + stand.x;
+                    uint8_t walk = relaxed_walk_dist[from][stand_idx];
+                    if (walk < best) best = walk;
+                }
+                RELAXED_PUSH_STAND_DIST[from][oy * MAP_MAX_WIDTH + ox] = best;
+            }
+        }
+    }
+}
+
+/// \brief 预计算单箱到目标的乐观总代价下界
+///
+/// \details
+/// t_dist 只统计推动次数，容易低估需要多次转向的箱子通路。这里按“箱子位置 + 当前推动方向”
+/// 做一次反向 Dijkstra，把推箱和玩家绕到下一发力点的静态行走下界合进去。
+/// 运行时启发式只查 box_target_cost，不在 IDA* 热路径里跑 exact 单箱求解。
+void Sokoban::precompute_box_target_costs() {
+    std::memset(box_target_cost, 255, sizeof(box_target_cost));
+    uint8_t all_blown_mask = (1 << num_bomb_tasks) - 1;
+
+    auto cell_free = [&](point p) {
+        return !is_overstep(p) && !is_solid(p, all_blown_mask);
+    };
+
+    constexpr uint16_t INF = 65535;
+    constexpr int NODE_COUNT = MAP_CELL_COUNT * 4;
+
+    for (int t = 0; t < initial_targets.size(); ++t) {
+        uint16_t dist[MAP_MAX_HEIGHT][MAP_MAX_WIDTH][4];
+        bool used[MAP_MAX_HEIGHT][MAP_MAX_WIDTH][4];
+        for (int y = 0; y < MAP_MAX_HEIGHT; ++y) {
+            for (int x = 0; x < MAP_MAX_WIDTH; ++x) {
+                for (int d = 0; d < 4; ++d) {
+                    dist[y][x][d] = INF;
+                    used[y][x][d] = false;
+                }
+            }
+        }
+
+        point target = initial_targets[t];
+        for (uint8_t d = 0; d < 4; ++d) {
+            point stand = target - MOVE[d];
+            if (cell_free(stand)) dist[target.y][target.x][d] = 0;
+        }
+        box_target_cost[t][target.y][target.x] = 0;
+
+        for (int iter = 0; iter < NODE_COUNT; ++iter) {
+            int best_x = -1, best_y = -1, best_d = -1;
+            uint16_t best = INF;
+            for (int y = 0; y < MAP_MAX_HEIGHT; ++y) {
+                for (int x = 0; x < MAP_MAX_WIDTH; ++x) {
+                    for (int d = 0; d < 4; ++d) {
+                        if (!used[y][x][d] && dist[y][x][d] < best) {
+                            best = dist[y][x][d];
+                            best_x = x;
+                            best_y = y;
+                            best_d = d;
+                        }
+                    }
+                }
+            }
+            if (best == INF) break;
+            used[best_y][best_x][best_d] = true;
+
+            point curr = {static_cast<int8_t>(best_x), static_cast<int8_t>(best_y)};
+
+            point prev_box = curr - MOVE[best_d];
+            point prev_stand = prev_box - MOVE[best_d];
+            if (cell_free(prev_box) && cell_free(prev_stand)) {
+                uint16_t cand = static_cast<uint16_t>(best + 1);
+                if (cand < dist[prev_box.y][prev_box.x][best_d]) {
+                    dist[prev_box.y][prev_box.x][best_d] = cand;
+                }
+            }
+
+            point curr_stand = curr - MOVE[best_d];
+            for (uint8_t prev_d = 0; prev_d < 4; ++prev_d) {
+                if (prev_d == best_d) continue;
+                point prev_side = curr - MOVE[prev_d];
+                if (!cell_free(prev_side) || !cell_free(curr_stand)) continue;
+                int walk = walk_dist_between(prev_side, curr_stand);
+                if (walk == 9999) continue;
+                int cand_i = static_cast<int>(best) + walk;
+                if (cand_i > 254) cand_i = 254;
+                uint16_t cand = static_cast<uint16_t>(cand_i);
+                if (cand < dist[curr.y][curr.x][prev_d]) {
+                    dist[curr.y][curr.x][prev_d] = cand;
+                }
+            }
+        }
+
+        for (int y = 0; y < MAP_MAX_HEIGHT; ++y) {
+            for (int x = 0; x < MAP_MAX_WIDTH; ++x) {
+                if (t_dist[t][y][x] == -1) continue;
+                uint16_t best = INF;
+                for (uint8_t d = 0; d < 4; ++d) {
+                    if (dist[y][x][d] < best) best = dist[y][x][d];
+                }
+                if (best != INF) {
+                    box_target_cost[t][y][x] =
+                        static_cast<uint8_t>(best > 254 ? 254 : best);
                 }
             }
         }
@@ -1854,8 +4839,7 @@ inline bool Sokoban::is_overstep(point p) const {
 
 inline bool Sokoban::is_solid(point p, uint8_t blown_mask) const {
     if (p.x < 0 || p.x >= MAP_MAX_WIDTH || p.y < 0 || p.y >= MAP_MAX_HEIGHT) return true;
-    if (map[p.y][p.x] != 1) return false; 
-    return (wall_clear_mask[p.y][p.x] & blown_mask) == 0; 
+    return solid_mask[blown_mask][p.y][p.x] != 0;
 }
 
 inline bool Sokoban::is_bomb(point p) const {
@@ -1885,11 +4869,9 @@ inline int Sokoban::walk_dist_between(point from, point to) const {
 }
 
 inline int Sokoban::walk_to_push_stand_lower_bound(point from, point obj) const {
-    int best = 9999;
-    for (int d = 0; d < 4; ++d) {
-        point stand = obj - MOVE[d];
-        int w = walk_dist_between(from, stand);
-        if (w < best) best = w;
-    }
-    return best;
+    if (is_overstep(from) || is_overstep(obj)) return 9999;
+    int from_idx = from.y * MAP_MAX_WIDTH + from.x;
+    int obj_idx = obj.y * MAP_MAX_WIDTH + obj.x;
+    uint8_t d = RELAXED_PUSH_STAND_DIST[from_idx][obj_idx];
+    return (d == 255) ? 9999 : d;
 }

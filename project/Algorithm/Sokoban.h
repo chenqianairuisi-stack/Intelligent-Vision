@@ -44,24 +44,6 @@ struct alignas(4) TTEntry {
 // 推箱子核心求解器
 // ============================================================================
 
-// ============================================================================
-// Sokoban 搜索性能探针
-// ============================================================================
-
-struct SokobanProfile {
-    uint32_t expanded_nodes = 0;          // 真正展开并生成动作的搜索节点数
-    uint32_t generated_moves = 0;         // 所有节点累计生成的候选推动作数量
-    uint32_t tt_hits = 0;                 // 置换表命中并剪枝的次数
-    uint32_t heuristic_dead_prunes = 0;   // 启发式判断不可达/死锁而剪枝的次数
-    uint32_t threshold_prunes = 0;        // IDA* f 值超过当前阈值的剪枝次数
-    uint32_t path_cycle_prunes = 0;       // 当前递归路径内状态重复的剪枝次数
-    uint32_t static_deadlock_prunes = 0;  // 推入静态死锁格或目标距离场不可达的剪枝次数
-    uint32_t block_2x2_prunes = 0;        // 2x2 团块死锁剪枝次数
-    uint16_t max_depth = 0;               // 本次搜索达到的最大递归深度
-    uint16_t threshold_iterations = 0;    // IDA* 阈值迭代轮数
-    uint16_t final_threshold = 0;         // 搜索结束时的阈值，便于对比启发式强弱
-};
-
 class Sokoban {
 public:
     // --- 生命周期与外部输入 ---
@@ -73,11 +55,10 @@ public:
     // --- 求解入口与结果读取 ---
     // 按统一语义规则运行 IDA*；成功后可通过 get_result_path 读取完整执行路径
     bool solve();
+    // 只用宏层快速验证当前候选任务能否接上语义推箱，不进入完整 IDA* 失败证明
+    bool solve_macro_candidate();
     // 返回最近一次成功求解得到的玩家路径，包含行走和推动过程
     const StaticArray<point, MAX_PATH_LENGTH>& get_result_path() const { return final_path; }
-    // 返回最近一次求解的搜索统计，用于分析阈值、剪枝和扩展规模
-    const SokobanProfile& get_profile() const { return profile; }
-    bool profile_enabled() const;
 
 private:
     // 每个搜索节点最多保留的普通一格推动作数量；限制栈空间和排序开销
@@ -86,6 +67,8 @@ private:
     static constexpr int MAX_NODE_MACROS = MAX_BOMBS;
     // 普通动作与宏动作合并排序后的候选上限
     static constexpr int MAX_NODE_ACTIONS = MAX_NODE_MOVES + MAX_NODE_MACROS;
+    // 混合宏层去重表大小，去掉不同宏顺序反复到达的同一状态
+    static constexpr int MIXED_MACRO_TT_SIZE = 1024;
 
     // 单个普通推动作：只记录“推哪个实体、往哪推、玩家需走多远”等增量信息
     struct TinyMove {
@@ -112,6 +95,44 @@ private:
         uint16_t path_cost;         // 展开后的真实网格步数
         int16_t sort_key;           // 越小越优先尝试
         GameState next_state;       // 完成爆破后的搜索状态
+    };
+
+    static constexpr int MACRO_COST_CACHE_SIZE = 512;
+    struct MacroCostCacheEntry {
+        uint32_t hash;
+        uint16_t cost;
+        int8_t final_x;
+        int8_t final_y;
+        uint8_t bomb_idx;
+        uint8_t final_dir;
+        uint8_t flags;              // bit0=valid, bit1=success
+        uint8_t reserved;
+    };
+
+    struct BoxProgressCandidate {
+        uint8_t box_idx;
+        uint8_t target_idx;
+        point waypoint;
+        int16_t sort_key;
+    };
+
+    struct MixedMacroStructureInfo {
+        int open_cells = 0;
+        int corridor_cells = 0;
+        int corridor_pct = 0;
+        int coupling_score = 0;
+        int structure_score = 0;
+        bool has_box_on_bomb_route = false;
+        bool has_bomb_near_box_route = false;
+        bool has_target_path_waiting_wall = false;
+        bool any_box_can_leave_bomb_route = false;
+        bool prefer_box_first = false;
+    };
+
+    struct MixedMacroTTEntry {
+        uint32_t hash = 0xFFFFFFFFu;
+        uint16_t best_path_len = 0xFFFF;
+        uint16_t reserved = 0;
     };
 
     // 单节点动态占用表：以 192B 栈空间换掉热路径内反复线性扫描箱子/炸弹数组
@@ -148,6 +169,25 @@ private:
     // --- IDA* 主流程 ---
     // IDA* 外层驱动：初始化根状态、阈值和置换表，并逐轮加深
     bool solve_internal();
+    // 运行一次 IDA*，strict_cost=true 时按真实步数做受限修复搜索
+    bool run_ida_search(
+        bool strict_cost,
+        int max_threshold,
+        StaticArray<point, MAX_PATH_LENGTH>& out_path,
+        uint32_t node_budget = 0);
+    // 使用当前首解作为上界，只搜索真实步数更短的路径，避免修复阶段把预算耗在低阈值证明上
+    bool run_bounded_strict_search(
+        int max_cost,
+        StaticArray<point, MAX_PATH_LENGTH>& out_path,
+        uint32_t node_budget);
+    // 用快速首解作为上界，尝试在小预算内找真实步数更短的解
+    bool try_strict_cost_repair(const StaticArray<point, MAX_PATH_LENGTH>& candidate_path);
+    // 对单条候选路径做完整收尾，写入 final_path 并返回面板总代价
+    int finalize_path_candidate(const StaticArray<point, MAX_PATH_LENGTH>& candidate);
+    // 在宏层候选与加权 IDA* 首解间各自收尾后择优
+    void select_cheaper_finalized(
+        const StaticArray<point, MAX_PATH_LENGTH>& macro_candidate,
+        const StaticArray<point, MAX_PATH_LENGTH>* ida_candidate);
     // 单次阈值内的递归搜索；返回 -1 表示找到解，其它值用于推进下一轮阈值
     int ida_star_search(
         const GameState& state,
@@ -156,7 +196,10 @@ private:
         int threshold,
         StaticArray<point, MAX_PATH_LENGTH>& path,
         int last_entity = -1,
-        uint8_t last_push_dir = 4);
+        uint8_t last_push_dir = 4,
+        int known_h = -1,
+        int known_active_bombs = -1,
+        bool tt_already_clear = false);
     // 统计尚未完成且有目标墙的炸弹任务数
     int count_active_bomb_tasks(const GameState& state) const;
     // 仅在仍有炸弹任务时估计箱子推动压力，用于动作排序
@@ -182,6 +225,7 @@ private:
     // 生成可选炸弹宏动作；只在宏动作开关启用时产生候选
     int generate_bomb_macros(
         const GameState& state,
+        const NodeOccupancy& occupancy,
         int h_before,
         int active_entities,
         int g,
@@ -189,11 +233,92 @@ private:
         MacroMove macros[MAX_NODE_MACROS]) const;
     // 把搜索状态还原成临时关卡，供炸弹路径规划复用通用接口
     void build_level_from_state(const GameState& state, SokobanLevel& out_level) const;
+    // 在根部尝试少箱宏层快解，失败或被门控拒绝时回到 IDA*
+    bool try_small_box_macro_solution();
+    // 根部一次性构造“先完成炸弹任务，再完成少箱推箱”的候选路径
+    bool try_bomb_then_small_box_macro_solution(
+        StaticArray<point, MAX_PATH_LENGTH>& out_path) const;
+    // 小实体混合宏层：把箱子部分推进、炸弹清墙、箱子完成放到同一层搜索
+    bool try_mixed_small_entity_macro_solution(
+        StaticArray<point, MAX_PATH_LENGTH>& out_path) const;
+    bool search_mixed_small_entity_macro(
+        const GameState& state,
+        int depth,
+        int& node_budget,
+        uint32_t visited_hashes[16],
+        const StaticArray<point, MAX_PATH_LENGTH>& path,
+        StaticArray<point, MAX_PATH_LENGTH>& best_path,
+        int& best_len) const;
+    int collect_box_progress_candidates(
+        const GameState& state,
+        const NodeOccupancy& occupancy,
+        BoxProgressCandidate candidates[16]) const;
+    // 判断混合宏层是否真的命中箱子-炸弹共享瓶颈，避免开阔图提前进入粗粒度搜索
+    bool should_use_mixed_small_entity_macro_layer(const GameState& state) const;
+    // 统计静态通行邻居数，供宏层结构门控识别走廊/分叉
+    int static_passage_degree(point p, uint8_t blown_mask) const;
+    // 评估混合宏层共享依赖结构，供门控和候选排序复用
+    MixedMacroStructureInfo evaluate_mixed_small_entity_macro_structure(const GameState& state) const;
+    bool probe_mixed_macro_transposition(uint32_t hash, int path_len) const;
+    void store_mixed_macro_transposition(uint32_t hash, int path_len) const;
+    // 从任意搜索状态尝试用少箱宏层完成剩余纯推箱任务
+    bool try_small_box_macro_solution_from_state(
+        const GameState& state,
+        StaticArray<point, MAX_PATH_LENGTH>& out_path) const;
+    // 校验单个箱子完成宏没有推到其它箱子或提前命中其它目标
+    bool validate_box_macro_segment(
+        const SokobanLevel& level,
+        point player_pos,
+        int moving_level_idx,
+        uint8_t sem,
+        uint16_t remaining_target_mask,
+        uint16_t target_bit,
+        const StaticArray<point, MAX_PATH_LENGTH>& path,
+        const StaticArray<point, MAX_PATH_LENGTH>& next_path) const;
+    // 校验部分推进宏不会提前把箱子推入同语义目标
+    bool validate_box_progress_segment(
+        const SokobanLevel& level,
+        point player_pos,
+        int moving_level_idx,
+        uint8_t sem,
+        uint16_t remaining_target_mask,
+        const StaticArray<point, MAX_PATH_LENGTH>& path,
+        const StaticArray<point, MAX_PATH_LENGTH>& next_path) const;
+    bool build_box_macro_successor_state(
+        const GameState& state,
+        int box_idx,
+        point box_target,
+        int target_idx,
+        point final_player,
+        GameState& out_state) const;
+    // 递归枚举少量箱子的完成顺序和目标分配，选出最短可展开宏序列
+    bool search_small_box_macro_order(
+        int depth,
+        const GameState& root_state,
+        int box_count,
+        uint16_t remaining_target_mask,
+        bool used[MAX_BOXES],
+        const SokobanLevel& level,
+        point player_pos,
+        const StaticArray<point, MAX_PATH_LENGTH>& path,
+        StaticArray<point, MAX_PATH_LENGTH>& best_path,
+        int& best_len) const;
+    // 宏任务完成后按临时关卡下标移出刚才实际推动的箱子
+    bool remove_macro_completed_box_at_index(SokobanLevel& level, int box_idx, point expected_target) const;
+    // 回放宏层候选路径，确认没有箱子重叠且所有目标真实完成
+    bool validate_macro_solution_path(const StaticArray<point, MAX_PATH_LENGTH>& path) const;
     // 计算某个炸弹宏动作的完整玩家路径，并做长度/合法性检查
     bool build_bomb_macro_path(
         const GameState& state,
         int bomb_idx,
         StaticArray<point, MAX_PATH_LENGTH>& out_path) const;
+    // 将已验证的复合炸弹任务同步到搜索状态
+    bool build_bomb_task_successor_state(
+        const GameState& state,
+        int bomb_idx,
+        const BombTask& task,
+        point final_player,
+        GameState& out_state) const;
     // 根据宏路径末端玩家位置反推最后一次推炸弹的方向；4 表示无法推向目标墙
     uint8_t infer_final_bomb_push_dir(point final_player, point target_wall) const;
     // 成功求解后仅优化玩家行走段的转弯，保持推动序列不变
@@ -230,9 +355,12 @@ private:
     void init_zobrist();
     // 预计算每个目标到所有格子的反向推箱距离
     void precompute_target_distances();
+    // 预计算单箱推到目标的乐观总代价下界
+    void precompute_box_target_costs();
     // 预计算每个炸弹到目标墙的反向推动距离
     void precompute_bomb_distances();
     void precompute_bomb_macro_costs();
+    void precompute_solid_masks();
     // 预计算静态地图上的任意两格行走距离下界
     void precompute_walk_distances();
     // 标记静态死锁格，供动作生成时快速剪枝
@@ -265,6 +393,15 @@ private:
     StaticArray<BombTask, MAX_BOMBS> bomb_tasks;                         // 按初始炸弹编号索引的清墙任务
     uint8_t num_bomb_tasks = 0;                                          // 有效炸弹任务/炸弹槽数量
     uint8_t b_macro_cost[MAX_BOMBS][MAP_MAX_HEIGHT][MAP_MAX_WIDTH][4];   // 炸弹宏动作乐观路径下界，255 表示不可达
+    MacroCostCacheEntry macro_cost_cache[MACRO_COST_CACHE_SIZE] = {};
+    uint8_t solid_mask[1 << MAX_BOMBS][MAP_MAX_HEIGHT][MAP_MAX_WIDTH] = {};
+    uint16_t current_threshold_iteration = 0;                           // 当前 IDA* 阈值轮次，供硬图后段策略启用
+    bool strict_cost_search = false;                                     // 当前是否处于真实步数修复搜索
+    bool force_box_target_cost_lb = false;                               // 当前搜索是否强制使用单箱总代价下界
+    uint32_t search_node_budget = 0;                                     // 本轮搜索节点预算，0 表示不限制
+    uint32_t search_node_count = 0;                                      // 本轮已展开节点数
+    bool search_aborted = false;                                         // 节点预算耗尽时中止本轮搜索
+    mutable MixedMacroTTEntry mixed_macro_tt[MIXED_MACRO_TT_SIZE] = {};   // 混合宏层跨分支去重
 
     // --- Zobrist 随机表与路径环路检测 ---
     uint32_t ZOBRIST_SPECIFIC_BOX[MAX_BOXES][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];   // 带语义编号的箱子哈希
@@ -276,12 +413,14 @@ private:
 
     // --- 启发式距离场与死锁缓存 ---
     int16_t t_dist[MAX_BOXES][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];           // target_id -> cell 的反向推箱距离，-1 表示不可达
+    uint8_t box_target_cost[MAX_BOXES][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];   // target_id -> cell 的单箱乐观总代价，255 表示不可达
     uint8_t relaxed_walk_dist[MAP_CELL_COUNT][MAP_CELL_COUNT];          // 静态地图上的压缩行走距离，255 表示不可达
     bool is_dead[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];                        // 静态死锁格缓存
+    uint16_t target_semantic_mask[10] = {};
+    uint16_t target_cell_mask[10][MAP_MAX_HEIGHT][MAP_MAX_WIDTH] = {};
 
     int16_t b_dist[MAX_BOMBS][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];           // bomb_id -> cell 的反向推炸弹距离，-1 表示不可达
     uint8_t wall_clear_mask[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];             // 每个墙格会被哪些炸弹任务清除的 bitmask
-    SokobanProfile profile;                                             // 最近一次 solve 的性能统计
 };
 
 extern TTEntry TT[TT_SIZE]; // 全局置换表，求解开始时清空

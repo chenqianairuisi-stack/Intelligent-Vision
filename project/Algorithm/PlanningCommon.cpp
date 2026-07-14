@@ -56,11 +56,11 @@ struct SimpleBfsWorkspace {
     uint16_t current_gen = 0;                        // 当前 BFS 代数
 };
 
-// 时间搜索工作区默认放 OCRAM，避免挤占 DTCM
-static TimeSearchWorkspace time_ws;
+// 时间搜索工作区放 OCRAM，避免挤占 DTCM
+OCRAM_BSS static TimeSearchWorkspace time_ws;
 
-// 普通 BFS 工作区默认放 OCRAM，消除热点函数中的局部大数组
-static SimpleBfsWorkspace simple_bfs_ws;
+// 普通 BFS 工作区放 OCRAM，消除热点函数中的局部大数组
+OCRAM_BSS static SimpleBfsWorkspace simple_bfs_ws;
 
 // 将 32 位内部代价钳制到对外 uint16_t 代价范围
 static uint16_t clamp_time_cost(uint32_t cost) {
@@ -250,6 +250,11 @@ struct BombMacroNode {
 struct BombPathWorkspace {
     BombMacroNode q[1024];                         // 宏层 BFS 队列
     uint8_t visited[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]; // 每格按推动方向记录访问状态
+    uint16_t node_cost[1024];                      // 代价优先推炸弹搜索中的节点总代价
+    uint16_t state_cost[MAP_MAX_HEIGHT][MAP_MAX_WIDTH][4]; // 每个宏状态的最优代价
+    uint16_t state_node[MAP_MAX_HEIGHT][MAP_MAX_WIDTH][4]; // 每个宏状态对应的最优节点
+    uint8_t state_closed[MAP_MAX_HEIGHT][MAP_MAX_WIDTH][4]; // Dijkstra 已确定状态
+    uint8_t micro_dist[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]; // 微层步数缓存
     point micro_q[MAP_CELL_COUNT];                 // 微层玩家 BFS 队列
     uint8_t micro_visited[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]; // 微层 generation visited 标记
     point micro_parent[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];    // 微层路径回溯父节点
@@ -266,6 +271,16 @@ DTCM_DATA static BombPathWorkspace b_ws;
 // 判断坐标是否位于固定地图边界内
 bool in_bounds(point p) {
     return p.x >= 0 && p.x < MAP_MAX_WIDTH && p.y >= 0 && p.y < MAP_MAX_HEIGHT;
+}
+
+// 判断坐标是否位于可变化的地图内圈
+bool is_inner_map_cell(point p) {
+    return p.x > 0 && p.x < MAP_MAX_WIDTH - 1 && p.y > 0 && p.y < MAP_MAX_HEIGHT - 1;
+}
+
+// 外圈墙是永久边界，炸弹任务只能绑定内圈墙
+bool is_blastable_wall(const SokobanLevel& lvl, point p) {
+    return is_inner_map_cell(p) && lvl.map[p.y][p.x] == 1;
 }
 
 // 查询指定格子是否有箱子
@@ -357,6 +372,27 @@ void apply_box_push_action_effect(SokobanLevel& lvl, const BoxPushAction& action
     apply_box_push_task_effect(lvl, make_box_push_task(action));
 }
 
+/// \brief 应用炸弹对静态墙体的爆破效果
+/// \param lvl 需要原地更新的地图状态
+/// \param target_wall 目标爆破墙体
+///
+/// \details
+/// 只有内圈墙可以作为爆心，外圈边界墙不会被炸弹任务清除
+void apply_blast_effect(SokobanLevel& lvl, point target_wall) {
+    if (!is_blastable_wall(lvl, target_wall)) return;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            point p = {
+                static_cast<int8_t>(target_wall.x + dx),
+                static_cast<int8_t>(target_wall.y + dy)
+            };
+            if (is_inner_map_cell(p)) {
+                lvl.map[p.y][p.x] = 0;
+            }
+        }
+    }
+}
+
 /// \brief 应用一个完整炸弹任务对地图造成的状态变化
 /// \param lvl 需要原地更新的地图状态
 /// \param task 已确定的炸弹任务
@@ -364,6 +400,8 @@ void apply_box_push_action_effect(SokobanLevel& lvl, const BoxPushAction& action
 /// \details
 /// 该函数会依次应用推箱让路结果、移除已引爆炸弹，并把目标墙体周围 3x3 范围内的墙清成空地
 void apply_bomb_task_effect(SokobanLevel& lvl, const BombTask& task) {
+    if (!is_blastable_wall(lvl, task.target_wall)) return;
+
     // 先应用推箱让路结果
     for (int i = 0; i < task.box_pushes.size(); ++i) {
         const BoxPushTask& bp = task.box_pushes[i];
@@ -383,17 +421,7 @@ void apply_bomb_task_effect(SokobanLevel& lvl, const BombTask& task) {
         }
     }
 
-    // 把目标墙体周围 3x3 范围内的墙清成空地
-    point tw = task.target_wall;
-    for (int dy = -1; dy <= 1; ++dy) {
-        for (int dx = -1; dx <= 1; ++dx) {
-            int ny = tw.y + dy;
-            int nx = tw.x + dx;
-            if (ny > 0 && ny < MAP_MAX_HEIGHT - 1 && nx > 0 && nx < MAP_MAX_WIDTH - 1) {
-                lvl.map[ny][nx] = 0;
-            }
-        }
-    }
+    apply_blast_effect(lvl, task.target_wall);
 }
 
 /// \brief 应用推炸弹宏动作的地图变化
@@ -687,7 +715,7 @@ uint16_t yaw_turn_time_cost(float from_yaw, float to_yaw) {
 bool can_player_reach(const SokobanLevel& lvl, point start_pos, point target_pos, point ignored_obj, point extra_obs) {
     if (start_pos == target_pos) return true;
 
-    static __attribute__((section(".dtcm_bss"))) uint16_t vis_gen[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+    OCRAM_BSS static uint16_t vis_gen[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
     static uint16_t cur_vis_gen = 0;
     cur_vis_gen++;
     if (cur_vis_gen == 0) {
@@ -695,7 +723,7 @@ bool can_player_reach(const SokobanLevel& lvl, point start_pos, point target_pos
         cur_vis_gen = 1;
     }
 
-    static __attribute__((section(".dtcm_bss"))) point q[MAP_CELL_COUNT];
+    OCRAM_BSS static point q[MAP_CELL_COUNT];
     int head = 0;
     int tail = 0;
 
@@ -1049,6 +1077,232 @@ bool append_box_push_path(SokobanLevel& lvl, point& player_pos, const BoxPushTas
     return true;
 }
 
+/// \brief 代价优先搜索推炸弹宏路径
+/// \details
+/// 宏状态是“炸弹坐标 + 小车发力方向”。旧 BFS 把推一步和绕到另一侧发力都当成同代价边，
+/// 会偏向宏步数短但小车实际绕行很长的方案。这里用 Dijkstra 把换发力位的微层步数计入边权，
+/// 让策略评分和真实路径展开共享同一套“顺手程度”判断
+static bool find_bomb_macro_path(
+    const SokobanLevel& lvl,
+    point player_start,
+    point bomb_start,
+    point target,
+    StaticArray<BombMacroNode, 256>& out_macro_path,
+    uint16_t& out_cost,
+    point& out_final_player)
+{
+    out_macro_path.clear();
+    out_cost = 0;
+    out_final_player = player_start;
+
+    if (!in_bounds(bomb_start) || !in_bounds(target)) return false;
+    if (bomb_start == target) return true;
+    if (lvl.map[target.y][target.x] == 1 && !is_blastable_wall(lvl, target)) return false;
+
+    uint8_t blocked[MAP_MAX_HEIGHT][MAP_MAX_WIDTH] = {};
+    for (int i = 0; i < lvl.box_count; ++i) {
+        point p = lvl.boxes[i];
+        if (in_bounds(p)) blocked[p.y][p.x] = 1;
+    }
+    for (int i = 0; i < lvl.bomb_count; ++i) {
+        point p = lvl.bombs[i];
+        if (!in_bounds(p) || p == bomb_start) continue;
+        blocked[p.y][p.x] = 1;
+    }
+
+    auto is_passable = [&](int x, int y, bool is_bomb_moving) {
+        point p = {static_cast<int8_t>(x), static_cast<int8_t>(y)};
+        if (!in_bounds(p)) return false;
+        if (lvl.map[y][x] == 1) {
+            if (!(is_bomb_moving && p == target && is_blastable_wall(lvl, p))) return false;
+        }
+        if (blocked[y][x]) return false;
+        return true;
+    };
+
+    auto micro_distance = [&](point start, point end, point obstacle_bomb) {
+        if (start == end) return 0;
+        if (!is_passable(end.x, end.y, false)) return 9999;
+
+        b_ws.micro_gen++;
+        if (b_ws.micro_gen == 0) {
+            std::memset(b_ws.micro_visited, 0, sizeof(b_ws.micro_visited));
+            b_ws.micro_gen = 1;
+        }
+
+        int h = 0;
+        int t = 0;
+        b_ws.micro_q[t++] = start;
+        b_ws.micro_visited[start.y][start.x] = b_ws.micro_gen;
+        b_ws.micro_dist[start.y][start.x] = 0;
+
+        while (h < t) {
+            point curr = b_ws.micro_q[h++];
+            if (curr == end) return static_cast<int>(b_ws.micro_dist[curr.y][curr.x]);
+            for (int d = 0; d < 4; ++d) {
+                point np = curr + MOVE[d];
+                if (!in_bounds(np)) continue;
+                if (b_ws.micro_visited[np.y][np.x] == b_ws.micro_gen) continue;
+                if (is_passable(np.x, np.y, false) && !(np == obstacle_bomb)) {
+                    b_ws.micro_visited[np.y][np.x] = b_ws.micro_gen;
+                    b_ws.micro_dist[np.y][np.x] = static_cast<uint8_t>(b_ws.micro_dist[curr.y][curr.x] + 1);
+                    b_ws.micro_q[t++] = np;
+                }
+            }
+        }
+        return 9999;
+    };
+
+    std::memset(b_ws.state_cost, 0xFF, sizeof(b_ws.state_cost));
+    std::memset(b_ws.state_node, 0xFF, sizeof(b_ws.state_node));
+    std::memset(b_ws.state_closed, 0, sizeof(b_ws.state_closed));
+
+    int node_count = 0;
+    bool overflow = false;
+    uint16_t heap[1024];
+    int heap_size = 0;
+
+    auto heap_less = [&](uint16_t a, uint16_t b) {
+        return b_ws.node_cost[a] < b_ws.node_cost[b];
+    };
+    auto heap_push = [&](uint16_t idx) {
+        if (heap_size >= 1024) {
+            overflow = true;
+            return;
+        }
+        int i = heap_size++;
+        heap[i] = idx;
+        while (i > 0) {
+            int parent = (i - 1) / 2;
+            if (!heap_less(heap[i], heap[parent])) break;
+            uint16_t tmp = heap[i];
+            heap[i] = heap[parent];
+            heap[parent] = tmp;
+            i = parent;
+        }
+    };
+    auto heap_pop = [&]() -> int {
+        if (heap_size <= 0) return -1;
+        uint16_t root = heap[0];
+        heap[0] = heap[--heap_size];
+        int i = 0;
+        while (true) {
+            int left = i * 2 + 1;
+            int right = left + 1;
+            int best = i;
+            if (left < heap_size && heap_less(heap[left], heap[best])) best = left;
+            if (right < heap_size && heap_less(heap[right], heap[best])) best = right;
+            if (best == i) break;
+            uint16_t tmp = heap[i];
+            heap[i] = heap[best];
+            heap[best] = tmp;
+            i = best;
+        }
+        return static_cast<int>(root);
+    };
+
+    auto keep_state = [&](point bomb_pos, uint8_t dir, uint16_t cost, uint16_t parent_idx) {
+        if (!in_bounds(bomb_pos) || dir >= 4) return;
+        uint16_t& best = b_ws.state_cost[bomb_pos.y][bomb_pos.x][dir];
+        if (cost >= best) return;
+        if (node_count >= 1024) {
+            overflow = true;
+            return;
+        }
+        int idx = node_count++;
+        b_ws.q[idx] = {bomb_pos.x, bomb_pos.y, dir, parent_idx};
+        b_ws.node_cost[idx] = cost;
+        best = cost;
+        b_ws.state_node[bomb_pos.y][bomb_pos.x][dir] = static_cast<uint16_t>(idx);
+        heap_push(static_cast<uint16_t>(idx));
+    };
+
+    for (int d = 0; d < 4; ++d) {
+        point push_pos = bomb_start - MOVE[d];
+        int walk = micro_distance(player_start, push_pos, bomb_start);
+        if (walk != 9999) {
+            keep_state(bomb_start, static_cast<uint8_t>(d), static_cast<uint16_t>(walk), 65535);
+        }
+    }
+
+    int target_node_idx = -1;
+    while (!overflow && heap_size > 0) {
+        int best_idx = heap_pop();
+        if (best_idx < 0) break;
+        BombMacroNode curr = b_ws.q[best_idx];
+        if (b_ws.state_closed[curr.by][curr.bx][curr.p_dir]) continue;
+        if (b_ws.node_cost[best_idx] != b_ws.state_cost[curr.by][curr.bx][curr.p_dir]) continue;
+        uint16_t best_cost = b_ws.node_cost[best_idx];
+        b_ws.state_closed[curr.by][curr.bx][curr.p_dir] = 1;
+        point curr_bomb = {curr.bx, curr.by};
+
+        if (curr_bomb == target) {
+            target_node_idx = best_idx;
+            break;
+        }
+
+        point forward = curr_bomb + MOVE[curr.p_dir];
+        if (is_passable(forward.x, forward.y, true) && best_cost < UINT16_MAX) {
+            uint32_t next_cost = static_cast<uint32_t>(best_cost) + 1;
+            if (next_cost < UINT16_MAX) {
+                keep_state(forward, curr.p_dir, static_cast<uint16_t>(next_cost), static_cast<uint16_t>(best_idx));
+            }
+        }
+
+        point curr_car = curr_bomb - MOVE[curr.p_dir];
+        for (int d = 0; d < 4; ++d) {
+            if (d == curr.p_dir) continue;
+            point next_face = curr_bomb - MOVE[d];
+            if (!is_passable(next_face.x, next_face.y, false)) continue;
+            int walk = micro_distance(curr_car, next_face, curr_bomb);
+            if (walk == 9999) continue;
+            uint32_t next_cost = static_cast<uint32_t>(best_cost) + static_cast<uint32_t>(walk);
+            if (next_cost < UINT16_MAX) {
+                keep_state(curr_bomb, static_cast<uint8_t>(d), static_cast<uint16_t>(next_cost), static_cast<uint16_t>(best_idx));
+            }
+        }
+    }
+
+    if (overflow || target_node_idx < 0) return false;
+
+    int curr_idx = target_node_idx;
+    while (curr_idx != 65535) {
+        out_macro_path.push_back(b_ws.q[curr_idx]);
+        curr_idx = b_ws.q[curr_idx].parent_idx;
+    }
+    std::reverse(out_macro_path.begin(), out_macro_path.end());
+    if (out_macro_path.empty()) return false;
+
+    out_cost = b_ws.node_cost[target_node_idx];
+    BombMacroNode last = out_macro_path.back();
+    out_final_player = {
+        static_cast<int8_t>(last.bx - MOVE[last.p_dir].x),
+        static_cast<int8_t>(last.by - MOVE[last.p_dir].y)
+    };
+    return true;
+}
+
+bool get_direct_bomb_push_path_cost(
+    const SokobanLevel& lvl,
+    point player_start,
+    const BombTask& task,
+    uint16_t& out_cost,
+    point& out_final_player) {
+    out_cost = 0;
+    out_final_player = {-1, -1};
+    if (task.bomb_start.x == -1 || task.target_wall.x == -1) return false;
+    if (task.box_pushes.size() > 0) return false;
+    StaticArray<BombMacroNode, 256> macro_path;
+    return find_bomb_macro_path(
+        lvl,
+        player_start,
+        task.bomb_start,
+        task.target_wall,
+        macro_path,
+        out_cost,
+        out_final_player);
+}
+
 // ============================================================================
 // 推炸弹路径生成
 // ============================================================================
@@ -1067,36 +1321,57 @@ bool get_bomb_push_path(const SokobanLevel& lvl, point player_start, const BombT
     out_path.clear();
     SokobanLevel working_lvl = lvl;
     point working_player = player_start;
+    if (!in_bounds(task.bomb_start) || !in_bounds(task.target_wall)) return false;
     for (int i = 0; i < task.box_pushes.size(); ++i) {
         if (!append_box_push_path(working_lvl, working_player, task.box_pushes[i], out_path)) {
             out_path.clear();
             return false;
         }
     }
+    if (working_lvl.map[task.target_wall.y][task.target_wall.x] == 1 &&
+        !is_blastable_wall(working_lvl, task.target_wall)) {
+        out_path.clear();
+        return false;
+    }
 
-    std::memset(b_ws.visited, 0, sizeof(b_ws.visited));
+    StaticArray<BombMacroNode, 256> macro_path;
+    uint16_t macro_cost = 0;
+    point final_player = {-1, -1};
+    if (!find_bomb_macro_path(
+            working_lvl,
+            working_player,
+            task.bomb_start,
+            task.target_wall,
+            macro_path,
+            macro_cost,
+            final_player)) {
+        out_path.clear();
+        return false;
+    }
+    if (macro_path.empty()) return true;
+
     const SokobanLevel& cur_lvl = working_lvl;
-
     auto is_passable = [&](int x, int y, bool is_bomb_moving) {
-        if (x < 0 || x >= MAP_MAX_WIDTH || y < 0 || y >= MAP_MAX_HEIGHT) return false;
+        point p = {static_cast<int8_t>(x), static_cast<int8_t>(y)};
+        if (!in_bounds(p)) return false;
         if (cur_lvl.map[y][x] == 1) {
-            if (is_bomb_moving && x == task.target_wall.x && y == task.target_wall.y) {}
-            else return false;
+            if (!(is_bomb_moving && p == task.target_wall && is_blastable_wall(cur_lvl, p))) return false;
         }
         for (int i = 0; i < cur_lvl.box_count; ++i) {
             if (cur_lvl.boxes[i].x == x && cur_lvl.boxes[i].y == y) return false;
         }
         for (int i = 0; i < cur_lvl.bomb_count; ++i) {
             if (cur_lvl.bombs[i].x != -1 && cur_lvl.bombs[i].x == x && cur_lvl.bombs[i].y == y) {
-                if (cur_lvl.bombs[i].x == task.bomb_start.x && cur_lvl.bombs[i].y == task.bomb_start.y) continue;
+                if (cur_lvl.bombs[i] == task.bomb_start) continue;
                 return false;
             }
         }
         return true;
     };
 
-    auto check_micro_reachable = [&](point start, point end, point obstacle_bomb) {
+    auto append_micro_path = [&](point start, point end, point obstacle_bomb) -> bool {
         if (start == end) return true;
+        if (!is_passable(end.x, end.y, false)) return false;
         b_ws.micro_gen++;
         if (b_ws.micro_gen == 0) {
             std::memset(b_ws.micro_visited, 0, sizeof(b_ws.micro_visited));
@@ -1107,106 +1382,16 @@ bool get_bomb_push_path(const SokobanLevel& lvl, point player_start, const BombT
         b_ws.micro_q[t++] = start;
         b_ws.micro_visited[start.y][start.x] = b_ws.micro_gen;
 
-        while (h < t) {
-            point curr = b_ws.micro_q[h++];
-            if (curr == end) return true;
-            for (int d = 0; d < 4; ++d) {
-                point np = curr + MOVE[d];
-                if (np.x < 0 || np.x >= MAP_MAX_WIDTH || np.y < 0 || np.y >= MAP_MAX_HEIGHT) continue;
-                if (b_ws.micro_visited[np.y][np.x] != b_ws.micro_gen) {
-                    if (is_passable(np.x, np.y, false) && !(np == obstacle_bomb)) {
-                        b_ws.micro_visited[np.y][np.x] = b_ws.micro_gen;
-                        b_ws.micro_q[t++] = np;
-                    }
-                }
-            }
-        }
-        return false;
-    };
-
-    int head = 0, tail = 0;
-    int target_node_idx = -1;
-
-    for (int d = 0; d < 4; ++d) {
-        point push_pos = {
-            static_cast<int8_t>(task.bomb_start.x - MOVE[d].x),
-            static_cast<int8_t>(task.bomb_start.y - MOVE[d].y)
-        };
-        if (is_passable(push_pos.x, push_pos.y, false) && check_micro_reachable(working_player, push_pos, task.bomb_start)) {
-            b_ws.visited[task.bomb_start.y][task.bomb_start.x] |= (1 << d);
-            b_ws.q[tail++] = {task.bomb_start.x, task.bomb_start.y, (uint8_t)d, 65535};
-        }
-    }
-
-    while (head < tail) {
-        int curr_idx = head++;
-        BombMacroNode curr = b_ws.q[curr_idx];
-
-        if (curr.bx == task.target_wall.x && curr.by == task.target_wall.y) {
-            target_node_idx = curr_idx;
-            break;
-        }
-
-        point curr_p = {
-            static_cast<int8_t>(curr.bx - MOVE[curr.p_dir].x),
-            static_cast<int8_t>(curr.by - MOVE[curr.p_dir].y)
-        };
-
-        int nbx = curr.bx + MOVE[curr.p_dir].x;
-        int nby = curr.by + MOVE[curr.p_dir].y;
-        if (is_passable(nbx, nby, true)) {
-            if (!(b_ws.visited[nby][nbx] & (1 << curr.p_dir))) {
-                b_ws.visited[nby][nbx] |= (1 << curr.p_dir);
-                b_ws.q[tail++] = {(int8_t)nbx, (int8_t)nby, curr.p_dir, (uint16_t)curr_idx};
-            }
-        }
-
-        for (int d = 0; d < 4; ++d) {
-            if (d == curr.p_dir) continue;
-            point adj_p = {
-                static_cast<int8_t>(curr.bx - MOVE[d].x),
-                static_cast<int8_t>(curr.by - MOVE[d].y)
-            };
-
-            if (is_passable(adj_p.x, adj_p.y, false)) {
-                if (!(b_ws.visited[curr.by][curr.bx] & (1 << d))) {
-                    if (check_micro_reachable(curr_p, adj_p, {curr.bx, curr.by})) {
-                        b_ws.visited[curr.by][curr.bx] |= (1 << d);
-                        b_ws.q[tail++] = {curr.bx, curr.by, (uint8_t)d, (uint16_t)curr_idx};
-                    }
-                }
-            }
-        }
-    }
-
-    if (target_node_idx == -1) return false;
-
-    StaticArray<BombMacroNode, 256> macro_path;
-    int curr_idx = target_node_idx;
-    while (curr_idx != 65535) {
-        macro_path.push_back(b_ws.q[curr_idx]);
-        curr_idx = b_ws.q[curr_idx].parent_idx;
-    }
-    std::reverse(macro_path.begin(), macro_path.end());
-
-    auto append_micro_path = [&](point start, point end, point obstacle_bomb) {
-        if (start == end) return;
-        b_ws.micro_gen++;
-        if (b_ws.micro_gen == 0) {
-            std::memset(b_ws.micro_visited, 0, sizeof(b_ws.micro_visited));
-            b_ws.micro_gen = 1;
-        }
-
-        int h = 0, t = 0;
-        b_ws.micro_q[t++] = start;
-        b_ws.micro_visited[start.y][start.x] = b_ws.micro_gen;
-
+        bool found = false;
         while (h < t) {
             point c = b_ws.micro_q[h++];
-            if (c == end) break;
+            if (c == end) {
+                found = true;
+                break;
+            }
             for (int d = 0; d < 4; ++d) {
                 point np = c + MOVE[d];
-                if (np.x < 0 || np.x >= MAP_MAX_WIDTH || np.y < 0 || np.y >= MAP_MAX_HEIGHT) continue;
+                if (!in_bounds(np)) continue;
                 if (b_ws.micro_visited[np.y][np.x] != b_ws.micro_gen) {
                     if (is_passable(np.x, np.y, false) && !(np == obstacle_bomb)) {
                         b_ws.micro_visited[np.y][np.x] = b_ws.micro_gen;
@@ -1216,6 +1401,7 @@ bool get_bomb_push_path(const SokobanLevel& lvl, point player_start, const BombT
                 }
             }
         }
+        if (!found) return false;
 
         StaticArray<point, 256> temp;
         point curr_p = end;
@@ -1224,6 +1410,7 @@ bool get_bomb_push_path(const SokobanLevel& lvl, point player_start, const BombT
             curr_p = b_ws.micro_parent[curr_p.y][curr_p.x];
         }
         for (int i = temp.size() - 1; i >= 0; --i) out_path.push_back(temp[i]);
+        return true;
     };
 
     point current_car_pos = working_player;
@@ -1231,7 +1418,10 @@ bool get_bomb_push_path(const SokobanLevel& lvl, point player_start, const BombT
         static_cast<int8_t>(macro_path[0].bx - MOVE[macro_path[0].p_dir].x),
         static_cast<int8_t>(macro_path[0].by - MOVE[macro_path[0].p_dir].y)
     };
-    append_micro_path(current_car_pos, first_push_pos, task.bomb_start);
+    if (!append_micro_path(current_car_pos, first_push_pos, task.bomb_start)) {
+        out_path.clear();
+        return false;
+    }
     current_car_pos = first_push_pos;
 
     for (int i = 0; i < macro_path.size() - 1; ++i) {
@@ -1247,7 +1437,10 @@ bool get_bomb_push_path(const SokobanLevel& lvl, point player_start, const BombT
                 static_cast<int8_t>(n_node.bx - MOVE[n_node.p_dir].x),
                 static_cast<int8_t>(n_node.by - MOVE[n_node.p_dir].y)
             };
-            append_micro_path(current_car_pos, target_face, {c_node.bx, c_node.by});
+            if (!append_micro_path(current_car_pos, target_face, {c_node.bx, c_node.by})) {
+                out_path.clear();
+                return false;
+            }
             current_car_pos = target_face;
         }
     }
@@ -1256,9 +1449,7 @@ bool get_bomb_push_path(const SokobanLevel& lvl, point player_start, const BombT
         static_cast<int8_t>(macro_path.back().bx - MOVE[macro_path.back().p_dir].x),
         static_cast<int8_t>(macro_path.back().by - MOVE[macro_path.back().p_dir].y)
     };
-    if (out_path.empty() || out_path.back() != final_car_pos) {
-        out_path.push_back(final_car_pos);
-    }
+    if (out_path.empty() || out_path.back() != final_car_pos) out_path.push_back(final_car_pos);
 
     return true;
 }

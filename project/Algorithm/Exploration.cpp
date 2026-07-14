@@ -4,10 +4,10 @@
 #include <cstring>
 #include <algorithm>
 
-DTCM_DATA Exploration patrol_planner;
+OCRAM_BSS Exploration patrol_planner;
 
 // ============================================================================
-// 参数面板
+// 参数面板：巡图启发式代价与观测配置
 // ============================================================================
 
 namespace ExplorationConfig {
@@ -37,6 +37,7 @@ namespace ExplorationConfig {
     inline constexpr int MAX_BOMB_APPROACH_OBS_BRANCHES = 4; // 每个炸弹宏动作最多展开的顺路观测组合分支数
     inline constexpr int GRID_TIME_CACHE_SLOTS = 16;         // 小型 LRU 距离图缓存槽数，16 槽约 6KB
     inline constexpr int PATROL_DFS_FRAME_LIMIT = 16;        // DFS 递归帧复用数组深度上限
+    inline constexpr int FALLBACK_CLEAR_MAX_STEPS = 5;       // 巡图兜底开通单格瓶颈允许的连续推送距离
 
     // 根据初始实体数量返回巡图 DFS 使用的乐观距离下界
     inline constexpr uint16_t dynamic_grid_time_lower_bound(int initial_entities) {
@@ -160,14 +161,35 @@ void Exploration::build_entity_views(const SokobanLevel* multi_maps, int B) {
                 point R = { (int8_t)-F.y, (int8_t)F.x }; 
                 point L = { (int8_t)F.y, (int8_t)-F.x };
 
-                struct ViewGrid { point p; uint16_t pen; bool needs_los; bool enabled; };
+                struct ViewGrid { point p; uint16_t pen; bool enabled; };
                 ViewGrid v_pts[6] = {
-                    { p + F,         1, false, ExplorationConfig::ENABLE_FACE_TO_FACE },
-                    { p + F + F,     0, true,  ExplorationConfig::ENABLE_OPTIMAL_DIST },
-                    { p + F + L,     4, false, ExplorationConfig::ENABLE_DIAGONAL     },
-                    { p + F + R,     4, false, ExplorationConfig::ENABLE_DIAGONAL     },
-                    { p + F + F + L, 5, true,  ExplorationConfig::ENABLE_FAR_DIAGONAL },
-                    { p + F + F + R, 5, true,  ExplorationConfig::ENABLE_FAR_DIAGONAL }
+                    { p + F,         1, ExplorationConfig::ENABLE_FACE_TO_FACE },
+                    { p + F + F,     0, ExplorationConfig::ENABLE_OPTIMAL_DIST },
+                    { p + F + L,     4, ExplorationConfig::ENABLE_DIAGONAL     },
+                    { p + F + R,     4, ExplorationConfig::ENABLE_DIAGONAL     },
+                    { p + F + F + L, 5, ExplorationConfig::ENABLE_FAR_DIAGONAL },
+                    { p + F + F + R, 5, ExplorationConfig::ENABLE_FAR_DIAGONAL }
+                };
+
+                auto blocks_observe_los = [](const SokobanLevel& lvl, point q) -> bool {
+                    if (!PlanningCommon::in_bounds(q)) return true;
+                    if (lvl.map[q.y][q.x] == 1) return true;
+                    return PlanningCommon::has_entity(lvl, q.x, q.y);
+                };
+
+                auto view_los_blocked = [&](const SokobanLevel& lvl, int view_idx) -> bool {
+                    point front = p + F;
+                    if (view_idx == 1 || view_idx == 2 || view_idx == 3) {
+                        return blocks_observe_los(lvl, front);
+                    }
+                    if (view_idx == 4) {
+                        // 远斜角会被正前方和同侧近斜角实体遮挡
+                        return blocks_observe_los(lvl, front) || blocks_observe_los(lvl, front + L);
+                    }
+                    if (view_idx == 5) {
+                        return blocks_observe_los(lvl, front) || blocks_observe_los(lvl, front + R);
+                    }
+                    return false;
                 };
 
                 bool valid_any = false;
@@ -186,15 +208,6 @@ void Exploration::build_entity_views(const SokobanLevel* multi_maps, int B) {
                     for(int b=0; b<lvl.bomb_count; ++b) if(lvl.bombs[b].x != -1 && lvl.bombs[b] == p) occupied = true;
                     if (occupied) continue;
 
-                    // 视线遮挡判定：中间格被墙或实体挡住时，远视距观测失效
-                    bool los_blocked = false;
-                    point mid = p + F;
-                    if (mid.x >= 0 && mid.x < MAP_MAX_WIDTH && mid.y >= 0 && mid.y < MAP_MAX_HEIGHT) {
-                        if (lvl.map[mid.y][mid.x] == 1) los_blocked = true;
-                        for(int b=0; b<lvl.box_count; ++b) if(lvl.boxes[b] == mid) los_blocked = true;
-                        for(int b=0; b<lvl.bomb_count; ++b) if(lvl.bombs[b].x != -1 && lvl.bombs[b] == mid) los_blocked = true;
-                    } else los_blocked = true; 
-
                     uint32_t mask = 0;
                     uint16_t total_penalty = 0;
                     uint8_t count = 0;
@@ -202,7 +215,7 @@ void Exploration::build_entity_views(const SokobanLevel* multi_maps, int B) {
                     // 将候选视野投影到实体掩码上，得到本位姿能观测到的实体集合
                     for (int i = 0; i < 6; ++i) {
                         if (!v_pts[i].enabled) continue; 
-                        if (v_pts[i].needs_los && los_blocked) continue;
+                        if (view_los_blocked(lvl, i)) continue;
                         
                         int eid = get_entity_id(v_pts[i].p, lvl);
                         if (eid != -1 && !(mask & (1UL << eid))) {
@@ -311,19 +324,6 @@ StaticArray<BombTask, MAX_BOMBS> Exploration::optimize_bomb_timeline(
 
                     SokobanLevel next_lvl = lvl;
                     apply_macro_bomb_effect(next_lvl, raw_tasks[i]);
-                    for (int b = 0; b < next_lvl.bomb_count; ++b) {
-                        if (next_lvl.bombs[b].x != -1 && next_lvl.bombs[b] == raw_tasks[i].bomb_start) {
-                            next_lvl.bombs[b] = {-1, -1}; break; 
-                        }
-                    }
-                    point tw = raw_tasks[i].target_wall;
-                    for (int dy = -1; dy <= 1; ++dy) {
-                        for (int dx = -1; dx <= 1; ++dx) {
-                            if (tw.y+dy > 0 && tw.y+dy < MAP_MAX_HEIGHT-1 && tw.x+dx > 0 && tw.x+dx < MAP_MAX_WIDTH-1) {
-                                next_lvl.map[tw.y+dy][tw.x+dx] = 0;
-                            }
-                        }
-                    }
 
                     self(self, next_lvl, next_pos, cost + dist);
                     current_seq.pop_back();
@@ -420,7 +420,7 @@ struct PatrolDfsFrame {
     int support_prefix_len[9];                        // 每个前置推箱任务结束时的路径长度
 };
 
-/// \brief 巡图规划共享 scratch，默认放 OCRAM 避免栈溢出和 DTCM 压力
+/// \brief 巡图规划共享 scratch，放 OCRAM 避免栈溢出和 DTCM 压力
 struct PatrolScratchWorkspace {
     uint16_t micro_tt_sig[8192];       // 小型置换表签名
     int32_t micro_tt_cost[8192];       // 小型置换表最低代价
@@ -446,8 +446,8 @@ struct PatrolScratchWorkspace {
     PatrolDfsFrame dfs_frames[PATROL_DFS_FRAME_LIMIT];       // 按递归深度复用的帧数组
 };
 
-// 巡图大工作区默认放 OCRAM，避免占用 DTCM
-static PatrolScratchWorkspace patrol_ws;
+// 巡图大工作区放 OCRAM，链接脚本必须将 .ocram_bss 放到非 DTCM 区域
+OCRAM_BSS static PatrolScratchWorkspace patrol_ws;
 
 
 /// \brief 搜索最优巡图动作序列
@@ -477,22 +477,6 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
     for (int k = 0; k < B; ++k) {
         multi_maps[k + 1] = multi_maps[k];
         apply_macro_bomb_effect(multi_maps[k + 1], bomb_tasks[k]);
-        point t_wall = bomb_tasks[k].target_wall;
-        
-        for (int b = 0; b < multi_maps[k+1].bomb_count; ++b) {
-            if (multi_maps[k+1].bombs[b].x != -1 && multi_maps[k+1].bombs[b] == bomb_tasks[k].bomb_start) {
-                multi_maps[k+1].bombs[b] = {-1, -1};
-                break;
-            }
-        }
-        for (int dy = -1; dy <= 1; ++dy) {
-            for (int dx = -1; dx <= 1; ++dx) {
-                int ny = t_wall.y + dy, nx = t_wall.x + dx;
-                if (ny > 0 && ny < MAP_MAX_HEIGHT - 1 && nx > 0 && nx < MAP_MAX_WIDTH - 1) {
-                    multi_maps[k + 1].map[ny][nx] = 0; 
-                }
-            }
-        }
     }
 
     build_entity_views(multi_maps, B);
@@ -1309,6 +1293,35 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
             uint16_t full_target_mask = 0;
             for (int t = 0; t < stage_lvl.target_count; ++t) full_target_mask |= (1U << t);
 
+            auto single_box_can_reach_target = [](const SokobanLevel& level,
+                                                  point player,
+                                                  uint8_t box_id,
+                                                  uint8_t target_id) -> bool {
+                if (box_id >= level.box_count || target_id >= level.target_count) return false;
+                if (level.boxes[box_id] == level.targets[target_id]) return true;
+
+                SokobanLevel soft = level;
+                soft.box_count = 1;
+                soft.boxes[0] = level.boxes[box_id];
+                soft.box_semantics[0] = level.box_semantics[box_id];
+                soft.bomb_count = 0;
+
+                point soft_player = player;
+                StaticArray<point, MAX_PATH_LENGTH> path;
+                BoxPushTask task{soft.boxes[0], level.targets[target_id]};
+                return PlanningCommon::append_box_push_path(soft, soft_player, task, path);
+            };
+
+            auto clear_keeps_all_target_options = [&](const SokobanLevel& level, point player, uint8_t box_id) -> bool {
+                if (!PlanningCommon::is_box_position_safe(level, box_id, full_target_mask)) return false;
+
+                // 巡图兜底清障发生在语义绑定前，不能提前把箱子锁进只适配某个目标的单向位置
+                for (int t = 0; t < level.target_count; ++t) {
+                    if (!single_box_can_reach_target(level, player, box_id, static_cast<uint8_t>(t))) return false;
+                }
+                return true;
+            };
+
             for (int e = 0; e < total_entities; ++e) {
                 if (mask & (1UL << e)) continue;
 
@@ -1345,7 +1358,7 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                     }
 
                     for (int d = 0; d < 4; ++d) {
-                        for (int step = 1; step <= 2; ++step) {
+                        for (int step = 1; step <= FALLBACK_CLEAR_MAX_STEPS; ++step) {
                             point target = {
                                 static_cast<int8_t>(stage_lvl.boxes[blocking_box].x + MOVE[d].x * step),
                                 static_cast<int8_t>(stage_lvl.boxes[blocking_box].y + MOVE[d].y * step)
@@ -1359,7 +1372,7 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                             SokobanLevel probe = stage_lvl;
                             point probe_player = curr_pos;
                             if (!PlanningCommon::append_box_push_path(probe, probe_player, task, push_path)) continue;
-                            if (!PlanningCommon::is_box_position_safe(probe, static_cast<uint8_t>(blocking_box), full_target_mask)) continue;
+                            if (!clear_keeps_all_target_options(probe, probe_player, static_cast<uint8_t>(blocking_box))) continue;
 
                             uint16_t after_direct = PlanningCommon::shortest_grid_time_cost(probe, probe_player, vp.pos);
                             if (after_direct == 65535) continue;

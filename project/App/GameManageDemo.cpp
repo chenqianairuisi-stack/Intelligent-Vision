@@ -62,7 +62,7 @@ __attribute__((section(".ramfunc"))) void DemoGameManager::update() {
             // Step A：炸弹任务规划耗时
             auto& bomb_tasks = App::g_state.planning.bomb_tasks;
             uint32_t t0 = Core::Scheduler::get_sys_tick_ms();
-            bomb_tasks = strategic_planner.evaluate_and_assign_bombs<GameMode::PHASE1_ANY>(logical_level);
+            bomb_tasks = strategic_planner.plan_phase1_bombs(logical_level);
             patrol_bomb_plan_time_ms = Core::Scheduler::get_sys_tick_ms() - t0;
 
             // Step B：只统计 Exploration 参考巡图规划耗时，不包含 MacroPlanner 在线调度
@@ -279,7 +279,7 @@ __attribute__((section(".ramfunc"))) void DemoGameManager::update() {
                 // 二次炸弹解算（附带语义信息）
                 auto& bombs = App::g_state.planning.bomb_tasks;
                 uint32_t t0 = Core::Scheduler::get_sys_tick_ms();
-                bombs = strategic_planner.evaluate_and_assign_bombs<GameMode::PHASE2_SPECIFIC>(logical_level);
+                bombs = strategic_planner.plan_phase2_bombs(logical_level, bombs);
                 push_bomb_plan_time_ms = Core::Scheduler::get_sys_tick_ms() - t0;
 
                 App::g_state.debug.need_bg_redraw = true;

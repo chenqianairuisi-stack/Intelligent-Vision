@@ -391,7 +391,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
         case GamePhase::PLAN_PATROL: {
             // 解算炸弹任务（无炸弹时自动退化）
             auto& bombs = App::g_state.planning.bomb_tasks;
-            bombs = strategic_planner.evaluate_and_assign_bombs<GameMode::PHASE1_ANY>(logical_level);
+            bombs = strategic_planner.plan_phase1_bombs(logical_level);
 
             // 规划巡图路径，得到宏观动作参考序列
             patrol_planner.load_level(logical_level);
@@ -770,12 +770,11 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
 /// 函数会根据当前 logical_level.box_semantics / target_semantics 恢复语义绑定，
 /// 重新计算第二阶段炸弹任务，并把当前逻辑地图、语义关系、
 /// 炸弹任务一起载入 Sokoban 求解器。求解失败重试时会传入 true，
-/// 让 Strategy 使用更激进的动态兜底策略重新选择炸弹任务。
+/// 重试路径保留参数以维持状态机接口，新策略内部自行处理继承任务与补充任务。
 bool GameManager::prepare_phase2_solver(bool dynamic_fallback) {
+    (void)dynamic_fallback;
     auto& bombs = App::g_state.planning.bomb_tasks;
-    strategic_planner.set_phase2_dynamic_fallback(dynamic_fallback);
-    bombs = strategic_planner.evaluate_and_assign_bombs<GameMode::PHASE2_SPECIFIC>(logical_level);
-    strategic_planner.set_phase2_dynamic_fallback(false);
+    bombs = strategic_planner.plan_phase2_bombs(logical_level, bombs);
 
     if (!solver.load_from_vision(logical_level, bombs.empty() ? nullptr : bombs.data(), bombs.size())) return false;
     if (!solver.bind_semantics()) return false;

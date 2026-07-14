@@ -47,7 +47,7 @@ Get-Content -Encoding UTF8
 常用本地语法检查命令：
 
 ```powershell
-g++ -std=c++17 -fsyntax-only -Iproject/Core -Iproject/App -Iproject/Algorithm project/Algorithm/PlanningCommon.cpp project/Algorithm/Strategy.cpp project/Algorithm/Exploration.cpp project/Algorithm/Sokoban.cpp project/Algorithm/MacroPlanner.cpp
+g++ -std=c++17 -fsyntax-only -Iproject/Core -Iproject/App -Iproject/Algorithm project/Algorithm/PlanningCommon.cpp project/Algorithm/StrategyCommon.cpp project/Algorithm/StrategyPhase1.cpp project/Algorithm/StrategyPhase2.cpp project/Algorithm/Exploration.cpp project/Algorithm/Sokoban.cpp project/Algorithm/MacroPlanner.cpp
 g++ -std=c++17 -fsyntax-only -Iproject/Core -Iproject/App -Iproject/Algorithm -Iproject/Subsystem -Iproject/Device -Iproject/Driver -Iproject project/App/GameManageDemo.cpp project/App/GameManageMock.cpp
 ```
 

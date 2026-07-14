@@ -31,8 +31,8 @@ MacroPlanner 模块说明
 /// \details
 /// observed_mask 的低 box_count 位表示箱子，后续 target_count 位表示目标点。
 /// inferred_semantics 保存 Macro 根据观测和 N-1 规则得到的实体语义。
-/// candidate_targets / bound_target 只供完成式推箱候选位使用，
-/// 不代表最终 Sokoban 的固定箱-目标绑定。
+/// candidate_targets / bound_target 只作为当前旧版 Sokoban 接口的兼容输出，
+/// 不再代表 Macro 阶段的真实语义状态。
 struct KnowledgeState {
     uint32_t observed_mask = 0;              // 已观测实体 bitmask
     int8_t inferred_semantics[MAX_ENTITIES]; // 推断后的实体语义，-1 表示仍未知
@@ -40,7 +40,7 @@ struct KnowledgeState {
     bool needs_supplemental_observe = false; // N-1 后仍无法唯一推断最后一组时置位
     uint16_t candidate_targets[MAX_BOXES];   // 每个箱子仍可能绑定到哪些目标点
     uint8_t bound_target[MAX_BOXES];         // 已确定绑定时的目标点编号
-    bool is_bound[MAX_BOXES];                // 完成式推箱是否已有临时 box -> target
+    bool is_bound[MAX_BOXES];                // 兼容旧求解器的临时 box -> target 是否可导出
 };
 
 /// \brief 单次在线决策所需的动态上下文
@@ -97,9 +97,18 @@ public:
 
     const KnowledgeState& knowledge() const { return knowledge_state; }
 
-    /// \brief 将 Macro 推断出的实体语义写回关卡
-    /// \param level 当前逻辑地图
+    /// \brief 输出第二阶段需要的 box -> target 配对
+    /// \param out_ids 输出数组，out_ids[box_id] = target_id
+    /// \param box_count 当前箱子数量
+    /// \return 配对完整时返回 true
+    bool fill_matched_ids(uint8_t* out_ids, uint8_t box_count);
+
+    /// \brief 输出 Macro 推断出的实体语义标签
+    /// \param out_labels 输出数组，前 box_count 项为箱子，后 target_count 项为目标点
     /// \return 语义推断完整时返回 true
+    bool fill_semantic_labels(int8_t* out_labels) const;
+
+    /// \brief 将 Macro 推断语义写回当前地图
     bool apply_semantics_to_level(SokobanLevel& level) const;
 
 private:
@@ -158,6 +167,7 @@ private:
         bool allow_supplemental_observe = true) const;
     bool apply_inferred_semantics(const SokobanLevel& level, const int8_t* inferred_labels);
     bool force_supplemental_fallback(const SokobanLevel& level);
+    bool build_semantic_matched_ids(const SokobanLevel& level, const int8_t* labels, uint8_t* out_matched_ids) const;
     bool has_required_observations(const SokobanLevel& level) const;
     bool reference_sequence_done(const SokobanLevel& level) const;
     bool semantics_ready() const;
