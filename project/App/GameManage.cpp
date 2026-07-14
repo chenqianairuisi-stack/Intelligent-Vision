@@ -22,6 +22,12 @@ constexpr float INV_GRID_SIZE_CM = 1.0f / SystemConfig::GRID_SIZE_CM;
 namespace {
     constexpr Point2D RETURN_HOME_TARGET = {SystemConfig::ENTRY_X, SystemConfig::ENTRY_Y};
     constexpr float RETURN_HOME_YAW = SystemConfig::ENTRY_YAW;
+
+    // 连续发车轮次模式表：round 0 纯推箱，round 1/2 识别（巡图+推箱）。
+    // 顺序 [pure, advanced, advanced] 保证没有陈旧巡图状态泄漏进 advanced 轮。
+    constexpr bool ROUND_ADVANCED_SEQ[] = {false, true, true};
+    constexpr uint8_t CONTINUOUS_ROUND_COUNT =
+        static_cast<uint8_t>(sizeof(ROUND_ADVANCED_SEQ) / sizeof(ROUND_ADVANCED_SEQ[0]));
     // 返航到家判定半径：放宽到比小车停车散布更大一圈，避免在过严的点位上反复蹭/挪
     constexpr float RETURN_HOME_REACH_RADIUS_CM = 1.5f;
     constexpr float RETURN_FINAL_YAW_TOLERANCE_DEG = 2.0f;
@@ -156,10 +162,12 @@ void init() {
     gpio_init(C26, GPI, GPIO_HIGH, GPI_PULL_UP);
     system_delay_ms(10); 
 
-    bool sw1_on = !gpio_get_level(C26); 
-    bool sw2_on = !gpio_get_level(C27); 
+    bool sw2_on = !gpio_get_level(C27);
 
-    App::g_state.game.is_advanced_stage = sw1_on;  // 赛段模式：开-第二/三阶段（巡图+推箱），关-第一阶段（仅推箱）
+    // 连续发车：一次上电默认连打 3 次（round 0 纯推箱，round 1/2 识别，见 ROUND_ADVANCED_SEQ）。
+    // sw1(C26) 不再决定赛段——赛段由轮次表在每轮返航到家时切换；C26 的 gpio_init 保留以便日后恢复该开关。
+    App::g_state.game.round_idx         = 0;
+    App::g_state.game.is_advanced_stage = ROUND_ADVANCED_SEQ[0];  // 第 0 轮固定纯推箱 (== false)
     App::g_state.game.is_debug_mode     = sw2_on;  // 调试模式：开-直接注入地图数据，绕过视觉输入；关-正常模式，等待视觉输入
 
     if (App::g_state.game.is_debug_mode) {
@@ -631,7 +639,16 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 RETURN_HOME_TARGET, RETURN_HOME_REACH_RADIUS_CM);
 
             if (odom_at_home && App::g_state.physical.is_stopped && yaw_aligned) {
-                game.phase = GamePhase::FINISHED;
+                // 本轮已返航到家并停稳。若还有下一轮，推进轮次、切换赛段，重新进入
+                // INIT_CALIBRATE——它会重新 arm 地图接收闸、把里程计原点设回 home、重发去观测点
+                // 指令、清炸弹等待并解除视觉抑制，等价于一次完整的单轮复位（重新申请地图）。
+                if (game.round_idx + 1 < CONTINUOUS_ROUND_COUNT) {
+                    game.round_idx++;
+                    game.is_advanced_stage = ROUND_ADVANCED_SEQ[game.round_idx];  // 下轮赛段：先设好再重进 INIT
+                    game.phase = GamePhase::INIT_CALIBRATE;   // 重新发车
+                } else {
+                    game.phase = GamePhase::FINISHED;         // 第 3 轮完成，永久停止
+                }
             }
             break;
         }

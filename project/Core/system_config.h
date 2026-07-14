@@ -51,8 +51,8 @@ namespace SystemConfig {
     // 规划算法参数
     static constexpr int MAP_MAX_WIDTH = 12;                    // 地图最大宽度（网格坐标）
     static constexpr int MAP_MAX_HEIGHT = 16;                   // 地图最大高度（网格坐标）
-    static constexpr int PLAN_START_X = 4;                      // 出库点 X 坐标（网格坐标）
-    static constexpr int PLAN_START_Y = 1;                      // 出库点 Y 坐标（网格坐标）
+    static constexpr int PLAN_START_X = 6;                      // 出库点 X 坐标（网格坐标，对齐 OUT_TARGET 物理点 130,50）
+    static constexpr int PLAN_START_Y = 2;                      // 出库点 Y 坐标（网格坐标，grid_to_physical(6,2)=(130,50)）
     static constexpr int MAX_BOXES = 10;                        // 最大箱子数
     static constexpr int MAX_BOMBS = 3;                         // 最大炸弹数
     static constexpr int MAX_ENTITIES = 2 * MAX_BOXES;          // 最大实体数（箱子+目标点）
@@ -62,11 +62,11 @@ namespace SystemConfig {
     static constexpr int MAX_PATH_LENGTH = 200;                 // 最大搜索步数
     
     // 其他全局常量
-    static constexpr float ENTRY_X = 124.5f;                    // 入口位置 X 坐标
-    static constexpr float ENTRY_Y = 14.0f;                     // 入口位置 Y 坐标
+    static constexpr float ENTRY_X = 130.0f;                    // 入口/返航 home 点 X 坐标（连续发车每轮起止点）
+    static constexpr float ENTRY_Y = 30.0f;                     // 入口/返航 home 点 Y 坐标
     static constexpr float ENTRY_YAW = 90.0f;                   // 入口位置航向（单位：度，0度为x轴正方向，逆时针为正）
-    static constexpr float OUT_TARGET_X = 90.0f;                // 出库目标位置 X 坐标
-    static constexpr float OUT_TARGET_Y = 30.0f;                // 出库目标位置 Y 坐标
+    static constexpr float OUT_TARGET_X = 130.0f;               // 出库/观测建图点 X 坐标（发车后到此请求地图）
+    static constexpr float OUT_TARGET_Y = 50.0f;                // 出库/观测建图点 Y 坐标
     static constexpr float IN_TARGET_X = 130.0f;                // 入库目标位置 X 坐标
     static constexpr float IN_TARGET_Y = 30.0f;                 // 入库目标位置 Y 坐标
 

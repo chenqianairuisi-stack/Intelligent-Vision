@@ -21,6 +21,7 @@ struct RobotState {
         uint8_t selected_map_id = 0;     // 选定的地图 ID（由 UI 菜单设置，供调试模式使用）
         uint8_t error_stage = 0;         // 发生错误的阶段（仅在 phase == ERROR_OCCURRED 时用于定位问题）
         uint8_t action_idx = 0;          // 当前宏动作索引
+        uint8_t round_idx = 0;           // 连续发车当前轮次 (0..2)：0=纯推箱，1/2=识别。INIT_CALIBRATE 不复位它，供跨轮循环存活
     } game;
 
     // 2. 感知层 (视觉模块写入，其他模块读取)
