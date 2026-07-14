@@ -117,6 +117,12 @@ struct TuningConfig {
     // 旧 flash 无此区、memcpy 读出垃圾 → 由 sanitize 兜回 Branch 调好的默认值（见 storage.cpp 尾部约定）。
     // 新轮速环走此表；旧 pid_speed / ff.kv / ff.ka 字段保留但不再被速度内环使用。
     WheelControlParams wheels[4];
+
+    // 停车近端线性带宽度 cm（2026-07-14 追加在结构体**最末尾**，不 bump magic）：停车工况（含 AUTO
+    // 推箱/终点）在离目标 band 内用线性律 v=k·d 收敛替代原始 sqrt，把冲进 reach_radius 的残速压下来
+    // → hard_lock 只收尾极小速度，稳停少过冲（治推箱冲过头刮箱）。越大近端越柔越准（略慢）；
+    // 旧 flash 无此区、memcpy 读出 0/垃圾 → 由 sanitize 兜回默认。上车 !T S 直接调。
+    float stop_approach_band_cm;
 };
 
 namespace TuningDefaults {
@@ -126,7 +132,7 @@ namespace TuningDefaults {
     inline constexpr float DEFAULT_ENCODER_LATENCY_GAIN = 1.00f;
     inline constexpr float DEFAULT_VISION_LATENCY_MS = 310.0f;
     inline constexpr float DEFAULT_VISION_REQUEST_INTERVAL_MS = 100.0f;
-    inline constexpr float DEFAULT_VISION_REJECT_DIST = 3.0f;
+    inline constexpr float DEFAULT_VISION_REJECT_DIST = 5.0f;  // 与 FULL_MAX_STEP_CM=5 匹配：差<5cm 都能一帧纠到位
 
     // 拐点对齐实时延时估计默认参数
     inline constexpr bool  DEFAULT_LATENCY_EST_ENABLE = true;
@@ -152,6 +158,10 @@ namespace TuningDefaults {
     // 刹车/切向手感默认（追加末尾，不入 magic）
     inline constexpr float DEFAULT_BRAKE_HOLD_GAIN = 0.30f;   // 主动刹车前馈增益
     inline constexpr float DEFAULT_CORNER_TURN_ACC = 250.0f;  // 切向方向变化加速度限 cm/s^2
+
+    // 停车近端线性带默认（最末尾追加，不入 magic）：3.0 与旧非 AUTO 常量一致，非 AUTO 行为不变；
+    // AUTO 停车航点由原始 sqrt 改走此线性带 → 少过冲。上车按实测把 band 调大（8~15）直到不刮箱。
+    inline constexpr float DEFAULT_STOP_APPROACH_BAND_CM = 3.0f;  // cm
 
     // Yaw 轴控制链默认（2026-07-10 从 Branch 融合，追加末尾不入 magic）
     inline constexpr float DEFAULT_YAW_LIN_BAND       = 0.18f;  // rad，约 7 度线性带
@@ -201,6 +211,10 @@ namespace TuningDefaults {
     inline constexpr float MAX_BRAKE_HOLD_GAIN = 2.0f;
     inline constexpr float MIN_CORNER_TURN_ACC = 20.0f;
     inline constexpr float MAX_CORNER_TURN_ACC = 1000.0f;
+
+    // 停车近端线性带范围：MIN 取 >0，使旧 flash 追加区读出的 0/垃圾值必被 sanitize 兜回默认
+    inline constexpr float MIN_STOP_APPROACH_BAND_CM = 0.5f;
+    inline constexpr float MAX_STOP_APPROACH_BAND_CM = 30.0f;
 
     // Yaw 轴控制链范围：MIN 取 >0，旧 flash 尾部追加区读出的 0/垃圾值必被 sanitize 兜回默认
     inline constexpr float MIN_YAW_LIN_BAND       = 0.02f;  // 过小会退回 sqrt 的无穷斜率问题
@@ -348,6 +362,12 @@ namespace TuningDefaults {
             changed = clamp_if_outside(wp.kb,     0.0f, 1.0f, def.kb)     || changed;
         }
 
+        // 停车近端线性带（结构体最末尾追加字段）：旧 flash 无此区读出 0/垃圾/NaN → 兜回默认（免 bump magic）
+        changed = clamp_if_outside(config.stop_approach_band_cm,
+                                   MIN_STOP_APPROACH_BAND_CM,
+                                   MAX_STOP_APPROACH_BAND_CM,
+                                   DEFAULT_STOP_APPROACH_BAND_CM) || changed;
+
         return changed;
     }
 }
@@ -374,7 +394,7 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
         2.0f,    // corner_switch_window —— 带速过弯模式提前切段窗口，上限 8cm，!SN 调
         0.7f,    // corner_line_tolerance
         TuningDefaults::DEFAULT_VISION_REQUEST_INTERVAL_MS,  // vision_request_interval_ms
-        3.0f,    // vision_reject_dist
+        TuningDefaults::DEFAULT_VISION_REJECT_DIST,  // vision_reject_dist
         0.010f,  // ang_tolerance —— 与 Branch 对齐：yaw 死区（配合陀螺阻尼压近端抖动）
         TuningDefaults::DEFAULT_CORNER_PAUSE_SPEED  // corner_pause_speed —— force_stop/逐点停车略停阈值；默认连贯模式不使用
     },
@@ -426,5 +446,6 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
         TuningDefaults::DEFAULT_WHEELS[1],  // wheels[LB]
         TuningDefaults::DEFAULT_WHEELS[2],  // wheels[RF]
         TuningDefaults::DEFAULT_WHEELS[3]   // wheels[RB]
-    }
+    },
+    TuningDefaults::DEFAULT_STOP_APPROACH_BAND_CM   // stop_approach_band_cm（结构体末尾追加）
 };

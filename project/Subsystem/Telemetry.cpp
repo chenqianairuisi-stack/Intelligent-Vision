@@ -458,6 +458,7 @@ namespace {
                     case 'B': tune.bomb.explosion_wait_ms = value; break;  // 炸弹引信等待 ms
                     case 'G': tune.feel.brake_hold_gain = value; break;    // 主动刹车前馈增益（刹更狠锁更死）
                     case 'A': tune.feel.corner_turn_acc = value; break;    // 切向方向变化加速度限 cm/s^2（大=切更直不磨圆）
+                    case 'S': tune.stop_approach_band_cm = value; break;   // 停车近端线性带宽 cm（大=进点更柔更准略慢，小=更猛更快）
                     default: return;
                 }
                 break;

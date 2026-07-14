@@ -27,14 +27,16 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
         return {0.0f, 0.0f};
     }
 
-    // 弹簧终端总开关：只有"停车工况 且 非 AUTO 正在循迹"才启用弹簧（线性带 + 静止死区）。
-    //   · 空载/观测保持/!M 调试点：启用 → 治原地颤抖、稳停。
-    //   · AUTO 正循迹（航点/推箱）：不启用 → 走原版 sqrt 满力气进点，推箱靠力气顶到位不"原地待机"，
-    //     停车由 Tracker 的 hard_lock 收尾。（弹簧近端压速会削掉顶箱力气，故 AUTO 一律豁免。）
+    // 停车工况终端整形，两层分别控制：
+    //   · 近端线性带（v=k·d 收敛，压低进 reach_radius 的残速→稳停少过冲）：所有停车工况都启用，
+    //     含 AUTO 推箱/终点（按 is_stop 判定）。带宽 tune.stop_approach_band_cm，!T S 现场调。
+    //   · 弹簧静止死区（进 rest_radius 直接命令零速，治空载/观测保持/!M 调试点"原地颤抖"）：仅非 AUTO
+    //     启用；AUTO 正循迹不启用，避免近端零速死区削掉顶箱力气，停车由 Tracker 的 hard_lock 收尾。
     float rest_radius = tune.tracker.reach_radius;
     bool active_auto_track = (App::g_state.control.mode == ControlMode::AUTO_TRACKING &&
                              App::g_state.control.tracker_state == TrackerState::TRACKING);
-    bool spring_terminal = (target_end_speed <= 0.1f && !active_auto_track);
+    bool is_stop = (target_end_speed <= 0.1f);              // 停车工况（含 AUTO 推箱/终点）
+    bool spring_terminal = (is_stop && !active_auto_track); // 弹簧静止死区仅非 AUTO 启用（AUTO 靠 hard_lock 收尾）
 
     // 弹簧静止点（治空载/保持点"原地颤抖"根因）：进"到达半径"内直接停伺服、命令零速，不再追毫米级
     // 残差——sqrt 在 d→0 斜率无穷会把残差放大成大速度→原地猛冲抖，max_acc 越大越抖。
@@ -52,19 +54,24 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
 
     float target_v = max_speed;
     if (distance <= brake_dist) {
-        if (spring_terminal) {
-            // 弹簧终端：远端 sqrt(时间最优减速)，近端 TERMINAL_LIN_BAND_CM 内切成线性律 v=k·distance
-            // （斜率有界）——越靠近目标阻尼越大、线性柔和收敛到 0（"撞弹簧不撞墙"），且毫米级残差只
-            // 映射成小速度、不再被 sqrt 无穷斜率放大成猛冲。带宽先用常量，需要现调可再接菜单。
-            constexpr float TERMINAL_LIN_BAND_CM = 3.0f;
-            float v_edge = sqrtf(2.0f * brake_acc * TERMINAL_LIN_BAND_CM);
-            target_v = (distance >= TERMINAL_LIN_BAND_CM)
+        if (is_stop) {
+            // 停车工况近端线性带：远端 sqrt(时间最优减速)，离目标 band 内切成线性律 v=k·distance
+            //（斜率有界）——把冲进 reach_radius 的残速从 sqrt 的 ~sqrt(2a·r) 压到 (v_edge/band)·r，
+            // hard_lock 只需收尾极小速度→稳停、过冲小且可复现（治推箱冲过头刮箱）。band 越大近端越柔越准（略慢）。
+            // 原仅非 AUTO 启用（AUTO 走满力气 sqrt 进点靠 hard_lock 急刹→带 ~sqrt(2a·r) 撞进半径，过冲大且散）；
+            // 现 AUTO 停车航点同样走此律，band 由 !T S 现场调（tune.stop_approach_band_cm）。
+            float band = tune.stop_approach_band_cm;
+            if (!(band >= 0.5f && band <= 30.0f)) {
+                band = 3.0f;   // 运行期兜底：NaN/越界（比较恒 false 落此）→ 安全默认，不依赖 sanitize
+            }
+            float v_edge = sqrtf(2.0f * brake_acc * band);
+            target_v = (distance >= band)
                 ? sqrtf(2.0f * brake_acc * distance)
-                : (v_edge / TERMINAL_LIN_BAND_CM) * distance;
+                : (v_edge / band) * distance;
         } else {
-            // AUTO 循迹停车 / 过弯带速通过：原版 sqrt 反推（满力气进点、保切向动量）
+            // 过弯带速通过：sqrt 反推保切向动量，末速度不低于目标保留速度
             target_v = sqrtf(target_end_speed * target_end_speed + 2.0f * brake_acc * distance);
-            if (target_end_speed > 0.1f && target_v < target_end_speed) {
+            if (target_v < target_end_speed) {
                 target_v = target_end_speed;
             }
         }

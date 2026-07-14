@@ -541,7 +541,7 @@ namespace {
     // 每帧每轴限步避免控制环抖动；粗差由上层 reset 阈值兜底
     [[gnu::always_inline]] inline bool apply_full_2d_correction(const Pose2D& vision_pose,
                                                                Pose2D& odom_pose) {
-        constexpr float FULL_MAX_STEP_CM = 1.5f;  // 每帧每轴最大纠偏步长（30Hz 全闭环）
+        constexpr float FULL_MAX_STEP_CM = 5.0f;  // 每帧每轴最大纠偏步长（原 1.5，用户要求加大到 5）
         float step_x = 0.0f, step_y = 0.0f;
         bool any = false;
         if (calc_smoothed_correction_step(vision_pose.x - odom_pose.x,

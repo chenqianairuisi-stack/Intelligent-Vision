@@ -12,6 +12,9 @@
 // 注：2026-07-04 在 TuningConfig **末尾**追加 feel{brake_hold_gain,corner_turn_acc}，
 //     属"只在尾部追加"——旧 flash 读出的尾部区由 sanitize 兜回默认，故**不 bump magic**、
 //     保留用户已调参数。只有在结构体中段插字段/改布局时才必须 bump。
+// 注：2026-07-14 在 TuningConfig **最末尾**（wheels[] 之后）追加 stop_approach_band_cm，
+//     同为"尾部追加"，wheels/yaw/feel 等偏移不变、旧 flash 已调参数照常读出，新字段由
+//     sanitize 兜回默认，故同样**不 bump magic**。
 #define CONFIG_MAGIC_WORD         (0xAA55CC57)
 
 void Storage::init() {
@@ -95,6 +98,13 @@ bool Storage::load_params() {
     }
     if (tune.tracker.ang_tolerance == 0.006f) {
         tune.tracker.ang_tolerance = 0.010f;
+        changed = true;
+    }
+
+    // 视觉纠偏幅度加大(2026-07-14)：FULL_MAX_STEP_CM 步长 1.5→5，配套把接受阈值默认 3→5。
+    // flash 里若残留旧默认 3.0 就抬到 5.0，让"改默认重烧"即生效；用户已现场调过(!S G，值≠3.0)则保留。
+    if (tune.tracker.vision_reject_dist == 3.0f) {
+        tune.tracker.vision_reject_dist = TuningDefaults::DEFAULT_VISION_REJECT_DIST;
         changed = true;
     }
 
