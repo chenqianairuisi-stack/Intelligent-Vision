@@ -46,7 +46,7 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
     // 停车工况终端整形：
     //   · 弹簧静止死区（进 rest_radius 直接命令零速，治空载/观测保持/!M 调试点"原地颤抖"）：仅非 AUTO
     //     启用；AUTO 正循迹不启用，避免近端零速死区削掉顶箱力气，停车由 Tracker 的 hard_lock 收尾。
-    //   （2026-07-15 移除近端线性带 StopBand——实测无用；停车减速回到纯 sqrt 直落，见下方）
+    //   （2026-07-15 删 StopBand 后一度回纯 sqrt 直落；同日改为下方"接近区双段 sqrt 提前刹车"）
     float rest_radius = tune.tracker.reach_radius;
     bool active_auto_track = (App::g_state.control.mode == ControlMode::AUTO_TRACKING &&
                              App::g_state.control.tracker_state == TrackerState::TRACKING);
@@ -61,6 +61,30 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
         return {0.0f, 0.0f};
     }
 
+    // 停车接近区双段刹车（治"末端总是出去一些、StopBrkG 大小都调不好"）：
+    // 过冲发生在 hard_lock 视觉冻结窗口内、事后又有粘滞锁死区兜着，单一 sqrt 曲线永远调不准。
+    // 修法=**提前刹车**：停车段最后 zone cm 换一条更缓的 sqrt 曲线（approach_brake_acc），
+    // 外段仍按原 brake_acc 刹车、在 zone 边界与缓曲线 C0 连续衔接——刹车点因此显著提前，
+    // 车末端明显慢下来（非固定爬行速度），低速下视觉延迟误差≈速度×310ms 变小、编码器不打滑，
+    // 视觉+编码器融合在进点前就收敛到真实位置。zone = min(zone_cm, 段全长×ratio)：
+    // 长距离封顶 40cm，20cm 段→5cm（用户拍板）。参数垃圾/关闭(!T Z 0.5)时 zone=0 → 回纯 sqrt 直落。
+    float approach_zone = 0.0f;
+    float approach_acc = 0.0f;
+    if (is_stop) {
+        float z_cap = tune.approach_zone_cm;
+        float z_ratio = tune.approach_zone_ratio;
+        float a_apr = tune.approach_brake_acc;
+        if (std::isfinite(z_cap) && z_cap >= 1.0f &&
+            std::isfinite(a_apr) && a_apr >= 1.0f && a_apr < brake_acc) {
+            approach_zone = z_cap;
+            if (std::isfinite(z_ratio) && z_ratio > 0.01f &&
+                std::isfinite(seg_len_cm) && seg_len_cm >= 1.0f) {
+                approach_zone = std::min(approach_zone, seg_len_cm * z_ratio);
+            }
+            approach_acc = a_apr;
+        }
+    }
+
     // 刹车距离按末速度反推，end_speed 越高，越晚开始减速
     float brake_dist = (max_speed * max_speed - target_end_speed * target_end_speed) / (2.0f * brake_acc);
     if (brake_dist < 0.0f) {
@@ -68,10 +92,22 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
     }
 
     float target_v = max_speed;
-    if (distance <= brake_dist) {
+    if (is_stop && approach_zone > 0.5f) {
+        // 停车工况+接近区有效：双段 sqrt 减速。
+        //   近端(distance<=zone)：缓曲线 v=sqrt(2·a_apr·d)，末端慢慢收进点；
+        //   外段：v=sqrt(v_edge²+2·brake_acc·(d-zone))，正常刹车强度、提前 zone 开始，
+        //         在 zone 边界正好落到缓曲线的 v_edge 上（C0 连续，无台阶）。
+        // min(max_speed) 天然给出提前后的刹车起点，无需另算 brake_dist。
+        float v_edge_sq = 2.0f * approach_acc * approach_zone;
+        if (distance <= approach_zone) {
+            target_v = sqrtf(2.0f * approach_acc * distance);
+        } else {
+            target_v = sqrtf(v_edge_sq + 2.0f * brake_acc * (distance - approach_zone));
+        }
+        target_v = std::min(target_v, max_speed);
+    } else if (distance <= brake_dist) {
         if (is_stop) {
-            // 停车工况：纯 sqrt 时间最优减速直落到点（2026-07-15 删除近端线性带 StopBand，实测无用；
-            // 进点残速由 hard_lock 收尾，冲过头由 stop_approach_brake_gain 放大每拍减速限幅治）。
+            // 停车工况（接近区关闭/参数无效的回退）：纯 sqrt 时间最优减速直落到点。
             target_v = sqrtf(2.0f * brake_acc * distance);
         } else {
             // 过弯带速通过：sqrt 反推保切向动量，末速度不低于目标保留速度
@@ -82,10 +118,9 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
         }
     }
 
-    // 不再额外做近终点慢速爬行：梯形刹车规划本身已把 target_v 平滑收敛到 0，
-    // 直接按正常速度减速进点停车（靠近箱子/拐点不再缓慢蹭进）。
+    // 每拍速度斜坡限幅：
     float max_dv_acc = accel_ramp * dt;   // 加速斜坡：短段被 accel_ramp 抬高（只影响此处）
-    float max_dv_dec = brake_acc * dt;    // 刹车斜坡：始终用温柔 brake_acc，短段也不变
+    float max_dv_dec = brake_acc * dt;    // 刹车斜坡：始终用 brake_acc（接近区缓曲线是目标更低，不需更大限幅）
 
     // 停车接近区抖减速：仅停车工况放大**每拍减速上限**（不动 target 曲线/加速斜坡/过弯带速）。
     // 带速冲进停车航点的车会被原始 brake_acc·dt 温柔限幅卡住、来不及掉到 sqrt 目标曲线上就冲过点；

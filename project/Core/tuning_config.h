@@ -140,6 +140,18 @@ struct TuningConfig {
     // 读出 0/垃圾 → sanitize 用 repair 兜回 60/300（默认开）；上车 !T D / !T V 直接调，!T D 1≈关闭。
     float short_seg_len_cm;   // 短段判定阈值 cm（段全长 <= 此值走高加速；1 以下≈关闭）
     float short_seg_accel;    // 短段起步加速度 cm/s^2（只压加速斜坡，不动刹车）
+
+    // 停车接近区双段刹车（2026-07-15 追加在结构体**最末尾**，不 bump magic）：治"末端总是出去一些、
+    // StopBrkG 大小都调不好"。根因=过冲发生在 hard_lock 视觉冻结窗口内，事后又有粘滞锁死区兜着，
+    // 靠单一 sqrt 曲线+减速限幅永远调不准。修法=**提前刹车**：停车段最后 zone cm 换一条**更缓**的
+    // sqrt 曲线（approach_brake_acc << brake_acc），外段正常刹车曲线落到缓曲线上（C0 连续）——
+    // 车末端明显慢下来（非固定爬行速度），低速下视觉延迟误差≈速度×310ms 变小、编码器不打滑，
+    // 融合在进点前就收敛到真实位置。zone = min(approach_zone_cm, 段全长×approach_zone_ratio)：
+    // 长距离提前 40cm、20cm 段提前 5cm（用户拍板）。**默认启用**；!T Z 0.5≈关闭（回纯 sqrt 直落）。
+    // 旧 flash 尾部读出 0/垃圾 → sanitize 用 repair 兜回默认（默认开）。!T Z / !T R / !T C 在线调。
+    float approach_zone_cm;     // 接近区提前刹车距离上限 cm（默认 40；0.5≈关闭）
+    float approach_zone_ratio;  // 接近区占段全长比例（默认 0.25：20cm 段→5cm，160cm+→封顶 40cm）
+    float approach_brake_acc;   // 接近区缓减速度 cm/s^2（默认 15，须 < brake_acc 才生效）
 };
 
 namespace TuningDefaults {
@@ -188,6 +200,13 @@ namespace TuningDefaults {
     // 段全长 <= 60cm 的移动起步加速抬到 300，只压加速斜坡、不动刹车曲线。
     inline constexpr float DEFAULT_SHORT_SEG_LEN_CM = 60.0f;   // cm
     inline constexpr float DEFAULT_SHORT_SEG_ACCEL  = 300.0f;  // cm/s^2
+
+    // 停车接近区双段刹车默认（最末尾追加，不入 magic）：**默认启用**（用户拍板"末端要提前刹车"）。
+    // zone = min(40, 段全长×0.25)：20cm 段→5cm、160cm+ 段→封顶 40cm；接近区内走 15cm/s^2 缓 sqrt，
+    // 末端明显慢下来让视觉+编码器融合收敛。!T Z 0.5≈关闭（回纯 sqrt 直落）。
+    inline constexpr float DEFAULT_APPROACH_ZONE_CM    = 40.0f;  // cm
+    inline constexpr float DEFAULT_APPROACH_ZONE_RATIO = 0.25f;  // ×段全长
+    inline constexpr float DEFAULT_APPROACH_BRAKE_ACC  = 15.0f;  // cm/s^2
 
     // Yaw 轴控制链默认（2026-07-10 从 Branch 融合，追加末尾不入 magic）
     inline constexpr float DEFAULT_YAW_LIN_BAND       = 0.18f;  // rad，约 7 度线性带
@@ -252,6 +271,15 @@ namespace TuningDefaults {
     inline constexpr float MAX_SHORT_SEG_LEN_CM = 200.0f;
     inline constexpr float MIN_SHORT_SEG_ACCEL  = 20.0f;
     inline constexpr float MAX_SHORT_SEG_ACCEL  = 1000.0f;
+
+    // 停车接近区双段刹车范围：MIN 取 >0，使旧 flash 尾部读出的 0/NaN/垃圾被 repair 兜回默认（=默认启用）。
+    // zone_cm 允许调到 0.5（=运行期判定 <1 视为关闭）；ratio 上限 1.0（整段都算接近区）。
+    inline constexpr float MIN_APPROACH_ZONE_CM    = 0.5f;
+    inline constexpr float MAX_APPROACH_ZONE_CM    = 100.0f;
+    inline constexpr float MIN_APPROACH_ZONE_RATIO = 0.05f;
+    inline constexpr float MAX_APPROACH_ZONE_RATIO = 1.0f;
+    inline constexpr float MIN_APPROACH_BRAKE_ACC  = 1.0f;
+    inline constexpr float MAX_APPROACH_BRAKE_ACC  = 200.0f;
 
     // Yaw 轴控制链范围：MIN 取 >0，旧 flash 尾部追加区读出的 0/垃圾值必被 sanitize 兜回默认
     inline constexpr float MIN_YAW_LIN_BAND       = 0.02f;  // 过小会退回 sqrt 的无穷斜率问题
@@ -423,6 +451,21 @@ namespace TuningDefaults {
                                     MAX_SHORT_SEG_ACCEL,
                                     DEFAULT_SHORT_SEG_ACCEL) || changed;
 
+        // 停车接近区双段刹车（结构体最末尾追加字段）：用 repair，旧 flash 尾部读出的 0/NaN/越界
+        // 统一兜回默认 40/0.25/15（=默认启用）。免 bump magic。
+        changed = repair_if_outside(config.approach_zone_cm,
+                                    MIN_APPROACH_ZONE_CM,
+                                    MAX_APPROACH_ZONE_CM,
+                                    DEFAULT_APPROACH_ZONE_CM) || changed;
+        changed = repair_if_outside(config.approach_zone_ratio,
+                                    MIN_APPROACH_ZONE_RATIO,
+                                    MAX_APPROACH_ZONE_RATIO,
+                                    DEFAULT_APPROACH_ZONE_RATIO) || changed;
+        changed = repair_if_outside(config.approach_brake_acc,
+                                    MIN_APPROACH_BRAKE_ACC,
+                                    MAX_APPROACH_BRAKE_ACC,
+                                    DEFAULT_APPROACH_BRAKE_ACC) || changed;
+
         return changed;
     }
 }
@@ -505,5 +548,8 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
     TuningDefaults::DEFAULT_STOP_APPROACH_BAND_CM,   // stop_approach_band_cm（结构体末尾追加）
     TuningDefaults::DEFAULT_STOP_APPROACH_BRAKE_GAIN, // stop_approach_brake_gain（结构体末尾追加）
     TuningDefaults::DEFAULT_SHORT_SEG_LEN_CM,        // short_seg_len_cm（结构体最末尾追加）
-    TuningDefaults::DEFAULT_SHORT_SEG_ACCEL          // short_seg_accel（结构体最末尾追加）
+    TuningDefaults::DEFAULT_SHORT_SEG_ACCEL,         // short_seg_accel（结构体最末尾追加）
+    TuningDefaults::DEFAULT_APPROACH_ZONE_CM,        // approach_zone_cm（结构体最末尾追加）
+    TuningDefaults::DEFAULT_APPROACH_ZONE_RATIO,     // approach_zone_ratio（结构体最末尾追加）
+    TuningDefaults::DEFAULT_APPROACH_BRAKE_ACC       // approach_brake_acc（结构体最末尾追加）
 };

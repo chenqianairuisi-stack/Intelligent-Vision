@@ -18,6 +18,10 @@
 // 注：2026-07-15 在 TuningConfig **最末尾**（stop_approach_band_cm 之后）追加 stop_approach_brake_gain，
 //     同为"尾部追加"、前面所有字段偏移不变，旧 flash 读出的该尾部区（0/垃圾）由 sanitize 兜回 1.0
 //     = 旧行为，故仍**不 bump magic**。
+// 注：2026-07-15 继续尾部追加 short_seg_len_cm/short_seg_accel（短段起步加速提升，默认启用 60/300）
+//     与 approach_zone_cm/approach_zone_ratio/approach_brake_acc（停车接近区双段提前刹车，默认启用
+//     40/0.25/15）。均由 sanitize 用 repair 兜回默认（**默认启用**，与此前尾部字段"兜回旧行为"不同，
+//     系用户实车拍板的目标行为），故仍**不 bump magic**。
 #define CONFIG_MAGIC_WORD         (0xAA55CC57)
 
 void Storage::init() {

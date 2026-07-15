@@ -82,6 +82,11 @@ namespace { // 匿名命名空间，确保这些数据只在本文件可见
     // 停车接近区刹车倍率（和 !T H 同参数）：大=到航点抖减速更狠、进点更慢、过冲更小；1.0=旧行为。
     // "到航点冲过头"就把它调大（2~4），进点太急/顿挫再往回收。
     {"StopBrkG",   &tune.stop_approach_brake_gain,    0.25f },
+    // 停车接近区双段刹车（和 !T Z / !T R / !T C 同参数）：AprZone 提前刹车距离上限（0.5≈关闭），
+    // AprRatio 占段全长比例（20cm段→5cm），AprAcc 接近区缓减速度（越小末端越慢越准）。
+    {"AprZone ",   &tune.approach_zone_cm,            5.0f  },
+    {"AprRatio",   &tune.approach_zone_ratio,         0.05f },
+    {"AprAcc  ",   &tune.approach_brake_acc,          1.0f  },
     };
     constexpr int DICT_SIZE = sizeof(tune_dict) / sizeof(tune_dict[0]);   
     constexpr int PARAMS_PER_PAGE = 12; 
@@ -527,6 +532,24 @@ void clamp_editable_params() {
     } else if (tune.latency.vision_latency_ms > TuningDefaults::MAX_VISION_LATENCY_MS) {
         tune.latency.vision_latency_ms = TuningDefaults::MAX_VISION_LATENCY_MS;
     }
+
+    // 菜单可调的尾部追加参数一并夹紧，避免屏幕上加减越界成无效值（与 !T H/Z/R/C 串口一致）
+    (void)TuningDefaults::clamp_if_outside(tune.stop_approach_brake_gain,
+                                           TuningDefaults::MIN_STOP_APPROACH_BRAKE_GAIN,
+                                           TuningDefaults::MAX_STOP_APPROACH_BRAKE_GAIN,
+                                           TuningDefaults::DEFAULT_STOP_APPROACH_BRAKE_GAIN);
+    (void)TuningDefaults::clamp_if_outside(tune.approach_zone_cm,
+                                           TuningDefaults::MIN_APPROACH_ZONE_CM,
+                                           TuningDefaults::MAX_APPROACH_ZONE_CM,
+                                           TuningDefaults::DEFAULT_APPROACH_ZONE_CM);
+    (void)TuningDefaults::clamp_if_outside(tune.approach_zone_ratio,
+                                           TuningDefaults::MIN_APPROACH_ZONE_RATIO,
+                                           TuningDefaults::MAX_APPROACH_ZONE_RATIO,
+                                           TuningDefaults::DEFAULT_APPROACH_ZONE_RATIO);
+    (void)TuningDefaults::clamp_if_outside(tune.approach_brake_acc,
+                                           TuningDefaults::MIN_APPROACH_BRAKE_ACC,
+                                           TuningDefaults::MAX_APPROACH_BRAKE_ACC,
+                                           TuningDefaults::DEFAULT_APPROACH_BRAKE_ACC);
 }
 
 void draw_dashboard() {

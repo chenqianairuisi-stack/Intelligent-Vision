@@ -462,6 +462,9 @@ namespace {
                     case 'H': tune.stop_approach_brake_gain = value; break; // 停车接近区刹车倍率（大=到点抖减速更狠进点更慢过冲更小，1=旧行为）
                     case 'D': tune.short_seg_len_cm = value; break;        // 短段判定阈值 cm（段全长<=此值走高加速起步；设1≈关闭）
                     case 'V': tune.short_seg_accel = value; break;         // 短段起步加速度 cm/s^2（只压加速斜坡，不动刹车）
+                    case 'Z': tune.approach_zone_cm = value; break;        // 停车接近区提前刹车距离上限 cm（默认40；0.5≈关闭回纯sqrt）
+                    case 'R': tune.approach_zone_ratio = value; break;     // 接近区占段全长比例（默认0.25：20cm段→5cm）
+                    case 'C': tune.approach_brake_acc = value; break;      // 接近区缓减速度 cm/s^2（默认15，越小末端越慢越准）
                     default: return;
                 }
                 break;
