@@ -13,7 +13,10 @@ class Trajectory {
 public:
     inline void reset() { current_v = 0.0f; current_a = 0.0f; }
     // 生成平滑平移速度，end_speed 用于拐角不停顿通过
-    Speed2D velocity_planning_1d(float dx, float dy, float dt, float end_speed = 0.0f);
+    // seg_len_cm：当前直线段全长 cm（由 follow 传入）。<=0 表示未知，不做短段加速提升；
+    // 短段(<= tune.short_seg_len_cm)只提高**加速斜坡**，刹车/sqrt 减速曲线保持温柔不变。
+    Speed2D velocity_planning_1d(float dx, float dy, float dt, float end_speed = 0.0f,
+                                float seg_len_cm = -1.0f);
 private:
     float current_v = 0.0f;
     float current_a = 0.0f;

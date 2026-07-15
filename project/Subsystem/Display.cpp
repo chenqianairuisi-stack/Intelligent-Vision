@@ -79,9 +79,9 @@ namespace { // 匿名命名空间，确保这些数据只在本文件可见
     // 刹车/切向手感（和 !T G / !T A 同参数）：BrkHold 刹更狠锁更死，TurnAcc 大=切更直不磨圆
     {"BrkHold ",   &tune.feel.brake_hold_gain,        0.05f },
     {"TurnAcc ",   &tune.feel.corner_turn_acc,        10.0f },
-    // 停车近端线性带宽 cm（和 !T S 同参数）：大=进箱更柔更准少过冲(略慢)，小=更猛更快易冲过头。
-    // 推箱冲过头/刮箱就把它调大（8~15），进点太慢再往回收。改完回主菜单 Save 持久化。
-    {"StopBand",   &tune.stop_approach_band_cm,       1.0f  },
+    // 停车接近区刹车倍率（和 !T H 同参数）：大=到航点抖减速更狠、进点更慢、过冲更小；1.0=旧行为。
+    // "到航点冲过头"就把它调大（2~4），进点太急/顿挫再往回收。
+    {"StopBrkG",   &tune.stop_approach_brake_gain,    0.25f },
     };
     constexpr int DICT_SIZE = sizeof(tune_dict) / sizeof(tune_dict[0]);   
     constexpr int PARAMS_PER_PAGE = 12; 

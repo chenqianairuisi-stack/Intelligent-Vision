@@ -118,11 +118,28 @@ struct TuningConfig {
     // 新轮速环走此表；旧 pid_speed / ff.kv / ff.ka 字段保留但不再被速度内环使用。
     WheelControlParams wheels[4];
 
-    // 停车近端线性带宽度 cm（2026-07-14 追加在结构体**最末尾**，不 bump magic）：停车工况（含 AUTO
-    // 推箱/终点）在离目标 band 内用线性律 v=k·d 收敛替代原始 sqrt，把冲进 reach_radius 的残速压下来
-    // → hard_lock 只收尾极小速度，稳停少过冲（治推箱冲过头刮箱）。越大近端越柔越准（略慢）；
-    // 旧 flash 无此区、memcpy 读出 0/垃圾 → 由 sanitize 兜回默认。上车 !T S 直接调。
+    // 【已废弃占位】停车近端线性带宽度 cm（2026-07-15 删 StopBand 功能：实测无用，停车减速回到
+    // 纯 sqrt 直落）。字段**保留占位不删**：它后面还有 stop_approach_brake_gain，物理删除会使后者
+    // 偏移前移 4 字节 → 破坏 flash 布局 → 被迫 bump magic 丢掉全部已调参数。保留字段+sanitize
+    // 兜底=零风险；无任何代码读它。若未来 bump magic 时可一并物理删除。
     float stop_approach_band_cm;
+
+    // 停车接近区刹车倍率（2026-07-15 追加在结构体**最末尾**，不 bump magic）：仅停车工况（is_stop，
+    // 含 AUTO 推箱/终点）把速度规划的**每拍减速上限** max_dv_dec 乘上此倍率，让带速冲进停车航点的车
+    // 更"抖"地掉速——一步压到 sqrt 目标曲线上，而不是被 brake_acc·dt 的温柔限幅卡住冲过点。
+    // 只放大减速限幅、不动目标曲线/加速斜坡/过弯带速：车已在曲线上时限幅不 binding→零行为改变；
+    // 车冲得快时才生效，进点速度低→固定 300ms 视觉延迟造成的过冲随之缩小（不靠加大视觉增益，避免自激）。
+    // 1.0=完全等于旧行为；旧 flash 无此区、memcpy 读出 0/垃圾 → sanitize 兜回 1.0。上车 !T H 直接调。
+    float stop_approach_brake_gain;
+
+    // 短距离移动起步加速提升（2026-07-15 追加在结构体**最末尾**，不 bump magic）：段全长 <= short_seg_len_cm
+    // 时，速度规划器**只**把加速斜坡上限抬到 short_seg_accel（刹车/sqrt 减速曲线保持温柔不变），让短段
+    // 起步更快、不磨蹭；末端因刹车温柔不变而**自然物理慢下来**（不是把末端交给视觉控制，控制链仍是常规
+    // 编码器+里程计闭环，只是慢了更准/更跟得上）。
+    // 与其他尾部字段"默认零行为改变"不同，此二者**默认启用**（60/300，用户已实车拍板）。旧 flash 尾部
+    // 读出 0/垃圾 → sanitize 用 repair 兜回 60/300（默认开）；上车 !T D / !T V 直接调，!T D 1≈关闭。
+    float short_seg_len_cm;   // 短段判定阈值 cm（段全长 <= 此值走高加速；1 以下≈关闭）
+    float short_seg_accel;    // 短段起步加速度 cm/s^2（只压加速斜坡，不动刹车）
 };
 
 namespace TuningDefaults {
@@ -159,9 +176,18 @@ namespace TuningDefaults {
     inline constexpr float DEFAULT_BRAKE_HOLD_GAIN = 0.30f;   // 主动刹车前馈增益
     inline constexpr float DEFAULT_CORNER_TURN_ACC = 250.0f;  // 切向方向变化加速度限 cm/s^2
 
-    // 停车近端线性带默认（最末尾追加，不入 magic）：3.0 与旧非 AUTO 常量一致，非 AUTO 行为不变；
-    // AUTO 停车航点由原始 sqrt 改走此线性带 → 少过冲。上车按实测把 band 调大（8~15）直到不刮箱。
+    // 【已废弃占位】停车近端线性带默认：字段保留占位（见结构体处注释），无代码读它，
+    // 仅供 sanitize 把 flash 读出的垃圾值兜回有限值，避免 NaN 存回 flash。
     inline constexpr float DEFAULT_STOP_APPROACH_BAND_CM = 3.0f;  // cm
+
+    // 停车接近区刹车倍率默认（最末尾追加，不入 magic）：1.0 = 每拍减速上限不变 = 旧行为，零风险。
+    // 上车若"到航点冲过头"就把它调大（2~4），让冲进停车航点的车更抖地掉速、进点更慢、过冲更小。
+    inline constexpr float DEFAULT_STOP_APPROACH_BRAKE_GAIN = 1.0f;  // ×
+
+    // 短距离起步加速提升默认（最末尾追加，不入 magic）：**默认启用** 60cm / 300cm/s^2（用户实车拍板）。
+    // 段全长 <= 60cm 的移动起步加速抬到 300，只压加速斜坡、不动刹车曲线。
+    inline constexpr float DEFAULT_SHORT_SEG_LEN_CM = 60.0f;   // cm
+    inline constexpr float DEFAULT_SHORT_SEG_ACCEL  = 300.0f;  // cm/s^2
 
     // Yaw 轴控制链默认（2026-07-10 从 Branch 融合，追加末尾不入 magic）
     inline constexpr float DEFAULT_YAW_LIN_BAND       = 0.18f;  // rad，约 7 度线性带
@@ -215,6 +241,17 @@ namespace TuningDefaults {
     // 停车近端线性带范围：MIN 取 >0，使旧 flash 追加区读出的 0/垃圾值必被 sanitize 兜回默认
     inline constexpr float MIN_STOP_APPROACH_BAND_CM = 0.5f;
     inline constexpr float MAX_STOP_APPROACH_BAND_CM = 30.0f;
+
+    // 停车接近区刹车倍率范围：MIN 取 1.0（=零行为改变下限），旧 flash 追加区读出的 0/垃圾（<1）被
+    // clamp 兜回 1.0=旧行为，绝不会读成"减速比旧行为还慢"的危险值；上限 100.0。
+    inline constexpr float MIN_STOP_APPROACH_BRAKE_GAIN = 1.0f;
+    inline constexpr float MAX_STOP_APPROACH_BRAKE_GAIN = 100.0f;
+
+    // 短距离起步加速提升范围：MIN 取 >0，使旧 flash 尾部读出的 0/NaN/垃圾被 repair 兜回默认（=默认启用）。
+    inline constexpr float MIN_SHORT_SEG_LEN_CM = 1.0f;      // <1cm≈关闭（无真实段这么短，最小移动 20cm）
+    inline constexpr float MAX_SHORT_SEG_LEN_CM = 200.0f;
+    inline constexpr float MIN_SHORT_SEG_ACCEL  = 20.0f;
+    inline constexpr float MAX_SHORT_SEG_ACCEL  = 1000.0f;
 
     // Yaw 轴控制链范围：MIN 取 >0，旧 flash 尾部追加区读出的 0/垃圾值必被 sanitize 兜回默认
     inline constexpr float MIN_YAW_LIN_BAND       = 0.02f;  // 过小会退回 sqrt 的无穷斜率问题
@@ -362,11 +399,29 @@ namespace TuningDefaults {
             changed = clamp_if_outside(wp.kb,     0.0f, 1.0f, def.kb)     || changed;
         }
 
-        // 停车近端线性带（结构体最末尾追加字段）：旧 flash 无此区读出 0/垃圾/NaN → 兜回默认（免 bump magic）
+        // 【已废弃占位】停车近端线性带：无代码读它，仅兜回有限值防 NaN 存回 flash（字段保留占位见结构体注释）
         changed = clamp_if_outside(config.stop_approach_band_cm,
                                    MIN_STOP_APPROACH_BAND_CM,
                                    MAX_STOP_APPROACH_BAND_CM,
                                    DEFAULT_STOP_APPROACH_BAND_CM) || changed;
+
+        // 停车接近区刹车倍率（结构体最末尾追加字段）：旧 flash 读出 0/垃圾（<MIN=1.0）被 clamp 兜回 1.0
+        // = 旧行为，NaN 落 else 分支取默认 1.0，均安全（免 bump magic）
+        changed = clamp_if_outside(config.stop_approach_brake_gain,
+                                   MIN_STOP_APPROACH_BRAKE_GAIN,
+                                   MAX_STOP_APPROACH_BRAKE_GAIN,
+                                   DEFAULT_STOP_APPROACH_BRAKE_GAIN) || changed;
+
+        // 短距离起步加速提升（结构体最末尾追加字段）：用 repair（非 clamp），使旧 flash 尾部读出的
+        // 0/NaN/越界值统一兜回默认 60/300（=默认启用），而不会被 clamp 到边界。免 bump magic。
+        changed = repair_if_outside(config.short_seg_len_cm,
+                                    MIN_SHORT_SEG_LEN_CM,
+                                    MAX_SHORT_SEG_LEN_CM,
+                                    DEFAULT_SHORT_SEG_LEN_CM) || changed;
+        changed = repair_if_outside(config.short_seg_accel,
+                                    MIN_SHORT_SEG_ACCEL,
+                                    MAX_SHORT_SEG_ACCEL,
+                                    DEFAULT_SHORT_SEG_ACCEL) || changed;
 
         return changed;
     }
@@ -447,5 +502,8 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
         TuningDefaults::DEFAULT_WHEELS[2],  // wheels[RF]
         TuningDefaults::DEFAULT_WHEELS[3]   // wheels[RB]
     },
-    TuningDefaults::DEFAULT_STOP_APPROACH_BAND_CM   // stop_approach_band_cm（结构体末尾追加）
+    TuningDefaults::DEFAULT_STOP_APPROACH_BAND_CM,   // stop_approach_band_cm（结构体末尾追加）
+    TuningDefaults::DEFAULT_STOP_APPROACH_BRAKE_GAIN, // stop_approach_brake_gain（结构体末尾追加）
+    TuningDefaults::DEFAULT_SHORT_SEG_LEN_CM,        // short_seg_len_cm（结构体最末尾追加）
+    TuningDefaults::DEFAULT_SHORT_SEG_ACCEL          // short_seg_accel（结构体最末尾追加）
 };

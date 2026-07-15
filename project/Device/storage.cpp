@@ -15,6 +15,9 @@
 // 注：2026-07-14 在 TuningConfig **最末尾**（wheels[] 之后）追加 stop_approach_band_cm，
 //     同为"尾部追加"，wheels/yaw/feel 等偏移不变、旧 flash 已调参数照常读出，新字段由
 //     sanitize 兜回默认，故同样**不 bump magic**。
+// 注：2026-07-15 在 TuningConfig **最末尾**（stop_approach_band_cm 之后）追加 stop_approach_brake_gain，
+//     同为"尾部追加"、前面所有字段偏移不变，旧 flash 读出的该尾部区（0/垃圾）由 sanitize 兜回 1.0
+//     = 旧行为，故仍**不 bump magic**。
 #define CONFIG_MAGIC_WORD         (0xAA55CC57)
 
 void Storage::init() {

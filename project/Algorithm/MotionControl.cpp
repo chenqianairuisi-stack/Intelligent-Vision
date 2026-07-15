@@ -13,8 +13,9 @@ namespace Algorithm::Motion {
 /// end_speed 为 0 时按终点停车规划，非 0 时用于路径拐角不停顿通过
 /// 函数内部保存 current_v，因此切换任务或急停后应先调用 reset
 ///
-__attribute__((section(".ramfunc"))) 
-Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end_speed) {
+__attribute__((section(".ramfunc")))
+Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end_speed,
+                                        float seg_len_cm) {
     float distance = sqrtf(dx * dx + dy * dy);
 
     float max_speed = tune.dynamics.max_vel;
@@ -22,16 +23,30 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
     float brake_acc = max_acc * tune.dynamics.brake_limit;
     float target_end_speed = std::clamp(end_speed, 0.0f, max_speed);
 
+    // 短段起步加速提升：段全长 <= short_seg_len_cm 时，**只**把加速斜坡上限抬到 short_seg_accel，
+    // 让短距离移动起步更快、不磨蹭。刹车加速度 brake_acc 与下方 sqrt 减速曲线**保持不变**（温柔刹车），
+    // 末端因此自然物理慢下来（不是把末端交给视觉控制，只是放慢；慢下来后编码器+视觉融合更准）。
+    // seg_len_cm<=0（未知）或段长超阈值：不提升，退回 max_acc，行为与改前完全一致。
+    float accel_ramp = max_acc;
+    {
+        float boost = tune.short_seg_accel;
+        float len_thresh = tune.short_seg_len_cm;
+        if (std::isfinite(seg_len_cm) && seg_len_cm >= 1.0f &&
+            std::isfinite(len_thresh) && seg_len_cm <= len_thresh &&
+            std::isfinite(boost) && boost > 0.0f) {
+            accel_ramp = boost;   // 只用于加速斜坡；不参与 brake_acc / sqrt 曲线
+        }
+    }
+
     if (distance < 0.001f) {
         current_v = 0.0f;
         return {0.0f, 0.0f};
     }
 
-    // 停车工况终端整形，两层分别控制：
-    //   · 近端线性带（v=k·d 收敛，压低进 reach_radius 的残速→稳停少过冲）：所有停车工况都启用，
-    //     含 AUTO 推箱/终点（按 is_stop 判定）。带宽 tune.stop_approach_band_cm，!T S 现场调。
+    // 停车工况终端整形：
     //   · 弹簧静止死区（进 rest_radius 直接命令零速，治空载/观测保持/!M 调试点"原地颤抖"）：仅非 AUTO
     //     启用；AUTO 正循迹不启用，避免近端零速死区削掉顶箱力气，停车由 Tracker 的 hard_lock 收尾。
+    //   （2026-07-15 移除近端线性带 StopBand——实测无用；停车减速回到纯 sqrt 直落，见下方）
     float rest_radius = tune.tracker.reach_radius;
     bool active_auto_track = (App::g_state.control.mode == ControlMode::AUTO_TRACKING &&
                              App::g_state.control.tracker_state == TrackerState::TRACKING);
@@ -55,19 +70,9 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
     float target_v = max_speed;
     if (distance <= brake_dist) {
         if (is_stop) {
-            // 停车工况近端线性带：远端 sqrt(时间最优减速)，离目标 band 内切成线性律 v=k·distance
-            //（斜率有界）——把冲进 reach_radius 的残速从 sqrt 的 ~sqrt(2a·r) 压到 (v_edge/band)·r，
-            // hard_lock 只需收尾极小速度→稳停、过冲小且可复现（治推箱冲过头刮箱）。band 越大近端越柔越准（略慢）。
-            // 原仅非 AUTO 启用（AUTO 走满力气 sqrt 进点靠 hard_lock 急刹→带 ~sqrt(2a·r) 撞进半径，过冲大且散）；
-            // 现 AUTO 停车航点同样走此律，band 由 !T S 现场调（tune.stop_approach_band_cm）。
-            float band = tune.stop_approach_band_cm;
-            if (!(band >= 0.5f && band <= 30.0f)) {
-                band = 3.0f;   // 运行期兜底：NaN/越界（比较恒 false 落此）→ 安全默认，不依赖 sanitize
-            }
-            float v_edge = sqrtf(2.0f * brake_acc * band);
-            target_v = (distance >= band)
-                ? sqrtf(2.0f * brake_acc * distance)
-                : (v_edge / band) * distance;
+            // 停车工况：纯 sqrt 时间最优减速直落到点（2026-07-15 删除近端线性带 StopBand，实测无用；
+            // 进点残速由 hard_lock 收尾，冲过头由 stop_approach_brake_gain 放大每拍减速限幅治）。
+            target_v = sqrtf(2.0f * brake_acc * distance);
         } else {
             // 过弯带速通过：sqrt 反推保切向动量，末速度不低于目标保留速度
             target_v = sqrtf(target_end_speed * target_end_speed + 2.0f * brake_acc * distance);
@@ -79,8 +84,20 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
 
     // 不再额外做近终点慢速爬行：梯形刹车规划本身已把 target_v 平滑收敛到 0，
     // 直接按正常速度减速进点停车（靠近箱子/拐点不再缓慢蹭进）。
-    float max_dv_acc = max_acc * dt;
-    float max_dv_dec = brake_acc * dt;
+    float max_dv_acc = accel_ramp * dt;   // 加速斜坡：短段被 accel_ramp 抬高（只影响此处）
+    float max_dv_dec = brake_acc * dt;    // 刹车斜坡：始终用温柔 brake_acc，短段也不变
+
+    // 停车接近区抖减速：仅停车工况放大**每拍减速上限**（不动 target 曲线/加速斜坡/过弯带速）。
+    // 带速冲进停车航点的车会被原始 brake_acc·dt 温柔限幅卡住、来不及掉到 sqrt 目标曲线上就冲过点；
+    // 乘上 stop_approach_brake_gain 让它一步抖到曲线上→进点速度低→固定视觉延迟造成的过冲随之缩小。
+    // 车已在曲线上时 target_v≈current_v，限幅本就不 binding→放大它零行为改变；gain=1.0 完全等于旧行为。
+    if (is_stop) {
+        float brake_gain = tune.stop_approach_brake_gain;
+        if (!(brake_gain >= 1.0f && brake_gain <= 100.0f)) {
+            brake_gain = 1.0f;   // 运行期兜底：NaN/越界（比较恒 false 落此）→ 退回旧行为，不依赖 sanitize
+        }
+        max_dv_dec *= brake_gain;
+    }
 
     if (target_v > current_v) {
         current_v = std::min(current_v + max_dv_acc, target_v);
@@ -194,10 +211,11 @@ Speed2D PathLineFollower::follow(float px, float py, float sx, float sy,
     float seg_dx = tx - sx;
     float seg_dy = ty - sy;
     float seg_len_sq = seg_dx * seg_dx + seg_dy * seg_dy;
+    float seg_len = sqrtf(seg_len_sq);   // 段全长，喂规划器做短段加速提升判定
 
     // 段长过短或 Stanley 关闭：退化为纯朝目标点（沿误差方向收敛）
     if (!tune.stanley.enable || seg_len_sq < 9.0f) {  // <3cm
-        return planner.velocity_planning_1d(tx - px, ty - py, dt, end_speed);
+        return planner.velocity_planning_1d(tx - px, ty - py, dt, end_speed, seg_len);
     }
 
     float inv_len = 1.0f / sqrtf(seg_len_sq);
@@ -209,7 +227,7 @@ Speed2D PathLineFollower::follow(float px, float py, float sx, float sy,
     // 沿轨剩余距离（投影到段方向），用它喂规划器得到主速度大小
     float s_remain = (tx - px) * along_x + (ty - py) * along_y;
     Speed2D along_vel = planner.velocity_planning_1d(
-        along_x * s_remain, along_y * s_remain, dt, end_speed);
+        along_x * s_remain, along_y * s_remain, dt, end_speed, seg_len);
     float v_along_mag = along_vel.vx * along_x + along_vel.vy * along_y;  // 带符号主速度
 
     // 横向偏差（带符号）：车在路径线哪一侧、离线多远

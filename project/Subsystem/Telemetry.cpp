@@ -458,7 +458,10 @@ namespace {
                     case 'B': tune.bomb.explosion_wait_ms = value; break;  // 炸弹引信等待 ms
                     case 'G': tune.feel.brake_hold_gain = value; break;    // 主动刹车前馈增益（刹更狠锁更死）
                     case 'A': tune.feel.corner_turn_acc = value; break;    // 切向方向变化加速度限 cm/s^2（大=切更直不磨圆）
-                    case 'S': tune.stop_approach_band_cm = value; break;   // 停车近端线性带宽 cm（大=进点更柔更准略慢，小=更猛更快）
+                    // !T S 已移除：stop_approach_band_cm 字段保留占位但无任何行为（2026-07-15 删 StopBand）
+                    case 'H': tune.stop_approach_brake_gain = value; break; // 停车接近区刹车倍率（大=到点抖减速更狠进点更慢过冲更小，1=旧行为）
+                    case 'D': tune.short_seg_len_cm = value; break;        // 短段判定阈值 cm（段全长<=此值走高加速起步；设1≈关闭）
+                    case 'V': tune.short_seg_accel = value; break;         // 短段起步加速度 cm/s^2（只压加速斜坡，不动刹车）
                     default: return;
                 }
                 break;
