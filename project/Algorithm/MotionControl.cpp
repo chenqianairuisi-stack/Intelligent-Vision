@@ -70,7 +70,7 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
     // 长距离封顶 40cm，20cm 段→5cm（用户拍板）。参数垃圾/关闭(!T Z 0.5)时 zone=0 → 回纯 sqrt 直落。
     float approach_zone = 0.0f;
     float approach_acc = 0.0f;
-    if (is_stop) {
+    if (is_stop && tune.approach_enable >= 0.5f) {   // 总开关关闭(approach_enable<0.5)→zone=0→回纯 sqrt
         float z_cap = tune.approach_zone_cm;
         float z_ratio = tune.approach_zone_ratio;
         float a_apr = tune.approach_brake_acc;

@@ -465,6 +465,7 @@ namespace {
                     case 'Z': tune.approach_zone_cm = value; break;        // 停车接近区提前刹车距离上限 cm（默认40；0.5≈关闭回纯sqrt）
                     case 'R': tune.approach_zone_ratio = value; break;     // 接近区占段全长比例（默认0.25：20cm段→5cm）
                     case 'C': tune.approach_brake_acc = value; break;      // 接近区缓减速度 cm/s^2（默认15，越小末端越慢越准）
+                    case 'N': tune.approach_enable = (value > 0.5f) ? 1.0f : 0.0f; break; // 接近区总开关（!T N 1 开 / !T N 0 关，一键切）
                     default: return;
                 }
                 break;

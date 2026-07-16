@@ -152,6 +152,8 @@ struct TuningConfig {
     float approach_zone_cm;     // 接近区提前刹车距离上限 cm（默认 40；0.5≈关闭）
     float approach_zone_ratio;  // 接近区占段全长比例（默认 0.25：20cm 段→5cm，160cm+→封顶 40cm）
     float approach_brake_acc;   // 接近区缓减速度 cm/s^2（默认 15，须 < brake_acc 才生效）
+    float approach_enable;      // 接近区总开关：>=0.5 开、<0.5 关（菜单/串口一键切；默认 1=开）。
+                                // 用 float 存（沿用尾部 float 追加约定，免为一个 bool 破坏 flash 布局）
 };
 
 namespace TuningDefaults {
@@ -207,6 +209,7 @@ namespace TuningDefaults {
     inline constexpr float DEFAULT_APPROACH_ZONE_CM    = 40.0f;  // cm
     inline constexpr float DEFAULT_APPROACH_ZONE_RATIO = 0.25f;  // ×段全长
     inline constexpr float DEFAULT_APPROACH_BRAKE_ACC  = 15.0f;  // cm/s^2
+    inline constexpr float DEFAULT_APPROACH_ENABLE     = 1.0f;   // 1=开（默认启用）
 
     // Yaw 轴控制链默认（2026-07-10 从 Branch 融合，追加末尾不入 magic）
     inline constexpr float DEFAULT_YAW_LIN_BAND       = 0.18f;  // rad，约 7 度线性带
@@ -280,6 +283,13 @@ namespace TuningDefaults {
     inline constexpr float MAX_APPROACH_ZONE_RATIO = 1.0f;
     inline constexpr float MIN_APPROACH_BRAKE_ACC  = 1.0f;
     inline constexpr float MAX_APPROACH_BRAKE_ACC  = 200.0f;
+    // 接近区开关：合法区间 [0,1]，0=关/1=开。旧 flash 尾部无此字段读出 0/垃圾时——
+    // 0 落在区间内会被当成"关"，这不安全（默认应为开）。故 sanitize 用 repair 而非 clamp：
+    // 只有落在 {0,1} 附近才保留，其余（含旧 flash 的 0.0 之外的垃圾/NaN）弹回默认 1=开。
+    // 注：旧 flash 该尾部区读出恰好 0.0 的概率极低（memcpy 越界读到的是相邻数据/0xFF→NaN），
+    // 且首次 Save 后即写入真实 1.0，此后不再依赖兜底。
+    inline constexpr float MIN_APPROACH_ENABLE     = 0.0f;
+    inline constexpr float MAX_APPROACH_ENABLE     = 1.0f;
 
     // Yaw 轴控制链范围：MIN 取 >0，旧 flash 尾部追加区读出的 0/垃圾值必被 sanitize 兜回默认
     inline constexpr float MIN_YAW_LIN_BAND       = 0.02f;  // 过小会退回 sqrt 的无穷斜率问题
@@ -465,6 +475,12 @@ namespace TuningDefaults {
                                     MIN_APPROACH_BRAKE_ACC,
                                     MAX_APPROACH_BRAKE_ACC,
                                     DEFAULT_APPROACH_BRAKE_ACC) || changed;
+        // 开关：clamp 到 [0,1]，NaN/越界（含旧 flash 尾部垃圾）落 else 分支取默认 1=开；
+        // 0 和 1 都在区间内会被保留——用户存的"关(0)"不会被误弹回"开"。
+        changed = clamp_if_outside(config.approach_enable,
+                                   MIN_APPROACH_ENABLE,
+                                   MAX_APPROACH_ENABLE,
+                                   DEFAULT_APPROACH_ENABLE) || changed;
 
         return changed;
     }
@@ -551,5 +567,6 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
     TuningDefaults::DEFAULT_SHORT_SEG_ACCEL,         // short_seg_accel（结构体最末尾追加）
     TuningDefaults::DEFAULT_APPROACH_ZONE_CM,        // approach_zone_cm（结构体最末尾追加）
     TuningDefaults::DEFAULT_APPROACH_ZONE_RATIO,     // approach_zone_ratio（结构体最末尾追加）
-    TuningDefaults::DEFAULT_APPROACH_BRAKE_ACC       // approach_brake_acc（结构体最末尾追加）
+    TuningDefaults::DEFAULT_APPROACH_BRAKE_ACC,      // approach_brake_acc（结构体最末尾追加）
+    TuningDefaults::DEFAULT_APPROACH_ENABLE          // approach_enable（结构体最末尾追加）
 };
