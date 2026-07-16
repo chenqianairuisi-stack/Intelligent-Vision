@@ -125,11 +125,13 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
     // 停车接近区抖减速：仅停车工况放大**每拍减速上限**（不动 target 曲线/加速斜坡/过弯带速）。
     // 带速冲进停车航点的车会被原始 brake_acc·dt 温柔限幅卡住、来不及掉到 sqrt 目标曲线上就冲过点；
     // 乘上 stop_approach_brake_gain 让它一步抖到曲线上→进点速度低→固定视觉延迟造成的过冲随之缩小。
-    // 车已在曲线上时 target_v≈current_v，限幅本就不 binding→放大它零行为改变；gain=1.0 完全等于旧行为。
+    // 车已在曲线上时 target_v≈current_v，限幅本就不 binding→放大它零行为改变；gain<=1.0 完全等于旧行为。
     if (is_stop) {
         float brake_gain = tune.stop_approach_brake_gain;
-        if (!(brake_gain >= 1.0f && brake_gain <= 100.0f)) {
+        if (!(brake_gain >= 0.0f && brake_gain <= 100.0f)) {
             brake_gain = 1.0f;   // 运行期兜底：NaN/越界（比较恒 false 落此）→ 退回旧行为，不依赖 sanitize
+        } else if (brake_gain < 1.0f) {
+            brake_gain = 1.0f;   // 0 表示关闭额外刹车，等效旧行为
         }
         max_dv_dec *= brake_gain;
     }

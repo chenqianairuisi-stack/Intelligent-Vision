@@ -22,7 +22,9 @@
 //     与 approach_zone_cm/approach_zone_ratio/approach_brake_acc/approach_enable（停车接近区双段提前
 //     刹车，默认启用 40/0.25/15/1）。均由 sanitize 兜回默认（**默认启用**，系用户实车拍板的目标行为），
 //     故仍**不 bump magic**。approach_enable 为 float 存的开关（0=关/1=开），clamp 到 [0,1]。
-#define CONFIG_MAGIC_WORD         (0xAA55CC57)
+// 注：2026-07-16 在 TuningConfig 最末尾追加 kinematics.strafe_decouple（X 轴横向指令侧解耦，默认 0.03），
+//     旧 flash 无此尾部字段时由 sanitize 兜回默认；此次 bump magic 到 0xAA55CC59，旧 flash 一律取默认。
+#define CONFIG_MAGIC_WORD         (0xAA55CC59)
 
 void Storage::init() {
     flash_init();

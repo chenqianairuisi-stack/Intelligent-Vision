@@ -70,8 +70,10 @@ namespace Kinematics {
 
     __attribute__((always_inline))
     inline WheelSpeed4 inverse(float vx, float vy, float vw) noexcept {
+        float vy_decoupled = vy - tune.kinematics.strafe_decouple * vx;
+
         float vx_compensated = vx * tune.dynamics.kinematic_gain_x;
-        float vy_compensated = vy * tune.dynamics.kinematic_gain_y; 
+        float vy_compensated = vy_decoupled * tune.dynamics.kinematic_gain_y;
         return {
             vy_compensated + vx_compensated - vw * L,  // LF
             vy_compensated - vx_compensated - vw * L,  // LB

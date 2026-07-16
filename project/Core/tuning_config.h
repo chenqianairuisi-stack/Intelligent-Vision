@@ -154,12 +154,17 @@ struct TuningConfig {
     float approach_brake_acc;   // 接近区缓减速度 cm/s^2（默认 15，须 < brake_acc 才生效）
     float approach_enable;      // 接近区总开关：>=0.5 开、<0.5 关（菜单/串口一键切；默认 1=开）。
                                 // 用 float 存（沿用尾部 float 追加约定，免为一个 bool 破坏 flash 布局）
+
+    // X 轴横向移动的指令侧解耦，追加在结构体最末尾
+    struct {
+        float strafe_decouple;  // 仅 X 轴横向指令启用，纯 Y 轴移动不使用
+    } kinematics;
 };
 
 namespace TuningDefaults {
     inline constexpr float DEFAULT_REACH_RADIUS_MIN = 1.00f;  // 终点锁窗口需 > 单拍滑行量，太小(如0.2)会被穿窗导致反向追点震荡
     inline constexpr float DEFAULT_CORNER_PASS_SPEED = 0.0f;   // 过弯保留速度 cm/s：保持 0，不靠 end_speed 带速斜切
-    inline constexpr float DEFAULT_BRAKE_LIMIT = 0.65f;  // 别贪高：过大减速超出轮速环带宽→打滑过冲+原地晃
+    inline constexpr float DEFAULT_BRAKE_LIMIT = 0.2f;  // 别贪高：过大减速超出轮速环带宽→打滑过冲+原地晃
     inline constexpr float DEFAULT_ENCODER_LATENCY_GAIN = 1.00f;
     inline constexpr float DEFAULT_VISION_LATENCY_MS = 310.0f;
     inline constexpr float DEFAULT_VISION_REQUEST_INTERVAL_MS = 100.0f;
@@ -211,6 +216,9 @@ namespace TuningDefaults {
     inline constexpr float DEFAULT_APPROACH_BRAKE_ACC  = 15.0f;  // cm/s^2
     inline constexpr float DEFAULT_APPROACH_ENABLE     = 1.0f;   // 1=开（默认启用）
 
+    // 默认关闭横向解耦，0 不改变现有运动学行为
+    inline constexpr float DEFAULT_STRAFE_DECOUPLE = 0.03f;
+
     // Yaw 轴控制链默认（2026-07-10 从 Branch 融合，追加末尾不入 magic）
     inline constexpr float DEFAULT_YAW_LIN_BAND       = 0.18f;  // rad，约 7 度线性带
     inline constexpr float DEFAULT_YAW_KD             = 0.14f;  // 陀螺阻尼，先小后逐步加大
@@ -223,8 +231,8 @@ namespace TuningDefaults {
     inline constexpr WheelControlParams DEFAULT_WHEELS[4] = {
         {{0.72f, 0.56f, 0.0f}, 0.046f, 0.020f, 0.030f, 5.0f},  // LF
         {{0.65f, 0.56f, 0.0f}, 0.054f, 0.016f, 0.024f, 5.0f},  // LB
-        {{0.64f, 0.74f, 0.0f}, 0.052f, 0.014f, 0.028f, 5.0f},  // RF
-        {{0.74f, 0.56f, 0.0f}, 0.062f, 0.024f, 0.032f, 6.4f},  // RB
+        {{0.60f, 0.54f, 0.0f}, 0.052f, 0.006f, 0.024f, 5.0f},  // RF
+        {{0.64f, 0.56f, 0.0f}, 0.062f, 0.024f, 0.032f, 6.4f},  // RB
     };
 
     inline constexpr float MIN_BRAKE_LIMIT = 0.0f;
@@ -264,9 +272,8 @@ namespace TuningDefaults {
     inline constexpr float MIN_STOP_APPROACH_BAND_CM = 0.5f;
     inline constexpr float MAX_STOP_APPROACH_BAND_CM = 30.0f;
 
-    // 停车接近区刹车倍率范围：MIN 取 1.0（=零行为改变下限），旧 flash 追加区读出的 0/垃圾（<1）被
-    // clamp 兜回 1.0=旧行为，绝不会读成"减速比旧行为还慢"的危险值；上限 100.0。
-    inline constexpr float MIN_STOP_APPROACH_BRAKE_GAIN = 1.0f;
+    // 停车接近区刹车倍率范围：允许 0 表示关闭额外刹车，运行期按 1 倍旧行为执行
+    inline constexpr float MIN_STOP_APPROACH_BRAKE_GAIN = 0.0f;
     inline constexpr float MAX_STOP_APPROACH_BRAKE_GAIN = 100.0f;
 
     // 短距离起步加速提升范围：MIN 取 >0，使旧 flash 尾部读出的 0/NaN/垃圾被 repair 兜回默认（=默认启用）。
@@ -290,6 +297,8 @@ namespace TuningDefaults {
     // 且首次 Save 后即写入真实 1.0，此后不再依赖兜底。
     inline constexpr float MIN_APPROACH_ENABLE     = 0.0f;
     inline constexpr float MAX_APPROACH_ENABLE     = 1.0f;
+    inline constexpr float MIN_STRAFE_DECOUPLE    = -1.0f;
+    inline constexpr float MAX_STRAFE_DECOUPLE    = 1.0f;
 
     // Yaw 轴控制链范围：MIN 取 >0，旧 flash 尾部追加区读出的 0/垃圾值必被 sanitize 兜回默认
     inline constexpr float MIN_YAW_LIN_BAND       = 0.02f;  // 过小会退回 sqrt 的无穷斜率问题
@@ -482,6 +491,12 @@ namespace TuningDefaults {
                                    MAX_APPROACH_ENABLE,
                                    DEFAULT_APPROACH_ENABLE) || changed;
 
+        // 横向解耦尾部字段，旧 flash 无此区或读出垃圾时恢复为 0
+        changed = clamp_if_outside(config.kinematics.strafe_decouple,
+                                   MIN_STRAFE_DECOUPLE,
+                                   MAX_STRAFE_DECOUPLE,
+                                   DEFAULT_STRAFE_DECOUPLE) || changed;
+
         return changed;
     }
 }
@@ -494,11 +509,11 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
     {
         80.0f,   // max_duty
         TuningDefaults::DEFAULT_DYNAMICS_MAX_VEL,  // max_vel cm/s
-        65.0f,   // max_acc
+        700.0f,   // max_acc
         10.0f,   // max_ang_vel  —— 与 Branch 对齐：sqrt 型 yaw 规划需要更高角速度上限
-        40.0f,   // max_ang_acc  —— 与 Branch 对齐：决定 sqrt(2·a·err) 曲线激进程度与近端线性带斜率
-        1.044f,  // kinematic_gain_x
-        1.015f,  // kinematic_gain_y
+        40.0f,  // max_ang_acc  —— 与 Branch 对齐：决定 sqrt(2·a·err) 曲线激进程度与近端线性带斜率
+        1.10f,  // kinematic_gain_x
+        1.01f,  // kinematic_gain_y
         TuningDefaults::DEFAULT_BRAKE_LIMIT  // brake_limit
     },
     {
@@ -568,5 +583,8 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
     TuningDefaults::DEFAULT_APPROACH_ZONE_CM,        // approach_zone_cm（结构体最末尾追加）
     TuningDefaults::DEFAULT_APPROACH_ZONE_RATIO,     // approach_zone_ratio（结构体最末尾追加）
     TuningDefaults::DEFAULT_APPROACH_BRAKE_ACC,      // approach_brake_acc（结构体最末尾追加）
-    TuningDefaults::DEFAULT_APPROACH_ENABLE          // approach_enable（结构体最末尾追加）
+    TuningDefaults::DEFAULT_APPROACH_ENABLE,         // approach_enable（结构体最末尾追加）
+    {
+        TuningDefaults::DEFAULT_STRAFE_DECOUPLE      // kinematics.strafe_decouple（结构体最末尾追加）
+    }
 };

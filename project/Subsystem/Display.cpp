@@ -48,6 +48,7 @@ namespace { // 匿名命名空间，确保这些数据只在本文件可见
     constexpr uint8_t TL_WALL=1<<0, TL_TGT=1<<1, TL_BOX=1<<2, TL_BOMB=1<<3, TL_PATH=1<<4, TL_CRS=1<<5, TL_CAR=1<<6;
     constexpr int UI_COL_W = 6; 
     constexpr int UI_ROW_H = 10;
+    constexpr uint8_t MAIN_MENU_COUNT = 10;
 
     // --- 巨大的参数字典放到最后或者单独抽离 ---
     struct ParamItem { const char* name; float* val_ptr; float step; };
@@ -59,12 +60,13 @@ namespace { // 匿名命名空间，确保这些数据只在本文件可见
     {"ff_Ka   ",   &tune.ff.ka,                       1.0f  },
     {"ff_Ks   ",   &tune.ff.k_stiction,               0.01f },
     {"Max_Duty",   &tune.dynamics.max_duty,           1.0f  },
-    {"Max_Vel ",   &tune.dynamics.max_vel,            1.0f  },
-    {"Max_Acc ",   &tune.dynamics.max_acc,            5.0f  },
+    {"Max_Vel ",   &tune.dynamics.max_vel,            10.0f },
+    {"Max_Acc ",   &tune.dynamics.max_acc,            20.0f },
     {"MaxAVel ",   &tune.dynamics.max_ang_vel,        0.1f  },
     {"MaxAAcc ",   &tune.dynamics.max_ang_acc,        0.1f  },
     {"Gain_X  ",   &tune.dynamics.kinematic_gain_x,   0.001f},
     {"Gain_Y  ",   &tune.dynamics.kinematic_gain_y,   0.001f},
+    {"StrDecpl",   &tune.kinematics.strafe_decouple,  0.001f},
     {"Brake_Lim",  &tune.dynamics.brake_limit,        0.05f },
     {"Reach_R ",   &tune.tracker.reach_radius,        0.1f  },
     {"Reach_M ",   &tune.tracker.reach_radius_min,    0.1f  },
@@ -111,6 +113,7 @@ static void draw_float_item(uint8_t row, const char* name, float val, bool is_se
 static void format_plan_time_line(char* out, size_t size, const char* label, uint32_t ms);
 static void fill_rect(uint8_t x, uint8_t y, uint8_t w, uint8_t h, uint16_t color);
 static void clamp_editable_params();
+static void apply_motion_preset(float max_acc, float brake_limit, float stop_brake_gain);
 
 
 // ====================================================================
@@ -203,8 +206,8 @@ void process_logic() {
 
     switch (ctx.current_page) {
         case MenuPage::MAIN_MENU:
-            if (ctx.key_down_pressed) ctx.cursor_idx = (ctx.cursor_idx + 1) % 8;    // 8个主菜单项
-            if (ctx.key_up_pressed)   ctx.cursor_idx = (ctx.cursor_idx == 0) ? 7 : ctx.cursor_idx - 1;
+            if (ctx.key_down_pressed) ctx.cursor_idx = (ctx.cursor_idx + 1) % MAIN_MENU_COUNT;
+            if (ctx.key_up_pressed)   ctx.cursor_idx = (ctx.cursor_idx == 0) ? (MAIN_MENU_COUNT - 1) : ctx.cursor_idx - 1;
 
             if (ctx.key_enter_pressed) {
                 if (ctx.cursor_idx == 0) { ctx.current_page = MenuPage::DASHBOARD;  App::g_state.debug.need_bg_redraw = true;}
@@ -224,15 +227,12 @@ void process_logic() {
                     tft180_show_string(15 * UI_COL_W, 6 * UI_ROW_H, "[OK]");
                     system_delay_ms(300);
                 }
-                // --- 息屏模式 ---
-                if (ctx.cursor_idx == 5) {
-                    ctx.is_closed = true;
-                    tft180_full(RGB565_WHITE); 
-                    return;
-                }
+                if (ctx.cursor_idx == 5) { apply_motion_preset(1000.0f, 0.2f, 0.0f); }
+                if (ctx.cursor_idx == 6) { apply_motion_preset(700.0f, 0.25f, 5.0f); }
+                if (ctx.cursor_idx == 7) { apply_motion_preset(200.0f, 0.8f, 15.0f); }
                 // --- 其他测试功能占位 ---
-                if (ctx.cursor_idx == 6) { App::g_state.control.current_target.y += 100;}
-                if (ctx.cursor_idx == 7) { App::g_state.control.current_target.x += 40;}
+                if (ctx.cursor_idx == 8) { App::g_state.control.current_target.y += 100;}
+                if (ctx.cursor_idx == 9) { App::g_state.control.current_target.x += 40;}
 
                 // 页面跳转后触发重绘
                 if (ctx.cursor_idx < 3) {ctx.need_full_redraw = true; ctx.cursor_idx = 0; ctx.ui_dirty = true;} 
@@ -390,9 +390,11 @@ void draw_main_menu() {
     draw_item(4, "Tuning",     ctx.cursor_idx == 2);
     draw_item(5, "Save Config",ctx.cursor_idx == 3);
     draw_item(6, "Load Config",ctx.cursor_idx == 4);
-    draw_item(7, "Close Menu", ctx.cursor_idx == 5); 
-    draw_item(8, "forward",ctx.cursor_idx == 6);
-    draw_item(9, "right", ctx.cursor_idx == 7); 
+    draw_item(7, "high_vel", ctx.cursor_idx == 5);
+    draw_item(8, "mid_vel", ctx.cursor_idx == 6);
+    draw_item(9, "low_vel", ctx.cursor_idx == 7);
+    draw_item(10, "forward", ctx.cursor_idx == 8);
+    draw_item(11, "right", ctx.cursor_idx == 9);
 }
 
 /// \brief 绘制 Mock/Demo 模式选择页面
@@ -555,6 +557,20 @@ void clamp_editable_params() {
                                            TuningDefaults::MIN_APPROACH_ENABLE,
                                            TuningDefaults::MAX_APPROACH_ENABLE,
                                            TuningDefaults::DEFAULT_APPROACH_ENABLE);
+    (void)TuningDefaults::clamp_if_outside(tune.kinematics.strafe_decouple,
+                                           TuningDefaults::MIN_STRAFE_DECOUPLE,
+                                           TuningDefaults::MAX_STRAFE_DECOUPLE,
+                                           TuningDefaults::DEFAULT_STRAFE_DECOUPLE);
+}
+
+void apply_motion_preset(float max_acc, float brake_limit, float stop_brake_gain) {
+    tune.dynamics.max_acc = max_acc;
+    tune.dynamics.brake_limit = brake_limit;
+    tune.stop_approach_brake_gain = stop_brake_gain;
+    Storage::save_params();
+    clamp_editable_params();
+    tft180_show_string(15 * UI_COL_W, (ctx.cursor_idx + 2) * UI_ROW_H, "[OK]");
+    system_delay_ms(200);
 }
 
 void draw_dashboard() {
@@ -605,7 +621,7 @@ void draw_dashboard() {
             default:                               snprintf(hud_line0, 22, "P: COMPUTING "); break;
         }
         // 连续发车轮次指示（正式模式空闲行）：1-based 显示当前是第几次发车
-        snprintf(hud_line2, sizeof(hud_line2), "Round: %d/3", game.round_idx + 1);
+        snprintf(hud_line2, sizeof(hud_line2), "Round: %d/%d", game.round_idx + 1, game.round_count);
     }
 
     // 2. 顶部 HUD 防闪烁渲染
