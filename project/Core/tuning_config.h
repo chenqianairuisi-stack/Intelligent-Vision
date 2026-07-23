@@ -159,7 +159,7 @@ namespace TuningDefaults {
     inline constexpr float DEFAULT_CORNER_PASS_SPEED = 0.0f;   // 过弯保留速度 cm/s：保持 0，不靠 end_speed 带速斜切
     inline constexpr float DEFAULT_BRAKE_LIMIT = 0.65f;  // 别贪高：过大减速超出轮速环带宽→打滑过冲+原地晃
     inline constexpr float DEFAULT_ENCODER_LATENCY_GAIN = 1.00f;
-    inline constexpr float DEFAULT_VISION_LATENCY_MS = 310.0f;
+    inline constexpr float DEFAULT_VISION_LATENCY_MS = 350.0f;
     inline constexpr float DEFAULT_VISION_REQUEST_INTERVAL_MS = 100.0f;
     inline constexpr float DEFAULT_VISION_REJECT_DIST = 5.0f;  // 与 FULL_MAX_STEP_CM=5 匹配：差<5cm 都能一帧纠到位
 
@@ -478,9 +478,9 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
     {
         80.0f,   // max_duty
         TuningDefaults::DEFAULT_DYNAMICS_MAX_VEL,  // max_vel cm/s
-        65.0f,   // max_acc
+        600.0f,   // max_acc
         10.0f,   // max_ang_vel  —— 与 Branch 对齐：sqrt 型 yaw 规划需要更高角速度上限
-        40.0f,   // max_ang_acc  —— 与 Branch 对齐：决定 sqrt(2·a·err) 曲线激进程度与近端线性带斜率
+        250.0f,   // max_ang_acc  —— 与 Branch 对齐：决定 sqrt(2·a·err) 曲线激进程度与近端线性带斜率
         1.044f,  // kinematic_gain_x
         1.015f,  // kinematic_gain_y
         TuningDefaults::DEFAULT_BRAKE_LIMIT  // brake_limit
@@ -489,7 +489,7 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
         0.3f,    // reach_radius
         TuningDefaults::DEFAULT_REACH_RADIUS_MIN,   // reach_radius_min
         TuningDefaults::DEFAULT_CORNER_PASS_SPEED,  // corner_pass_speed
-        2.0f,    // corner_switch_window —— 带速过弯模式提前切段窗口，上限 8cm，!SN 调
+        0.0f,    // corner_switch_window —— 带速过弯模式提前切段窗口，上限 8cm，!SN 调
         0.7f,    // corner_line_tolerance
         TuningDefaults::DEFAULT_VISION_REQUEST_INTERVAL_MS,  // vision_request_interval_ms
         TuningDefaults::DEFAULT_VISION_REJECT_DIST,  // vision_reject_dist
