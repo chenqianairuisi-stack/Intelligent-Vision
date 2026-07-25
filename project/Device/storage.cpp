@@ -18,36 +18,50 @@
 // 注：2026-07-15 在 TuningConfig **最末尾**（stop_approach_band_cm 之后）追加 stop_approach_brake_gain，
 //     同为"尾部追加"、前面所有字段偏移不变，旧 flash 读出的该尾部区（0/垃圾）由 sanitize 兜回 1.0
 //     = 旧行为，故仍**不 bump magic**。
-// 注：2026-07-15 继续尾部追加 short_seg_len_cm/short_seg_accel（短段起步加速提升，默认启用 60/300）
+// 注：2026-07-15 继续尾部追加 short_seg_len_cm/short_seg_accel（长短段起步加速度切换，默认 60/300）
 //     与 approach_zone_cm/approach_zone_ratio/approach_brake_acc/approach_enable（停车接近区双段提前
 //     刹车，默认启用 40/0.25/15/1）。均由 sanitize 兜回默认（**默认启用**，系用户实车拍板的目标行为），
 //     故仍**不 bump magic**。approach_enable 为 float 存的开关（0=关/1=开），clamp 到 [0,1]。
 // 注：2026-07-16 在 TuningConfig 最末尾追加 kinematics.strafe_decouple（X 轴横向指令侧解耦，默认 0.03），
 //     旧 flash 无此尾部字段时由 sanitize 兜回默认；此次 bump magic 到 0xAA55CC59，旧 flash 一律取默认。
-#define CONFIG_MAGIC_WORD         (0xAA55CC59)
+// 兼容读取现有同布局版本并只迁移四轮 ka，避免清空其他已调参数
+#define CONFIG_MAGIC_WORD_PRE_WHEEL_KA_ZERO_V1 (0xAA55CC59)
+#define CONFIG_MAGIC_WORD_PRE_WHEEL_KA_ZERO_V2 (0xAA55CC5A)
+#define CONFIG_MAGIC_WORD_PRE_CORNER_SPEED_V3  (0xAA55CC5B)
+#define CONFIG_MAGIC_WORD                      (0xAA55CC5C)
+
+static_assert(sizeof(TuningConfig) + sizeof(flash_data_union) <= FLASH_PAGE_SIZE,
+              "TuningConfig does not fit in one flash page");
 
 void Storage::init() {
     flash_init();
 
     if (flash_check(FLASH_SECTION_INDEX, FLASH_PAGE_INDEX)) {
         if (load_params()) {
-            save_params();
+            (void)save_params();
         }
     } else {
         (void)TuningDefaults::sanitize(tune);
-        save_params();
+        (void)save_params();
     }
 }
 
-void Storage::save_params() {
+bool Storage::save_params() {
     (void)TuningDefaults::sanitize(tune);
     flash_buffer_clear();
 
     flash_union_buffer[0].uint32_type = CONFIG_MAGIC_WORD;
     memcpy(&flash_union_buffer[1], &tune, sizeof(TuningConfig));
 
-    flash_erase_page(FLASH_SECTION_INDEX, FLASH_PAGE_INDEX);
+    if (flash_erase_page(FLASH_SECTION_INDEX, FLASH_PAGE_INDEX) != 0U) {
+        return false;
+    }
     flash_write_page_from_buffer(FLASH_SECTION_INDEX, FLASH_PAGE_INDEX);
+
+    // 底层 buffer 写接口不透传写入状态，因此回读并逐字节确认实际持久化结果
+    flash_read_page_to_buffer(FLASH_SECTION_INDEX, FLASH_PAGE_INDEX);
+    return flash_union_buffer[0].uint32_type == CONFIG_MAGIC_WORD &&
+           memcmp(&flash_union_buffer[1], &tune, sizeof(TuningConfig)) == 0;
 }
 
 bool Storage::load_params() {
@@ -55,7 +69,15 @@ bool Storage::load_params() {
 
     flash_read_page_to_buffer(FLASH_SECTION_INDEX, FLASH_PAGE_INDEX);
 
-    if (flash_union_buffer[0].uint32_type != CONFIG_MAGIC_WORD) {
+    uint32_t stored_magic = flash_union_buffer[0].uint32_type;
+    bool needs_wheel_ka_migration =
+        stored_magic == CONFIG_MAGIC_WORD_PRE_WHEEL_KA_ZERO_V1 ||
+        stored_magic == CONFIG_MAGIC_WORD_PRE_WHEEL_KA_ZERO_V2;
+    bool needs_corner_speed_migration =
+        stored_magic == CONFIG_MAGIC_WORD_PRE_CORNER_SPEED_V3;
+    if (stored_magic != CONFIG_MAGIC_WORD &&
+        !needs_wheel_ka_migration &&
+        !needs_corner_speed_migration) {
         (void)TuningDefaults::sanitize(tune);
         return true;
     }
@@ -63,6 +85,30 @@ bool Storage::load_params() {
     memcpy(&tune, &flash_union_buffer[1], sizeof(TuningConfig));
 
     changed = TuningDefaults::sanitize(tune) || changed;
+    if (needs_wheel_ka_migration) {
+        // 首次运行新版固件时只清四轮加速前馈，其他已保存参数保持不变
+        for (int wheel = 0; wheel < 4; ++wheel) {
+            tune.wheels[wheel].ka = 0.0f;
+        }
+        changed = true;
+    }
+
+    if (needs_corner_speed_migration &&
+        tune.tracker.corner_pass_speed <= 26.0f) {
+        // 5B 固件的默认值为 26，升级后改为固定带速切向默认值 120
+        tune.tracker.corner_pass_speed = TuningDefaults::DEFAULT_CORNER_PASS_SPEED;
+        changed = true;
+    }
+
+    // 以下"值等式/阈值"迁移只应对"从旧固件 flash(V1/V2 magic) 首次升级"跑一次。
+    // 当前 magic(V3) 存回的 flash 一律不再触发——否则每次上电都把用户在菜单 Save 的
+    // 合法值(brake_limit>0.80、corner_pass_speed>0、max_vel==60 等)强抹回默认，
+    // 表现为"调好存了、重启又变回默认"。init() 首启会在迁移后 save_params() 写回 V3 magic，
+    // 下次启动 needs_wheel_ka_migration=false 即整块跳过。
+    if (!needs_wheel_ka_migration) {
+        return changed;
+    }
+
     if (tune.dynamics.max_vel == 60.0f) {
         tune.dynamics.max_vel = TuningDefaults::DEFAULT_DYNAMICS_MAX_VEL;
         changed = true;
@@ -81,9 +127,9 @@ bool Storage::load_params() {
         changed = true;
     }
 
-    // Turn_V/end_speed 保持 0：连贯性靠提前切段和切向限幅，不靠带末速斜切。
-    // 旧 flash 若残留非零 Turn_V 或 Stanley 开，会导致拐点带速磨圆/抖，这里刷回安全默认。
-    if (tune.tracker.corner_pass_speed > 0.0f || tune.stanley.enable) {
+    // 旧版本的 Turn_V 由默认 0 改为固定带速切向，旧 flash 一律迁移到新默认。
+    if (tune.tracker.corner_pass_speed != TuningDefaults::DEFAULT_CORNER_PASS_SPEED ||
+        tune.stanley.enable) {
         tune.tracker.corner_pass_speed = TuningDefaults::DEFAULT_CORNER_PASS_SPEED;
         tune.stanley.enable = false;
         changed = true;

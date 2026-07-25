@@ -458,16 +458,25 @@ namespace {
                     case 'B': tune.bomb.explosion_wait_ms = value; break;  // 炸弹引信等待 ms
                     case 'G': tune.feel.brake_hold_gain = value; break;    // 主动刹车前馈增益（刹更狠锁更死）
                     case 'A': tune.feel.corner_turn_acc = value; break;    // 切向方向变化加速度限 cm/s^2（大=切更直不磨圆）
-                    // !T S 已移除：stop_approach_band_cm 字段保留占位但无任何行为（2026-07-15 删 StopBand）
+                    // !T S 已移除：stop_approach_band_cm 字段仅保留为 Flash 布局占位
                     case 'H': tune.stop_approach_brake_gain = value; break; // 停车接近区刹车倍率（大=到点抖减速更狠进点更慢过冲更小，1=旧行为）
-                    case 'D': tune.short_seg_len_cm = value; break;        // 短段判定阈值 cm（段全长<=此值走高加速起步；设1≈关闭）
+                    case 'D': tune.short_seg_len_cm = value; break;        // 短段判定阈值 cm（段全长<=此值使用 short_seg_accel；设1≈关闭）
                     case 'V': tune.short_seg_accel = value; break;         // 短段起步加速度 cm/s^2（只压加速斜坡，不动刹车）
                     case 'Z': tune.approach_zone_cm = value; break;        // 停车接近区提前刹车距离上限 cm（默认40；0.5≈关闭回纯sqrt）
                     case 'R': tune.approach_zone_ratio = value; break;     // 接近区占段全长比例（默认0.25：20cm段→5cm）
                     case 'C': tune.approach_brake_acc = value; break;      // 接近区缓减速度 cm/s^2（默认15，越小末端越慢越准）
                     case 'N': tune.approach_enable = (value > 0.5f) ? 1.0f : 0.0f; break; // 接近区总开关（!T N 1 开 / !T N 0 关，一键切）
+                    // 线性末端减速参数（原 LinearTerminalConfig 常量，现可现场调）。改后需菜单 Save 才存盘。
+                    case 'Q': tune.linear.cruise_speed = value; break;    // 末端接近巡航上限 cm/s
+                    case 'M': tune.linear.min_speed = value; break;       // 到达前最低速/拐点带速切向地板 cm/s
+                    case 'W': tune.linear.slowdown_dist = value; break;   // 开始减速距离 cm
+                    case 'O': tune.linear.stop_dist = value; break;       // 停车判定距离 cm（须 < slowdown_dist）
+                    case 'J': tune.linear.decel_step = value; break;      // 每拍最大降速 cm/s（越大刹越猛）
+                    case 'I': tune.linear.long_seg_thresh = value; break; // 长直段阈值 cm
                     default: return;
                 }
+                // 串口调参立即做同一套范围与相互约束校验，避免负减速步长或负到达半径进入控制环
+                (void)TuningDefaults::sanitize(tune);
                 break;
 
             case 'W': {  // 每轮轮速环调参：!W <轮 0-3> <字段> <值>，字段 kp/ki/kd/kv/ka/kb/ks

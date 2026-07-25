@@ -11,21 +11,29 @@ namespace Algorithm::Motion {
 // ==========================================
 class Trajectory {
 public:
-    inline void reset() { current_v = 0.0f; current_a = 0.0f; }
+    // terminal_min_dist 复位到大值：线性末端"防重新加速闸"的锁存距离，远端会被持续重置，无需精确初值
+    inline void reset() { current_v = 0.0f; current_a = 0.0f; terminal_min_dist = 1.0e9f; }
+    // Preserve speed across a corner, but start the terminal profile fresh.
+    inline void reset_terminal_profile() { terminal_min_dist = 1.0e9f; }
     // 生成平滑平移速度，end_speed 用于拐角不停顿通过
-    // seg_len_cm：当前直线段全长 cm（由 follow 传入）。<=0 表示未知，不做短段加速提升；
-    // 短段(<= tune.short_seg_len_cm)只提高**加速斜坡**，刹车/sqrt 减速曲线保持温柔不变。
+    // seg_len_cm：当前直线段全长 cm（由 follow 传入）。<=0 表示未知，不做短段加速度切换
+    // MotionFeatureSwitches 中的两个开关分别控制原有组合功能与末端线性减速
     Speed2D velocity_planning_1d(float dx, float dy, float dt, float end_speed = 0.0f,
                                 float seg_len_cm = -1.0f);
 private:
     float current_v = 0.0f;
     float current_a = 0.0f;
+    float terminal_min_dist = 1.0e9f;  // 线性末端减速区内锁存的单调最小距离，防视觉回拽触发冲刺
 };
 
 
 class YawProfiled {
 public:
-    void reset() { current_vw = 0.0f; current_aw = 0.0f; }
+    void reset() {
+        current_vw = 0.0f;
+        current_aw = 0.0f;
+        tolerance_hold = false;
+    }
     // err/yaw_rate 单位 rad、rad/s，yaw_rate 为 IMU 实测角速度，用于陀螺阻尼
     float calculate(float err, float dt, bool is_translating, float yaw_rate);
     // 获取最近一次角速度规划产生的角加速度（rad/s^2）
@@ -34,18 +42,24 @@ public:
 private:
     float current_vw = 0.0f;
     float current_aw = 0.0f;
+    bool tolerance_hold = false;
 };
 
 
 // ==========================================
-// 1b. Stanley 式平移横向纠偏（贴路径线跟踪）
+// 1b. 路径线跟踪：lookahead 前瞻瞄点 + 速度矢量低通（照搬 -1he-new）
 // ==========================================
-// 把"朝目标点收敛"改成"沿路径线行驶 + 横向 Stanley 纠偏"：
-// 沿轨方向用梯形规划器出主速度，垂直方向用 Stanley atan 律压回路径线。
-// 全向底盘下横纠表现为垂直于段方向的平移速度分量，不改逆运动学。
+// 沿轨方向用梯形规划器出主速度大小；方向瞄向段上前方 6~16cm 的前瞻点（随速度伸长、随横偏
+// 收缩），提前偏舵在拐点画平滑弧。输出速度矢量过一阶低通(α=0.45)平滑方向突变，幅值封顶到
+// 规划器速率。低通历史仅在急停/切段停车 reset()，中间拐点不 reset → 带速切向。
 class PathLineFollower {
 public:
-    inline void reset() { planner.reset(); }
+    inline void reset() {
+        planner.reset();
+        cmd_vx = 0.0f;   // 速度矢量低通历史（照搬 -1he-new motion_cmd_vx_global）
+        cmd_vy = 0.0f;
+        segment_history_valid = false;
+    }
 
     /// \brief 计算沿路径线跟踪的全局期望速度
     /// \param px,py 当前全局位置 cm
@@ -59,6 +73,14 @@ public:
 
 private:
     Trajectory planner;
+    // 速度矢量一阶低通历史（全局系 cm/s），平滑拐点处方向突变。切段/停车时由 reset() 清零。
+    float cmd_vx = 0.0f;
+    float cmd_vy = 0.0f;
+    bool segment_history_valid = false;
+    float last_sx = 0.0f;
+    float last_sy = 0.0f;
+    float last_tx = 0.0f;
+    float last_ty = 0.0f;
 };
 
 

@@ -54,8 +54,19 @@ namespace { // 匿名命名空间，确保这些数据只在本文件可见
     struct ParamItem { const char* name; float* val_ptr; float step; };
     ParamItem tune_dict[] = { 
     {"Yaw_Kp  ",   &tune.pid_yaw.kp,                  0.1f  },
-    {"Spd_Kp  ",   &tune.pid_speed.kp,                0.01f },
-    {"Spd_Ki  ",   &tune.pid_speed.ki,                0.01f },
+    // 四轮轮速 PID 顺序与底盘控制一致：LF、LB、RF、RB
+    {"LF_Kp   ",   &tune.wheels[0].pid.kp,            0.01f },
+    {"LF_Ki   ",   &tune.wheels[0].pid.ki,            0.01f },
+    {"LF_Kd   ",   &tune.wheels[0].pid.kd,            0.01f },
+    {"LB_Kp   ",   &tune.wheels[1].pid.kp,            0.01f },
+    {"LB_Ki   ",   &tune.wheels[1].pid.ki,            0.01f },
+    {"LB_Kd   ",   &tune.wheels[1].pid.kd,            0.01f },
+    {"RF_Kp   ",   &tune.wheels[2].pid.kp,            0.01f },
+    {"RF_Ki   ",   &tune.wheels[2].pid.ki,            0.01f },
+    {"RF_Kd   ",   &tune.wheels[2].pid.kd,            0.01f },
+    {"RB_Kp   ",   &tune.wheels[3].pid.kp,            0.01f },
+    {"RB_Ki   ",   &tune.wheels[3].pid.ki,            0.01f },
+    {"RB_Kd   ",   &tune.wheels[3].pid.kd,            0.01f },
     {"ff_Kv   ",   &tune.ff.kv,                       0.01f },
     {"ff_Ka   ",   &tune.ff.ka,                       1.0f  },
     {"ff_Ks   ",   &tune.ff.k_stiction,               0.01f },
@@ -67,7 +78,7 @@ namespace { // 匿名命名空间，确保这些数据只在本文件可见
     {"Gain_X  ",   &tune.dynamics.kinematic_gain_x,   0.001f},
     {"Gain_Y  ",   &tune.dynamics.kinematic_gain_y,   0.001f},
     {"StrDecpl",   &tune.kinematics.strafe_decouple,  0.001f},
-    {"Brake_Lim",  &tune.dynamics.brake_limit,        0.05f },
+    {"Brake_Lim",  &tune.dynamics.brake_limit,        0.1f  },
     {"Reach_R ",   &tune.tracker.reach_radius,        0.1f  },
     {"Reach_M ",   &tune.tracker.reach_radius_min,    0.1f  },
     // 现场过弯与视觉校正参数，和 Telemetry 的 !S B/N/M/G 指令保持同一组含义
@@ -90,6 +101,15 @@ namespace { // 匿名命名空间，确保这些数据只在本文件可见
     {"AprZone ",   &tune.approach_zone_cm,            5.0f  },
     {"AprRatio",   &tune.approach_zone_ratio,         0.05f },
     {"AprAcc  ",   &tune.approach_brake_acc,          1.0f  },
+    // 线性末端减速参数（原 LinearTerminalConfig 编译期常量，2026-07-25 搬进 tune 可现场调+存盘）：
+    // LinCruise 末端接近巡航上限，LinMinV 到达前最低速(也是拐点带速切向地板)，LinSlowD 开始减速距离，
+    // LinStopD 停车判定距离(须 < LinSlowD)，LinDecel 每拍最大降速(越大刹越猛)，LinLongL 长直段阈值。
+    {"LinCruise",  &tune.linear.cruise_speed,         5.0f  },
+    {"LinMinV  ",  &tune.linear.min_speed,            1.0f  },
+    {"LinSlowD ",  &tune.linear.slowdown_dist,        2.0f  },
+    {"LinStopD ",  &tune.linear.stop_dist,            0.5f  },
+    {"LinDecel ",  &tune.linear.decel_step,           2.0f  },
+    {"LinLongL ",  &tune.linear.long_seg_thresh,      10.0f },
     };
     constexpr int DICT_SIZE = sizeof(tune_dict) / sizeof(tune_dict[0]);   
     constexpr int PARAMS_PER_PAGE = 12; 
@@ -216,15 +236,16 @@ void process_logic() {
 
                 // --- Flash 存储触发 ---
                 if (ctx.cursor_idx == 3) {
-                    Storage::save_params();
-                    tft180_show_string(15 * UI_COL_W, 5 * UI_ROW_H, "[OK]");
+                    bool saved = Storage::save_params();
+                    tft180_show_string(15 * UI_COL_W, 5 * UI_ROW_H, saved ? "[OK] " : "[ERR]");
                     system_delay_ms(300);
                 }
                 if (ctx.cursor_idx == 4) {
+                    bool loaded = true;
                     if (Storage::load_params()) {
-                        Storage::save_params();
+                        loaded = Storage::save_params();
                     }
-                    tft180_show_string(15 * UI_COL_W, 6 * UI_ROW_H, "[OK]");
+                    tft180_show_string(15 * UI_COL_W, 6 * UI_ROW_H, loaded ? "[OK] " : "[ERR]");
                     system_delay_ms(300);
                 }
                 if (ctx.cursor_idx == 5) { apply_motion_preset(1000.0f, 0.2f, 0.0f); }
@@ -519,10 +540,24 @@ void draw_tune_params() {
 /// 地图采用 back_buffer 做格子级增量刷新，小车单独作为像素级覆盖层绘制
 ///
 void clamp_editable_params() {
+    (void)TuningDefaults::clamp_if_outside(tune.dynamics.brake_limit,
+                                           TuningDefaults::MIN_BRAKE_LIMIT,
+                                           TuningDefaults::MAX_BRAKE_LIMIT,
+                                           TuningDefaults::DEFAULT_BRAKE_LIMIT);
+
     (void)TuningDefaults::clamp_if_outside(tune.dynamics.max_vel,
                                            TuningDefaults::MIN_DYNAMICS_MAX_VEL,
                                            TuningDefaults::MAX_DYNAMICS_MAX_VEL,
                                            TuningDefaults::DEFAULT_DYNAMICS_MAX_VEL);
+
+    // 屏幕编辑四轮 PID 时使用与 Flash sanitize 相同的合法范围
+    for (int wheel = 0; wheel < 4; ++wheel) {
+        PidParams& pid = tune.wheels[wheel].pid;
+        const PidParams& defaults = TuningDefaults::DEFAULT_WHEELS[wheel].pid;
+        (void)TuningDefaults::clamp_if_outside(pid.kp, 0.1f, 5.0f, defaults.kp);
+        (void)TuningDefaults::clamp_if_outside(pid.ki, 0.0f, 5.0f, defaults.ki);
+        (void)TuningDefaults::clamp_if_outside(pid.kd, 0.0f, 2.0f, defaults.kd);
+    }
 
     if (tune.latency.encoder_latency_gain < TuningDefaults::MIN_ENCODER_LATENCY_GAIN) {
         tune.latency.encoder_latency_gain = TuningDefaults::MIN_ENCODER_LATENCY_GAIN;
@@ -561,15 +596,42 @@ void clamp_editable_params() {
                                            TuningDefaults::MIN_STRAFE_DECOUPLE,
                                            TuningDefaults::MAX_STRAFE_DECOUPLE,
                                            TuningDefaults::DEFAULT_STRAFE_DECOUPLE);
+
+    // 线性末端减速 6 参数（菜单 LinCruise/LinMinV/LinSlowD/LinStopD/LinDecel/LinLongL）夹到 sanitize 同范围。
+    // 注意：min_speed>cruise_speed 与 stop_dist>=slowdown_dist 的相互约束由 Storage::save_params()→sanitize() 在存盘时兜底。
+    (void)TuningDefaults::clamp_if_outside(tune.linear.cruise_speed,
+                                           TuningDefaults::MIN_LINEAR_CRUISE_SPEED,
+                                           TuningDefaults::MAX_LINEAR_CRUISE_SPEED,
+                                           TuningDefaults::DEFAULT_LINEAR_CRUISE_SPEED);
+    (void)TuningDefaults::clamp_if_outside(tune.linear.min_speed,
+                                           TuningDefaults::MIN_LINEAR_MIN_SPEED,
+                                           TuningDefaults::MAX_LINEAR_MIN_SPEED,
+                                           TuningDefaults::DEFAULT_LINEAR_MIN_SPEED);
+    (void)TuningDefaults::clamp_if_outside(tune.linear.slowdown_dist,
+                                           TuningDefaults::MIN_LINEAR_SLOWDOWN_DIST,
+                                           TuningDefaults::MAX_LINEAR_SLOWDOWN_DIST,
+                                           TuningDefaults::DEFAULT_LINEAR_SLOWDOWN_DIST);
+    (void)TuningDefaults::clamp_if_outside(tune.linear.stop_dist,
+                                           TuningDefaults::MIN_LINEAR_STOP_DIST,
+                                           TuningDefaults::MAX_LINEAR_STOP_DIST,
+                                           TuningDefaults::DEFAULT_LINEAR_STOP_DIST);
+    (void)TuningDefaults::clamp_if_outside(tune.linear.decel_step,
+                                           TuningDefaults::MIN_LINEAR_DECEL_STEP,
+                                           TuningDefaults::MAX_LINEAR_DECEL_STEP,
+                                           TuningDefaults::DEFAULT_LINEAR_DECEL_STEP);
+    (void)TuningDefaults::clamp_if_outside(tune.linear.long_seg_thresh,
+                                           TuningDefaults::MIN_LINEAR_LONG_SEG_THRESH,
+                                           TuningDefaults::MAX_LINEAR_LONG_SEG_THRESH,
+                                           TuningDefaults::DEFAULT_LINEAR_LONG_SEG_THRESH);
 }
 
 void apply_motion_preset(float max_acc, float brake_limit, float stop_brake_gain) {
     tune.dynamics.max_acc = max_acc;
     tune.dynamics.brake_limit = brake_limit;
     tune.stop_approach_brake_gain = stop_brake_gain;
-    Storage::save_params();
+    bool saved = Storage::save_params();
     clamp_editable_params();
-    tft180_show_string(15 * UI_COL_W, (ctx.cursor_idx + 2) * UI_ROW_H, "[OK]");
+    tft180_show_string(15 * UI_COL_W, (ctx.cursor_idx + 2) * UI_ROW_H, saved ? "[OK] " : "[ERR]");
     system_delay_ms(200);
 }
 

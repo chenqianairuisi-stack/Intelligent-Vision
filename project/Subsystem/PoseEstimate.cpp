@@ -968,6 +968,7 @@ AsyncCalibState async_calibrate_vision(uint32_t timeout_ms, float reject_thresho
 
     // 如果是第一次进入，执行初始化动作
     if (s_calib_state == AsyncCalibState::IDLE) {
+        ctrl.yaw_only = false;
         ctrl.mode = ControlMode::POINT_TRACKING; // 锁死底盘
         vision_calibrator.reset();
         // 记录进入标定前的序号，只消费之后到达的新视觉帧

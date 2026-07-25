@@ -1,5 +1,61 @@
 #pragma once
 
+#include <algorithm>
+
+// 运动速度曲线功能开关，修改 true/false 后重新编译下载
+namespace MotionFeatureSwitches {
+    // 原有组合功能：停车抖减速 + 长短距离使用不同起步加速度
+    inline constexpr bool ENABLE_STEP_BRAKE_AND_SHORT_ACCEL = false;
+
+    // 图片中的完整线性末端速度规划
+    // 两个开关同时打开时线性末端规划优先，旧开关仍控制长短距离起步加速度
+    inline constexpr bool ENABLE_LINEAR_TERMINAL_DECEL = true;
+}
+
+// 线性末端速度参数（默认值照搬 D:\Download\Intelligent-Vision-master-1he-new/code/control.c，
+// 2026-07-25 用户要求"减速部分完全按 1he-new 一模一样"），可菜单/串口在线调并持久化。
+namespace LinearTerminalConfig {
+    inline constexpr float CRUISE_SPEED_CM_S = 100.0f;         // 巡航速度 cm/s（1he-new motion_cruise_speed）
+    inline constexpr float MIN_SPEED_CM_S = 26.0f;             // 到达前最低速度 cm/s（1he-new motion_min_speed，抬高治龟速+带速过弯地板）
+    inline constexpr float SLOWDOWN_DIST_CM = 55.0f;           // 普通段开始减速距离 cm（1he-new motion_slowdown_dist）
+    inline constexpr float STOP_DIST_CM = 2.0f;                // 到达判定距离 cm（1he-new MOTION_GOTO_STOP_DIST_CM）
+    inline constexpr float LONG_SEGMENT_THRESHOLD_CM = 90.0f;  // 长直段判定长度 cm（1he-new MOTION_LONG_SEG_MIN_LEN_CM）
+    inline constexpr float LONG_CRUISE_GAIN = 1.25f;           // 长直段巡航速度倍率（1he-new MOTION_LONG_SEG_CRUISE_GAIN）
+    inline constexpr float LONG_MAX_CRUISE_CM_S = 120.0f;      // 长直段巡航速度封顶（1he-new MOTION_LONG_SEG_MAX_CRUISE_CM_S）
+    inline constexpr float DECEL_STEP_CM_S = 24.0f;            // 每个 20ms 控制周期最大降速 cm/s（1he-new motion_decel_step）
+    // 所有停车段共用单格短段末端窗口，长段不再按整段长度放大减速带。
+    // 地图单格为 20cm，默认窗口为 20*0.45=9cm；因此长段进入末端后与短段使用同一曲线。
+    inline constexpr float SHORT_SEG_REFERENCE_CM = 20.0f;
+    inline constexpr float SHORT_SEG_SLOWDOWN_RATIO = 0.45f;   // 单格末端减速窗口占比
+}
+
+// 切向：lookahead 前瞻瞄点 + 速度矢量低通参数（照搬 -1he-new/code/control.c，
+// 2026-07-25 用户要求"切向部分完全按 1he-new 一模一样"）。
+namespace LookaheadConfig {
+    inline constexpr float LOOKAHEAD_MIN_CM   = 6.0f;    // 前瞻最小距离（1he-new MOTION_PATH_LOOKAHEAD_MIN_CM）
+    inline constexpr float LOOKAHEAD_MAX_CM   = 16.0f;   // 前瞻最大距离（短段）
+    inline constexpr float LOOKAHEAD_TIME_S   = 0.25f;   // 前瞻随速度增益 = v×time
+    inline constexpr float LATERAL_LOOKAHEAD_K = 0.8f;   // 横偏越大前瞻越短（短段）
+    inline constexpr float CORNER_APPROACH_CM = 28.0f;   // 临近段末时前瞻收缩到 remain
+    inline constexpr float FILTER_ALPHA       = 0.45f;   // 速度矢量一阶低通系数（1he-new motion_filter_alpha）
+    // 长直段（seg_len >= LinearTerminalConfig::LONG_SEGMENT_THRESHOLD_CM）用更大前瞻、更弱横偏收缩
+    inline constexpr float LONG_LOOKAHEAD_MAX_CM = 22.0f;
+    inline constexpr float LONG_LATERAL_LOOKAHEAD_K = 0.35f;
+}
+
+static_assert(LinearTerminalConfig::MIN_SPEED_CM_S >= 0.0f &&
+              LinearTerminalConfig::MIN_SPEED_CM_S <= LinearTerminalConfig::CRUISE_SPEED_CM_S,
+              "linear terminal speeds are invalid");
+static_assert(LinearTerminalConfig::STOP_DIST_CM >= 0.0f &&
+              LinearTerminalConfig::STOP_DIST_CM < LinearTerminalConfig::SLOWDOWN_DIST_CM,
+              "linear terminal distances are invalid");
+static_assert(LinearTerminalConfig::LONG_SEGMENT_THRESHOLD_CM > 0.0f &&
+              LinearTerminalConfig::SHORT_SEG_REFERENCE_CM > 0.0f &&
+              LinearTerminalConfig::SHORT_SEG_SLOWDOWN_RATIO > 0.0f &&
+              LinearTerminalConfig::SHORT_SEG_SLOWDOWN_RATIO < 1.0f &&
+              LinearTerminalConfig::DECEL_STEP_CM_S > 0.0f,
+              "linear terminal limits are invalid");
+
 // 可复用 PID 参数块
 struct PidParams {
     float kp;  // 比例系数
@@ -118,10 +174,7 @@ struct TuningConfig {
     // 新轮速环走此表；旧 pid_speed / ff.kv / ff.ka 字段保留但不再被速度内环使用。
     WheelControlParams wheels[4];
 
-    // 【已废弃占位】停车近端线性带宽度 cm（2026-07-15 删 StopBand 功能：实测无用，停车减速回到
-    // 纯 sqrt 直落）。字段**保留占位不删**：它后面还有 stop_approach_brake_gain，物理删除会使后者
-    // 偏移前移 4 字节 → 破坏 flash 布局 → 被迫 bump magic 丢掉全部已调参数。保留字段+sanitize
-    // 兜底=零风险；无任何代码读它。若未来 bump magic 时可一并物理删除。
+    // 【已废弃占位】旧停车近端线性带字段，保留以维持 Flash 参数布局
     float stop_approach_band_cm;
 
     // 停车接近区刹车倍率（2026-07-15 追加在结构体**最末尾**，不 bump magic）：仅停车工况（is_stop，
@@ -132,17 +185,15 @@ struct TuningConfig {
     // 1.0=完全等于旧行为；旧 flash 无此区、memcpy 读出 0/垃圾 → sanitize 兜回 1.0。上车 !T H 直接调。
     float stop_approach_brake_gain;
 
-    // 短距离移动起步加速提升（2026-07-15 追加在结构体**最末尾**，不 bump magic）：段全长 <= short_seg_len_cm
-    // 时，速度规划器**只**把加速斜坡上限抬到 short_seg_accel（刹车/sqrt 减速曲线保持温柔不变），让短段
-    // 起步更快、不磨蹭；末端因刹车温柔不变而**自然物理慢下来**（不是把末端交给视觉控制，控制链仍是常规
-    // 编码器+里程计闭环，只是慢了更准/更跟得上）。
+    // 长短距离起步加速度切换（2026-07-15 追加在结构体**最末尾**，不 bump magic）：段全长
+    // <= short_seg_len_cm 时只把加速斜坡切换为 short_seg_accel，刹车/目标减速曲线保持不变
     // 与其他尾部字段"默认零行为改变"不同，此二者**默认启用**（60/300，用户已实车拍板）。旧 flash 尾部
     // 读出 0/垃圾 → sanitize 用 repair 兜回 60/300（默认开）；上车 !T D / !T V 直接调，!T D 1≈关闭。
-    float short_seg_len_cm;   // 短段判定阈值 cm（段全长 <= 此值走高加速；1 以下≈关闭）
+    float short_seg_len_cm;   // 短段判定阈值 cm（段全长 <= 此值使用 short_seg_accel；1 以下≈关闭）
     float short_seg_accel;    // 短段起步加速度 cm/s^2（只压加速斜坡，不动刹车）
 
     // 停车接近区双段刹车（2026-07-15 追加在结构体**最末尾**，不 bump magic）：治"末端总是出去一些、
-    // StopBrkG 大小都调不好"。根因=过冲发生在 hard_lock 视觉冻结窗口内，事后又有粘滞锁死区兜着，
+    // StopBrkG 大小都调不好"。根因=高速接近时单一 sqrt 曲线难以兼顾精确停车，
     // 靠单一 sqrt 曲线+减速限幅永远调不准。修法=**提前刹车**：停车段最后 zone cm 换一条**更缓**的
     // sqrt 曲线（approach_brake_acc << brake_acc），外段正常刹车曲线落到缓曲线上（C0 连续）——
     // 车末端明显慢下来（非固定爬行速度），低速下视觉延迟误差≈速度×310ms 变小、编码器不打滑，
@@ -159,14 +210,27 @@ struct TuningConfig {
     struct {
         float strafe_decouple;  // 仅 X 轴横向指令启用，纯 Y 轴移动不使用
     } kinematics;
+
+    // 线性末端速度规划参数（2026 追加在结构体**最末尾**，不 bump magic）：原为
+    // LinearTerminalConfig:: 里写死的 constexpr，改后必须重编译下载才生效——现搬进 tune 供
+    // 屏幕菜单/串口在线调并 Save 持久化。旧 flash 无此尾部区、memcpy 读出 0/垃圾 → sanitize
+    // 用 repair 兜回默认（= 原 constexpr 值，零行为改变）。LinearTerminalConfig 保留为默认值来源。
+    struct {
+        float cruise_speed;    // 巡航速度 cm/s（末端接近段的上限速度）
+        float min_speed;       // 到达前最低速度 cm/s（拐点带速切向地板；调低利于终点、降低拐点带速）
+        float slowdown_dist;   // 普通段开始减速距离 cm
+        float stop_dist;       // 到达判定距离 cm（也是中间拐点带速切向的切换半径）
+        float decel_step;      // 每个 20ms 控制周期最大降速 cm/s
+        float long_seg_thresh; // 长直段判定长度 cm（超过后只提高远端巡航速度）
+    } linear;
 };
 
 namespace TuningDefaults {
-    inline constexpr float DEFAULT_REACH_RADIUS_MIN = 1.00f;  // 终点锁窗口需 > 单拍滑行量，太小(如0.2)会被穿窗导致反向追点震荡
-    inline constexpr float DEFAULT_CORNER_PASS_SPEED = 0.0f;   // 过弯保留速度 cm/s：保持 0，不靠 end_speed 带速斜切
+    inline constexpr float DEFAULT_REACH_RADIUS_MIN = 1.00f;  // 终点复验窗口需 > 单拍滑行量，太小(如0.2)会被穿窗导致反向追点震荡
+    inline constexpr float DEFAULT_CORNER_PASS_SPEED = 120.0f; // 固定过弯末速，长短段在切换窗保持同一速度
     inline constexpr float DEFAULT_BRAKE_LIMIT = 0.2f;  // 别贪高：过大减速超出轮速环带宽→打滑过冲+原地晃
     inline constexpr float DEFAULT_ENCODER_LATENCY_GAIN = 1.00f;
-    inline constexpr float DEFAULT_VISION_LATENCY_MS = 310.0f;
+    inline constexpr float DEFAULT_VISION_LATENCY_MS = 400.0f;
     inline constexpr float DEFAULT_VISION_REQUEST_INTERVAL_MS = 100.0f;
     inline constexpr float DEFAULT_VISION_REJECT_DIST = 5.0f;  // 与 FULL_MAX_STEP_CM=5 匹配：差<5cm 都能一帧纠到位
 
@@ -195,16 +259,15 @@ namespace TuningDefaults {
     inline constexpr float DEFAULT_BRAKE_HOLD_GAIN = 0.30f;   // 主动刹车前馈增益
     inline constexpr float DEFAULT_CORNER_TURN_ACC = 250.0f;  // 切向方向变化加速度限 cm/s^2
 
-    // 【已废弃占位】停车近端线性带默认：字段保留占位（见结构体处注释），无代码读它，
-    // 仅供 sanitize 把 flash 读出的垃圾值兜回有限值，避免 NaN 存回 flash。
+    // 【已废弃占位】仅供 sanitize 处理旧 Flash 尾部数据
     inline constexpr float DEFAULT_STOP_APPROACH_BAND_CM = 3.0f;  // cm
 
     // 停车接近区刹车倍率默认（最末尾追加，不入 magic）：1.0 = 每拍减速上限不变 = 旧行为，零风险。
     // 上车若"到航点冲过头"就把它调大（2~4），让冲进停车航点的车更抖地掉速、进点更慢、过冲更小。
     inline constexpr float DEFAULT_STOP_APPROACH_BRAKE_GAIN = 1.0f;  // ×
 
-    // 短距离起步加速提升默认（最末尾追加，不入 magic）：**默认启用** 60cm / 300cm/s^2（用户实车拍板）。
-    // 段全长 <= 60cm 的移动起步加速抬到 300，只压加速斜坡、不动刹车曲线。
+    // 长短距离起步加速度切换默认（最末尾追加，不入 magic）：默认启用 60cm / 300cm/s^2
+    // 段全长 <= 60cm 时使用 300，只改加速斜坡、不动刹车曲线
     inline constexpr float DEFAULT_SHORT_SEG_LEN_CM = 60.0f;   // cm
     inline constexpr float DEFAULT_SHORT_SEG_ACCEL  = 300.0f;  // cm/s^2
 
@@ -218,6 +281,28 @@ namespace TuningDefaults {
 
     // 默认关闭横向解耦，0 不改变现有运动学行为
     inline constexpr float DEFAULT_STRAFE_DECOUPLE = 0.03f;
+
+    // 线性末端速度参数默认（最末尾追加，不入 magic）：默认值 = LinearTerminalConfig 原 constexpr，
+    // 零行为改变。旧 flash 尾部读出 0/NaN/垃圾 → sanitize 用 repair 兜回这里。
+    inline constexpr float DEFAULT_LINEAR_CRUISE_SPEED   = LinearTerminalConfig::CRUISE_SPEED_CM_S;         // 100 (1he-new)
+    inline constexpr float DEFAULT_LINEAR_MIN_SPEED      = LinearTerminalConfig::MIN_SPEED_CM_S;            // 26  (1he-new)
+    inline constexpr float DEFAULT_LINEAR_SLOWDOWN_DIST  = LinearTerminalConfig::SLOWDOWN_DIST_CM;          // 55  (1he-new)
+    inline constexpr float DEFAULT_LINEAR_STOP_DIST      = LinearTerminalConfig::STOP_DIST_CM;              // 2
+    inline constexpr float DEFAULT_LINEAR_DECEL_STEP     = LinearTerminalConfig::DECEL_STEP_CM_S;           // 24  (1he-new)
+    inline constexpr float DEFAULT_LINEAR_LONG_SEG_THRESH= LinearTerminalConfig::LONG_SEGMENT_THRESHOLD_CM; // 90  (1he-new)
+
+    inline constexpr float MIN_LINEAR_CRUISE_SPEED   = 1.0f;
+    inline constexpr float MAX_LINEAR_CRUISE_SPEED   = 300.0f;
+    inline constexpr float MIN_LINEAR_MIN_SPEED      = 0.0f;
+    inline constexpr float MAX_LINEAR_MIN_SPEED      = 80.0f;
+    inline constexpr float MIN_LINEAR_SLOWDOWN_DIST  = 5.0f;
+    inline constexpr float MAX_LINEAR_SLOWDOWN_DIST  = 200.0f;
+    inline constexpr float MIN_LINEAR_STOP_DIST      = 0.5f;
+    inline constexpr float MAX_LINEAR_STOP_DIST      = 20.0f;
+    inline constexpr float MIN_LINEAR_DECEL_STEP     = 1.0f;
+    inline constexpr float MAX_LINEAR_DECEL_STEP     = 500.0f;
+    inline constexpr float MIN_LINEAR_LONG_SEG_THRESH= 10.0f;
+    inline constexpr float MAX_LINEAR_LONG_SEG_THRESH= 500.0f;
 
     // Yaw 轴控制链默认（2026-07-10 从 Branch 融合，追加末尾不入 magic）
     inline constexpr float DEFAULT_YAW_LIN_BAND       = 0.18f;  // rad，约 7 度线性带
@@ -236,13 +321,13 @@ namespace TuningDefaults {
     };
 
     inline constexpr float MIN_BRAKE_LIMIT = 0.0f;
-    inline constexpr float MAX_BRAKE_LIMIT = 1.0f;
+    inline constexpr float MAX_BRAKE_LIMIT = 2.0f;
     inline constexpr float MIN_DYNAMICS_MAX_VEL = 0.0f;
     inline constexpr float MAX_DYNAMICS_MAX_VEL = 500.0f;
     inline constexpr float MIN_REACH_RADIUS_MIN = 0.10f;
     inline constexpr float MAX_REACH_RADIUS_MIN = 3.0f;
     inline constexpr float MIN_CORNER_PASS_SPEED = 0.0f;
-    inline constexpr float MAX_CORNER_PASS_SPEED = 80.0f;
+    inline constexpr float MAX_CORNER_PASS_SPEED = 160.0f;  // 给带速过弯保留调参余量
     inline constexpr float MIN_CORNER_PAUSE_SPEED = 0.0f;
     inline constexpr float MAX_CORNER_PAUSE_SPEED = 50.0f;
     inline constexpr float MIN_STANLEY_K_CT = 0.0f;
@@ -266,9 +351,9 @@ namespace TuningDefaults {
     inline constexpr float MIN_BRAKE_HOLD_GAIN = 0.01f;
     inline constexpr float MAX_BRAKE_HOLD_GAIN = 2.0f;
     inline constexpr float MIN_CORNER_TURN_ACC = 20.0f;
-    inline constexpr float MAX_CORNER_TURN_ACC = 1000.0f;
+    inline constexpr float MAX_CORNER_TURN_ACC = 2000.0f;  // 抬高上限：切向方向变化加速度可调更激进
 
-    // 停车近端线性带范围：MIN 取 >0，使旧 flash 追加区读出的 0/垃圾值必被 sanitize 兜回默认
+    // 【已废弃占位】旧停车近端线性带范围
     inline constexpr float MIN_STOP_APPROACH_BAND_CM = 0.5f;
     inline constexpr float MAX_STOP_APPROACH_BAND_CM = 30.0f;
 
@@ -276,7 +361,7 @@ namespace TuningDefaults {
     inline constexpr float MIN_STOP_APPROACH_BRAKE_GAIN = 0.0f;
     inline constexpr float MAX_STOP_APPROACH_BRAKE_GAIN = 100.0f;
 
-    // 短距离起步加速提升范围：MIN 取 >0，使旧 flash 尾部读出的 0/NaN/垃圾被 repair 兜回默认（=默认启用）。
+    // 短距离起步加速度范围：MIN 取 >0，使旧 flash 尾部读出的 0/NaN/垃圾被 repair 兜回默认
     inline constexpr float MIN_SHORT_SEG_LEN_CM = 1.0f;      // <1cm≈关闭（无真实段这么短，最小移动 20cm）
     inline constexpr float MAX_SHORT_SEG_LEN_CM = 200.0f;
     inline constexpr float MIN_SHORT_SEG_ACCEL  = 20.0f;
@@ -427,7 +512,7 @@ namespace TuningDefaults {
                                    DEFAULT_YAW_STICTION) || changed;
 
         // 每轮轮速环参数（尾部追加区）：旧 flash 无此区，memcpy 读出垃圾/NaN → 兜回 Branch 默认。
-        // 判据：kp 或 ks 越界/NaN 视为该轮未初始化（真实整定 kp≥0.1、ks≥0.5），整轮兜回默认；
+        // 判据：kp 或 ks 越界/NaN 视为该轮未初始化，ks=0 表示关闭静摩擦前馈
         // 其余字段（可为 0）各自限幅。NaN 因比较恒 false 会自动落入越界分支被兜回。
         for (int w = 0; w < 4; ++w) {
             WheelControlParams& wp = config.wheels[w];
@@ -446,7 +531,7 @@ namespace TuningDefaults {
             changed = clamp_if_outside(wp.kb,     0.0f, 1.0f, def.kb)     || changed;
         }
 
-        // 【已废弃占位】停车近端线性带：无代码读它，仅兜回有限值防 NaN 存回 flash（字段保留占位见结构体注释）
+        // 【已废弃占位】只兜回有限值以维持 Flash 数据有效
         changed = clamp_if_outside(config.stop_approach_band_cm,
                                    MIN_STOP_APPROACH_BAND_CM,
                                    MAX_STOP_APPROACH_BAND_CM,
@@ -459,7 +544,7 @@ namespace TuningDefaults {
                                    MAX_STOP_APPROACH_BRAKE_GAIN,
                                    DEFAULT_STOP_APPROACH_BRAKE_GAIN) || changed;
 
-        // 短距离起步加速提升（结构体最末尾追加字段）：用 repair（非 clamp），使旧 flash 尾部读出的
+        // 短距离起步加速度切换（结构体最末尾追加字段）：用 repair（非 clamp），使旧 flash 尾部读出的
         // 0/NaN/越界值统一兜回默认 60/300（=默认启用），而不会被 clamp 到边界。免 bump magic。
         changed = repair_if_outside(config.short_seg_len_cm,
                                     MIN_SHORT_SEG_LEN_CM,
@@ -497,6 +582,46 @@ namespace TuningDefaults {
                                    MAX_STRAFE_DECOUPLE,
                                    DEFAULT_STRAFE_DECOUPLE) || changed;
 
+        // 线性末端速度参数（结构体最末尾追加）：用 repair，旧 flash 尾部读出 0/NaN/越界统一兜回默认
+        // （= 原 constexpr 值，零行为改变）。免 bump magic。
+        changed = repair_if_outside(config.linear.cruise_speed,
+                                    MIN_LINEAR_CRUISE_SPEED,
+                                    MAX_LINEAR_CRUISE_SPEED,
+                                    DEFAULT_LINEAR_CRUISE_SPEED) || changed;
+        changed = repair_if_outside(config.linear.min_speed,
+                                    MIN_LINEAR_MIN_SPEED,
+                                    MAX_LINEAR_MIN_SPEED,
+                                    DEFAULT_LINEAR_MIN_SPEED) || changed;
+        changed = repair_if_outside(config.linear.slowdown_dist,
+                                    MIN_LINEAR_SLOWDOWN_DIST,
+                                    MAX_LINEAR_SLOWDOWN_DIST,
+                                    DEFAULT_LINEAR_SLOWDOWN_DIST) || changed;
+        changed = repair_if_outside(config.linear.stop_dist,
+                                    MIN_LINEAR_STOP_DIST,
+                                    MAX_LINEAR_STOP_DIST,
+                                    DEFAULT_LINEAR_STOP_DIST) || changed;
+        changed = repair_if_outside(config.linear.decel_step,
+                                    MIN_LINEAR_DECEL_STEP,
+                                    MAX_LINEAR_DECEL_STEP,
+                                    DEFAULT_LINEAR_DECEL_STEP) || changed;
+        changed = repair_if_outside(config.linear.long_seg_thresh,
+                                    MIN_LINEAR_LONG_SEG_THRESH,
+                                    MAX_LINEAR_LONG_SEG_THRESH,
+                                    DEFAULT_LINEAR_LONG_SEG_THRESH) || changed;
+
+        // 相互约束：min_speed 不得超过 cruise_speed，stop_dist 必须严格小于 slowdown_dist。
+        // 越界则把冲突项拉回安全默认（运行期 linear_terminal_target_speed 亦有 std::clamp 兜底，此处双保险）。
+        if (config.linear.min_speed > config.linear.cruise_speed) {
+            config.linear.min_speed = std::min(config.linear.cruise_speed,
+                                               DEFAULT_LINEAR_MIN_SPEED);
+            changed = true;
+        }
+        if (config.linear.stop_dist >= config.linear.slowdown_dist) {
+            config.linear.stop_dist = DEFAULT_LINEAR_STOP_DIST;
+            config.linear.slowdown_dist = DEFAULT_LINEAR_SLOWDOWN_DIST;
+            changed = true;
+        }
+
         return changed;
     }
 }
@@ -520,7 +645,7 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
         0.3f,    // reach_radius
         TuningDefaults::DEFAULT_REACH_RADIUS_MIN,   // reach_radius_min
         TuningDefaults::DEFAULT_CORNER_PASS_SPEED,  // corner_pass_speed
-        2.0f,    // corner_switch_window —— 带速过弯模式提前切段窗口，上限 8cm，!SN 调
+        6.0f,    // corner_switch_window —— 提前切段窗口，配合 lookahead 前瞻瞄点(min 6cm)同步切段；上限 8cm，!SN 调
         0.7f,    // corner_line_tolerance
         TuningDefaults::DEFAULT_VISION_REQUEST_INTERVAL_MS,  // vision_request_interval_ms
         TuningDefaults::DEFAULT_VISION_REJECT_DIST,  // vision_reject_dist
@@ -576,7 +701,7 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
         TuningDefaults::DEFAULT_WHEELS[2],  // wheels[RF]
         TuningDefaults::DEFAULT_WHEELS[3]   // wheels[RB]
     },
-    TuningDefaults::DEFAULT_STOP_APPROACH_BAND_CM,   // stop_approach_band_cm（结构体末尾追加）
+    TuningDefaults::DEFAULT_STOP_APPROACH_BAND_CM,   // stop_approach_band_cm（已废弃占位）
     TuningDefaults::DEFAULT_STOP_APPROACH_BRAKE_GAIN, // stop_approach_brake_gain（结构体末尾追加）
     TuningDefaults::DEFAULT_SHORT_SEG_LEN_CM,        // short_seg_len_cm（结构体最末尾追加）
     TuningDefaults::DEFAULT_SHORT_SEG_ACCEL,         // short_seg_accel（结构体最末尾追加）
@@ -586,5 +711,13 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
     TuningDefaults::DEFAULT_APPROACH_ENABLE,         // approach_enable（结构体最末尾追加）
     {
         TuningDefaults::DEFAULT_STRAFE_DECOUPLE      // kinematics.strafe_decouple（结构体最末尾追加）
+    },
+    {
+        TuningDefaults::DEFAULT_LINEAR_CRUISE_SPEED,    // linear.cruise_speed（结构体最末尾追加）
+        TuningDefaults::DEFAULT_LINEAR_MIN_SPEED,       // linear.min_speed
+        TuningDefaults::DEFAULT_LINEAR_SLOWDOWN_DIST,   // linear.slowdown_dist
+        TuningDefaults::DEFAULT_LINEAR_STOP_DIST,       // linear.stop_dist
+        TuningDefaults::DEFAULT_LINEAR_DECEL_STEP,      // linear.decel_step
+        TuningDefaults::DEFAULT_LINEAR_LONG_SEG_THRESH  // linear.long_seg_thresh
     }
 };

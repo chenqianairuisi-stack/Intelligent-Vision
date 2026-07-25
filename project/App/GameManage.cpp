@@ -510,11 +510,9 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 case TaskType::ALIGN_YAW: {
                     // 到达观测点后在此原地转向（不再有提前转向预对齐）：把当前位置锁成目标点、
                     // 航向设为观测航向，交给底盘 YawProfiled 转，须转到容差内**且完全停稳**才放行。
-                    // 关键：路径追踪到点时 Tracker 置了 hard_lock，底盘 hard_lock 分支会**绕过 yaw 规划**、
-                    // 只把四轮清零 → 直接写 ctrl.mode=POINT_TRACKING 不解 hard_lock 的话车永远不转。
-                    // 故首拍用 track_point 正规进入 POINT_TRACKING（它会清 hard_lock、锁死当前位置）。
-                    if (ctrl.hard_lock || ctrl.mode != ControlMode::POINT_TRACKING) {
-                        Algorithm::Tracker::track_point({pos.x, pos.y, task.param.target_yaw});
+                    // 首拍用 track_yaw 正规进入 POINT_TRACKING 并关闭平移输出。
+                    if (ctrl.mode != ControlMode::POINT_TRACKING || !ctrl.yaw_only) {
+                        Algorithm::Tracker::track_yaw(task.param.target_yaw);
                     }
                     ctrl.current_target.yaw = task.param.target_yaw;  // 后续拍保持目标航向
 

@@ -52,6 +52,7 @@ __attribute__((section(".dtcm_data"))) static bool control_history_ready = false
 __attribute__((section(".dtcm_data"))) static ControlMode last_control_mode = ControlMode::AUTO_TRACKING;
 __attribute__((section(".dtcm_data"))) static TrackerState last_tracker_state = TrackerState::NONE;
 __attribute__((section(".dtcm_data"))) static Pose2D last_control_target = {0.0f, 0.0f, SystemConfig::ENTRY_YAW};
+__attribute__((section(".dtcm_data"))) static bool last_yaw_only = false;
 
 // --- 内部辅助函数声明 ---
 namespace {
@@ -72,8 +73,8 @@ namespace {
     //   ks·smooth_sign(target) —— 静摩擦补偿（常态生效，破静摩擦）
     //   ka/kb·target_acc —— 目标加速度前馈（加速用 ka、刹车用 kb，按 target_acc 是否与
     //                        当前运动方向相反判别 braking）
-    // 注意：这里**没有** master 旧的 brake_ff 主动制动锁定项。零速收尾改为松力滑行
-    // （见 run_speed_loop 的零速死区），所以搬入后"锁死"现象自然消失。
+    // 注意：这里没有旧的 brake_ff 主动制动保持项。零速收尾改为松力滑行
+    // （见 run_speed_loop 的零速死区），不会阻断 Tracker 在位置漂出窗口后重新追点。
     // 阶段1：run_speed_loop 传 target_acc=0，故 ka/kb 项恒为 0，只有 kv+ks 生效。
     __attribute__((always_inline)) inline float wheel_feedforward(
             const WheelControlParams& p, float target, float current, float target_acc) {
@@ -106,17 +107,23 @@ namespace {
                std::abs(target.yaw - last_control_target.yaw) > 0.01f;
     }
 
-    __attribute__((always_inline)) inline void guard_motion_residue(const App::RobotState& state) {
-        const auto& ctrl = state.control;
+    __attribute__((always_inline)) inline void guard_motion_residue(App::RobotState& state) {
+        auto& ctrl = state.control;
         if (!control_history_ready) {
             control_history_ready = true;
             last_control_mode = ctrl.mode;
             last_tracker_state = ctrl.tracker_state;
             last_control_target = ctrl.current_target;
+            last_yaw_only = ctrl.yaw_only;
+            if (ctrl.motion_reset_requested) {
+                reset_motion_residue();
+                ctrl.motion_reset_requested = false;
+            }
             return;
         }
 
         bool mode_changed = (ctrl.mode != last_control_mode);
+        bool yaw_only_changed = (ctrl.yaw_only != last_yaw_only);
         bool auto_tracking_started =
             ctrl.mode == ControlMode::AUTO_TRACKING &&
             ctrl.tracker_state == TrackerState::TRACKING &&
@@ -125,13 +132,16 @@ namespace {
             ctrl.mode == ControlMode::POINT_TRACKING &&
             target_changed_for_point_mode(ctrl.current_target);
 
-        if (mode_changed || auto_tracking_started || point_target_changed) {
+        if (ctrl.motion_reset_requested || mode_changed || yaw_only_changed ||
+            auto_tracking_started || point_target_changed) {
             reset_motion_residue();
+            ctrl.motion_reset_requested = false;
         }
 
         last_control_mode = ctrl.mode;
         last_tracker_state = ctrl.tracker_state;
         last_control_target = ctrl.current_target;
+        last_yaw_only = ctrl.yaw_only;
     }
 
     // 检查位姿是否明显跑出地图边界（允许有一定容错，防止里程计轻微抖动误触发）
@@ -152,6 +162,7 @@ namespace {
         ctrl.current_target.x = pose.x;
         ctrl.current_target.y = pose.y;
         ctrl.current_target.yaw = pose.yaw;
+        ctrl.yaw_only = false;
         ctrl.mode = ControlMode::POINT_TRACKING;
         ctrl.tracker_state = TrackerState::FINISHED;
         App::g_state.game.error_stage = 9;
@@ -244,34 +255,22 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick() {
 
     guard_motion_residue(App::g_state);
 
-    // 硬锁：到达停车航点半径内后 Tracker 置位 hard_lock。此时直接把四轮目标速度清零，
-    // 不再经过 path_follower / yaw 规划 / 逆运动学，靠 5ms 速度环 PID 顶在 0 主动刹停锁死轮胎。
-    // 同步清掉规划器与偏航控制器的残留速度，解锁进入下一段时从零平滑起步。
-    if (ctrl.hard_lock) {
-        path_follower.reset();
-        yaw_controller.reset();
-        s_target_wheel_speeds = {0.0f, 0.0f, 0.0f, 0.0f};
-        s_target_wheel_accels = {0.0f, 0.0f, 0.0f, 0.0f};
-        s_prev_target_wheel_speeds = {0.0f, 0.0f, 0.0f, 0.0f};
-        // 目标已置 0，仍走内插把当前速度在 4 拍内线性铺到 0（比直接阶跃到 0 更平顺，减少刹停微颤），
-        // PID 全程主动刹，停得依旧干脆。
-        publish_wheel_target_interp();
-        return;
-    }
-
     float err_yaw = normalize_angle(ctrl.current_target.yaw - yaw);
 
     // 过弯不停顿：末速度由 Tracker 按"当前航点是否需要停稳"写入。
     // 拐点（非终点、非强停）给非零保留速度让车直接带速切向；需停稳处为 0 按停车规划。
     float target_end_speed = ctrl.segment_end_speed;
 
-    // 沿路径线跟踪 + Stanley 横向纠偏：贴着 segment_start→current_target 这条线走，
-    // 而不是只朝目标点收敛。段长过短或 Stanley 关闭时内部自动退化为纯朝点。
-    Speed2D expected_global_vel = path_follower.follow(
-        posi.x, posi.y,
-        ctrl.segment_start.x, ctrl.segment_start.y,
-        ctrl.current_target.x, ctrl.current_target.y,
-        SystemConfig::PIT_CH1_DT_S, target_end_speed);
+    // 路径线跟踪（lookahead 前瞻瞄点 + 速度矢量低通，照搬 -1he-new）：贴着
+    // segment_start→current_target 这条线走，瞄前方一点画平滑弧；段长过短时内部自动退化为纯朝点。
+    Speed2D expected_global_vel = {0.0f, 0.0f};
+    if (!(ctrl.mode == ControlMode::POINT_TRACKING && ctrl.yaw_only)) {
+        expected_global_vel = path_follower.follow(
+            posi.x, posi.y,
+            ctrl.segment_start.x, ctrl.segment_start.y,
+            ctrl.current_target.x, ctrl.current_target.y,
+            SystemConfig::PIT_CH1_DT_S, target_end_speed);
+    }
 
     // 把规划器输出的全局期望速度暴露给延时补偿：它是指令、不含打滑，
     // 末尾刹车时趋近 0，用来给编码器外推位移封顶，挡掉打滑虚增的过冲。
@@ -286,7 +285,9 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick() {
 
 
     // Yaw 角速度规划：三层规划(sqrt远端/线性近端)叠加 IMU 陀螺阻尼，抑制冲过/回摆
-    bool is_translating = (std::abs(expected_local_vx) > 2.0f || std::abs(expected_local_vy) > 2.0f);
+    // 普通 POINT_TRACKING 也可能平移，仅 yaw_only 才使用原地转向参数
+    bool is_translating = !ctrl.yaw_only &&
+                          (std::abs(expected_local_vx) > 2.0f || std::abs(expected_local_vy) > 2.0f);
     float expected_local_vw = yaw_controller.calculate(err_yaw, SystemConfig::PIT_CH1_DT_S, is_translating, App::g_state.physical.yaw_rate);
 
 

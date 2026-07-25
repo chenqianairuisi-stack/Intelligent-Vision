@@ -75,7 +75,8 @@ struct RobotState {
         Point2D segment_start = {0.0f, 0.0f};                            // 当前直线段起点，供底盘 Stanley 横纠贴线
         float segment_end_speed = 0.0f;                                  // 当前段末保留速度 cm/s（过弯不停顿>0，需停稳处=0）
         Speed2D commanded_vel = {0.0f, 0.0f};                            // 本拍规划器输出的全局期望速度 cm/s（无打滑，供延时补偿封顶）
-        bool hard_lock = false;                                          // 硬锁：到达停车航点半径内后置位，底盘直接把四轮目标速度清零主动刹停锁死
+        bool motion_reset_requested = false;                             // 新任务载入时要求底盘清空规划器历史
+        bool yaw_only = false;                                           // 原地转向：平移速度固定为零，但保留连续 yaw 控制历史
         TrackerState tracker_state = TrackerState::NONE;                 // 当前 Tracker 状态
         ControlMode mode = ControlMode::AUTO_TRACKING;                   // 当前控制模式 (默认自动循迹)
     } control;
