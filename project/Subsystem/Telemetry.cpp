@@ -101,6 +101,7 @@ void send_wave_data() {
             // 【模式 0】：底盘动力学监控
             const auto& current_pose = App::g_state.physical.pose;
             const auto& wheel_speed = App::g_state.physical.current_wheel_speed;
+            const auto& commanded_vel = App::g_state.control.commanded_vel;
             Pose2D  target_pos  = App::g_state.control.current_target;  
             
             Velocity2D avg_speed = Algorithm::Motion::Kinematics::forward(
@@ -108,8 +109,10 @@ void send_wave_data() {
                 wheel_speed.rf, wheel_speed.rb
             );
             float avg_speed_mag = std::sqrt(avg_speed.vx * avg_speed.vx + avg_speed.vy * avg_speed.vy);
+            float commanded_speed_mag = std::sqrt(commanded_vel.vx * commanded_vel.vx +
+                                                  commanded_vel.vy * commanded_vel.vy);
 
-            tx_packet.data_1 = 0;            
+            tx_packet.data_1 = commanded_speed_mag;
             tx_packet.data_2 = avg_speed_mag;              
             tx_packet.data_3 = target_pos.x;               
             tx_packet.data_4 = current_pose.x;
@@ -465,6 +468,7 @@ namespace {
                     case 'Z': tune.approach_zone_cm = value; break;        // 停车接近区提前刹车距离上限 cm（默认40；0.5≈关闭回纯sqrt）
                     case 'R': tune.approach_zone_ratio = value; break;     // 接近区占段全长比例（默认0.25：20cm段→5cm）
                     case 'C': tune.approach_brake_acc = value; break;      // 接近区缓减速度 cm/s^2（默认15，越小末端越慢越准）
+                    case 'N': tune.approach_enable = (value > 0.5f) ? 1.0f : 0.0f; break; // 接近区总开关（!T N 1 开 / !T N 0 关，一键切）
                     default: return;
                 }
                 break;

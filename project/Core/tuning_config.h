@@ -1,5 +1,31 @@
 #pragma once
 
+// ==========================================
+// 末端刹车模式开关（两个独立状态机，编译期切换）
+// ==========================================
+// 停车段末端减速曲线有两套实现，各由下面一个开关单独控制，互不依赖：
+//   · ENABLE_NONLINEAR_TERMINAL_BRAKE：非线性（接近区双段 sqrt 提前刹车，见 tune.approach_*）
+//   · ENABLE_LINEAR_TERMINAL_BRAKE   ：距离归一化曲线（当前用 k^1.5 整形，见 LinearTerminalConfig）
+// 用哪套就把对应开关置 true、另一套置 false。两个都 false → 退回原始单段 sqrt 直落。
+// 两个都 true 时 k^1.5 曲线优先（双段 sqrt 分支不进），避免两条曲线互相打架。
+namespace MotionFeatureSwitches {
+    inline constexpr bool ENABLE_NONLINEAR_TERMINAL_BRAKE = false;  // 非线性双段 sqrt 末端刹车
+    inline constexpr bool ENABLE_LINEAR_TERMINAL_BRAKE    = true;   // k^1.5 整形末端刹车
+}
+
+// 末端速度参数（距离归一化沿用 2he-new，当前对 k 做 1.5 次方整形）
+namespace LinearTerminalConfig {
+    inline constexpr float CRUISE_SPEED_CM_S = 100.0f;         // 末端接近巡航速度 cm/s
+    inline constexpr float MIN_SPEED_CM_S = 12.0f;             // 到达前最低速度 cm/s
+    inline constexpr float SLOWDOWN_DIST_CM = 35.0f;           // 普通段开始减速距离 cm
+    inline constexpr float STOP_DIST_CM = 2.0f;                // 到达判定距离 cm（须 < SLOWDOWN_DIST_CM）
+    inline constexpr float LONG_SEGMENT_THRESHOLD_CM = 60.0f;  // 覆盖地图中标称 80cm 的四格长直段
+    inline constexpr float LONG_CRUISE_GAIN = 1.50f;           // 长直段巡航速度倍率
+    inline constexpr float LONG_MAX_CRUISE_CM_S = 150.0f;      // 长直段巡航速度封顶 cm/s
+    inline constexpr float LONG_ACCEL_GAIN = 1.40f;            // 长直段加速倍率，对齐 2he-new
+    inline constexpr float DECEL_STEP_CM_S = 36.0f;            // 每个控制周期最大降速 cm/s
+}
+
 // 可复用 PID 参数块
 struct PidParams {
     float kp;  // 比例系数
@@ -152,6 +178,8 @@ struct TuningConfig {
     float approach_zone_cm;     // 接近区提前刹车距离上限 cm（默认 40；0.5≈关闭）
     float approach_zone_ratio;  // 接近区占段全长比例（默认 0.25：20cm 段→5cm，160cm+→封顶 40cm）
     float approach_brake_acc;   // 接近区缓减速度 cm/s^2（默认 15，须 < brake_acc 才生效）
+    float approach_enable;      // 接近区总开关：>=0.5 开、<0.5 关（菜单/串口一键切；默认 1=开）。
+                                // 用 float 存（沿用尾部 float 追加约定，免为一个 bool 破坏 flash 布局）
 };
 
 namespace TuningDefaults {
@@ -159,7 +187,7 @@ namespace TuningDefaults {
     inline constexpr float DEFAULT_CORNER_PASS_SPEED = 0.0f;   // 过弯保留速度 cm/s：保持 0，不靠 end_speed 带速斜切
     inline constexpr float DEFAULT_BRAKE_LIMIT = 0.65f;  // 别贪高：过大减速超出轮速环带宽→打滑过冲+原地晃
     inline constexpr float DEFAULT_ENCODER_LATENCY_GAIN = 1.00f;
-    inline constexpr float DEFAULT_VISION_LATENCY_MS = 350.0f;
+    inline constexpr float DEFAULT_VISION_LATENCY_MS = 310.0f;
     inline constexpr float DEFAULT_VISION_REQUEST_INTERVAL_MS = 100.0f;
     inline constexpr float DEFAULT_VISION_REJECT_DIST = 5.0f;  // 与 FULL_MAX_STEP_CM=5 匹配：差<5cm 都能一帧纠到位
 
@@ -207,6 +235,7 @@ namespace TuningDefaults {
     inline constexpr float DEFAULT_APPROACH_ZONE_CM    = 40.0f;  // cm
     inline constexpr float DEFAULT_APPROACH_ZONE_RATIO = 0.25f;  // ×段全长
     inline constexpr float DEFAULT_APPROACH_BRAKE_ACC  = 15.0f;  // cm/s^2
+    inline constexpr float DEFAULT_APPROACH_ENABLE     = 1.0f;   // 1=开（默认启用）
 
     // Yaw 轴控制链默认（2026-07-10 从 Branch 融合，追加末尾不入 magic）
     inline constexpr float DEFAULT_YAW_LIN_BAND       = 0.18f;  // rad，约 7 度线性带
@@ -280,6 +309,13 @@ namespace TuningDefaults {
     inline constexpr float MAX_APPROACH_ZONE_RATIO = 1.0f;
     inline constexpr float MIN_APPROACH_BRAKE_ACC  = 1.0f;
     inline constexpr float MAX_APPROACH_BRAKE_ACC  = 200.0f;
+    // 接近区开关：合法区间 [0,1]，0=关/1=开。旧 flash 尾部无此字段读出 0/垃圾时——
+    // 0 落在区间内会被当成"关"，这不安全（默认应为开）。故 sanitize 用 repair 而非 clamp：
+    // 只有落在 {0,1} 附近才保留，其余（含旧 flash 的 0.0 之外的垃圾/NaN）弹回默认 1=开。
+    // 注：旧 flash 该尾部区读出恰好 0.0 的概率极低（memcpy 越界读到的是相邻数据/0xFF→NaN），
+    // 且首次 Save 后即写入真实 1.0，此后不再依赖兜底。
+    inline constexpr float MIN_APPROACH_ENABLE     = 0.0f;
+    inline constexpr float MAX_APPROACH_ENABLE     = 1.0f;
 
     // Yaw 轴控制链范围：MIN 取 >0，旧 flash 尾部追加区读出的 0/垃圾值必被 sanitize 兜回默认
     inline constexpr float MIN_YAW_LIN_BAND       = 0.02f;  // 过小会退回 sqrt 的无穷斜率问题
@@ -465,6 +501,12 @@ namespace TuningDefaults {
                                     MIN_APPROACH_BRAKE_ACC,
                                     MAX_APPROACH_BRAKE_ACC,
                                     DEFAULT_APPROACH_BRAKE_ACC) || changed;
+        // 开关：clamp 到 [0,1]，NaN/越界（含旧 flash 尾部垃圾）落 else 分支取默认 1=开；
+        // 0 和 1 都在区间内会被保留——用户存的"关(0)"不会被误弹回"开"。
+        changed = clamp_if_outside(config.approach_enable,
+                                   MIN_APPROACH_ENABLE,
+                                   MAX_APPROACH_ENABLE,
+                                   DEFAULT_APPROACH_ENABLE) || changed;
 
         return changed;
     }
@@ -478,9 +520,9 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
     {
         80.0f,   // max_duty
         TuningDefaults::DEFAULT_DYNAMICS_MAX_VEL,  // max_vel cm/s
-        600.0f,   // max_acc
+        65.0f,   // max_acc
         10.0f,   // max_ang_vel  —— 与 Branch 对齐：sqrt 型 yaw 规划需要更高角速度上限
-        250.0f,   // max_ang_acc  —— 与 Branch 对齐：决定 sqrt(2·a·err) 曲线激进程度与近端线性带斜率
+        40.0f,   // max_ang_acc  —— 与 Branch 对齐：决定 sqrt(2·a·err) 曲线激进程度与近端线性带斜率
         1.044f,  // kinematic_gain_x
         1.015f,  // kinematic_gain_y
         TuningDefaults::DEFAULT_BRAKE_LIMIT  // brake_limit
@@ -489,7 +531,7 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
         0.3f,    // reach_radius
         TuningDefaults::DEFAULT_REACH_RADIUS_MIN,   // reach_radius_min
         TuningDefaults::DEFAULT_CORNER_PASS_SPEED,  // corner_pass_speed
-        0.0f,    // corner_switch_window —— 带速过弯模式提前切段窗口，上限 8cm，!SN 调
+        2.0f,    // corner_switch_window —— 带速过弯模式提前切段窗口，上限 8cm，!SN 调
         0.7f,    // corner_line_tolerance
         TuningDefaults::DEFAULT_VISION_REQUEST_INTERVAL_MS,  // vision_request_interval_ms
         TuningDefaults::DEFAULT_VISION_REJECT_DIST,  // vision_reject_dist
@@ -551,5 +593,6 @@ __attribute__((section(".dtcm_data"))) inline TuningConfig tune {
     TuningDefaults::DEFAULT_SHORT_SEG_ACCEL,         // short_seg_accel（结构体最末尾追加）
     TuningDefaults::DEFAULT_APPROACH_ZONE_CM,        // approach_zone_cm（结构体最末尾追加）
     TuningDefaults::DEFAULT_APPROACH_ZONE_RATIO,     // approach_zone_ratio（结构体最末尾追加）
-    TuningDefaults::DEFAULT_APPROACH_BRAKE_ACC       // approach_brake_acc（结构体最末尾追加）
+    TuningDefaults::DEFAULT_APPROACH_BRAKE_ACC,      // approach_brake_acc（结构体最末尾追加）
+    TuningDefaults::DEFAULT_APPROACH_ENABLE          // approach_enable（结构体最末尾追加）
 };

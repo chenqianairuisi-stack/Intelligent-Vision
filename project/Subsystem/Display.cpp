@@ -82,8 +82,9 @@ namespace { // 匿名命名空间，确保这些数据只在本文件可见
     // 停车接近区刹车倍率（和 !T H 同参数）：大=到航点抖减速更狠、进点更慢、过冲更小；1.0=旧行为。
     // "到航点冲过头"就把它调大（2~4），进点太急/顿挫再往回收。
     {"StopBrkG",   &tune.stop_approach_brake_gain,    0.25f },
-    // 停车接近区双段刹车（和 !T Z / !T R / !T C 同参数）：AprZone 提前刹车距离上限（0.5≈关闭），
-    // AprRatio 占段全长比例（20cm段→5cm），AprAcc 接近区缓减速度（越小末端越慢越准）。
+    // 停车接近区双段刹车（和 !T N / !T Z / !T R / !T C 同参数）：AprEn 总开关（步长1：Up→1开/Down→0关），
+    // AprZone 提前刹车距离上限，AprRatio 占段全长比例（20cm段→5cm），AprAcc 接近区缓减速度（越小末端越慢越准）。
+    {"AprEn   ",   &tune.approach_enable,             1.0f  },
     {"AprZone ",   &tune.approach_zone_cm,            5.0f  },
     {"AprRatio",   &tune.approach_zone_ratio,         0.05f },
     {"AprAcc  ",   &tune.approach_brake_acc,          1.0f  },
@@ -550,6 +551,10 @@ void clamp_editable_params() {
                                            TuningDefaults::MIN_APPROACH_BRAKE_ACC,
                                            TuningDefaults::MAX_APPROACH_BRAKE_ACC,
                                            TuningDefaults::DEFAULT_APPROACH_BRAKE_ACC);
+    (void)TuningDefaults::clamp_if_outside(tune.approach_enable,
+                                           TuningDefaults::MIN_APPROACH_ENABLE,
+                                           TuningDefaults::MAX_APPROACH_ENABLE,
+                                           TuningDefaults::DEFAULT_APPROACH_ENABLE);
 }
 
 void draw_dashboard() {
@@ -600,7 +605,7 @@ void draw_dashboard() {
             default:                               snprintf(hud_line0, 22, "P: COMPUTING "); break;
         }
         // 连续发车轮次指示（正式模式空闲行）：1-based 显示当前是第几次发车
-        snprintf(hud_line2, sizeof(hud_line2), "Round: %d/3", game.round_idx + 1);
+        snprintf(hud_line2, sizeof(hud_line2), "Round: %d/%d", game.round_idx + 1, game.round_count);
     }
 
     // 2. 顶部 HUD 防闪烁渲染
