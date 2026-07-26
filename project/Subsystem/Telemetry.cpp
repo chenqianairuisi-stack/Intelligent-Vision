@@ -101,6 +101,7 @@ void send_wave_data() {
             // 【模式 0】：底盘动力学监控
             const auto& current_pose = App::g_state.physical.pose;
             const auto& wheel_speed = App::g_state.physical.current_wheel_speed;
+            const auto& commanded_vel = App::g_state.control.commanded_vel;
             Pose2D  target_pos  = App::g_state.control.current_target;  
             
             Velocity2D avg_speed = Algorithm::Motion::Kinematics::forward(
@@ -108,8 +109,10 @@ void send_wave_data() {
                 wheel_speed.rf, wheel_speed.rb
             );
             float avg_speed_mag = std::sqrt(avg_speed.vx * avg_speed.vx + avg_speed.vy * avg_speed.vy);
+            float commanded_speed_mag = std::sqrt(commanded_vel.vx * commanded_vel.vx +
+                                                  commanded_vel.vy * commanded_vel.vy);
 
-            tx_packet.data_1 = 0;            
+            tx_packet.data_1 = commanded_speed_mag;
             tx_packet.data_2 = avg_speed_mag;              
             tx_packet.data_3 = target_pos.x;               
             tx_packet.data_4 = current_pose.x;

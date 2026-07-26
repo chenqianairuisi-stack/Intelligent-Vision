@@ -1,5 +1,31 @@
 #pragma once
 
+// ==========================================
+// 末端刹车模式开关（两个独立状态机，编译期切换）
+// ==========================================
+// 停车段末端减速曲线有两套实现，各由下面一个开关单独控制，互不依赖：
+//   · ENABLE_NONLINEAR_TERMINAL_BRAKE：非线性（接近区双段 sqrt 提前刹车，见 tune.approach_*）
+//   · ENABLE_LINEAR_TERMINAL_BRAKE   ：距离归一化曲线（当前用 k^1.5 整形，见 LinearTerminalConfig）
+// 用哪套就把对应开关置 true、另一套置 false。两个都 false → 退回原始单段 sqrt 直落。
+// 两个都 true 时 k^1.5 曲线优先（双段 sqrt 分支不进），避免两条曲线互相打架。
+namespace MotionFeatureSwitches {
+    inline constexpr bool ENABLE_NONLINEAR_TERMINAL_BRAKE = false;  // 非线性双段 sqrt 末端刹车
+    inline constexpr bool ENABLE_LINEAR_TERMINAL_BRAKE    = true;   // k^1.5 整形末端刹车
+}
+
+// 末端速度参数（距离归一化沿用 2he-new，当前对 k 做 1.5 次方整形）
+namespace LinearTerminalConfig {
+    inline constexpr float CRUISE_SPEED_CM_S = 100.0f;         // 末端接近巡航速度 cm/s
+    inline constexpr float MIN_SPEED_CM_S = 12.0f;             // 到达前最低速度 cm/s
+    inline constexpr float SLOWDOWN_DIST_CM = 35.0f;           // 普通段开始减速距离 cm
+    inline constexpr float STOP_DIST_CM = 2.0f;                // 到达判定距离 cm（须 < SLOWDOWN_DIST_CM）
+    inline constexpr float LONG_SEGMENT_THRESHOLD_CM = 60.0f;  // 覆盖地图中标称 80cm 的四格长直段
+    inline constexpr float LONG_CRUISE_GAIN = 1.50f;           // 长直段巡航速度倍率
+    inline constexpr float LONG_MAX_CRUISE_CM_S = 150.0f;      // 长直段巡航速度封顶 cm/s
+    inline constexpr float LONG_ACCEL_GAIN = 1.40f;            // 长直段加速倍率，对齐 2he-new
+    inline constexpr float DECEL_STEP_CM_S = 36.0f;            // 每个控制周期最大降速 cm/s
+}
+
 // 可复用 PID 参数块
 struct PidParams {
     float kp;  // 比例系数

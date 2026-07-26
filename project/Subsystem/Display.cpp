@@ -605,7 +605,7 @@ void draw_dashboard() {
             default:                               snprintf(hud_line0, 22, "P: COMPUTING "); break;
         }
         // 连续发车轮次指示（正式模式空闲行）：1-based 显示当前是第几次发车
-        snprintf(hud_line2, sizeof(hud_line2), "Round: %d/3", game.round_idx + 1);
+        snprintf(hud_line2, sizeof(hud_line2), "Round: %d/%d", game.round_idx + 1, game.round_count);
     }
 
     // 2. 顶部 HUD 防闪烁渲染

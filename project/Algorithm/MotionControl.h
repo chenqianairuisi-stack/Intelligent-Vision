@@ -14,7 +14,8 @@ public:
     inline void reset() { current_v = 0.0f; current_a = 0.0f; }
     // 生成平滑平移速度，end_speed 用于拐角不停顿通过
     // seg_len_cm：当前直线段全长 cm（由 follow 传入）。<=0 表示未知，不做短段加速提升；
-    // 短段(<= tune.short_seg_len_cm)只提高**加速斜坡**，刹车/sqrt 减速曲线保持温柔不变。
+    // 短段(<= tune.short_seg_len_cm)只提高**加速斜坡**，刹车/减速曲线保持温柔不变。
+    // 停车段末端曲线由 MotionFeatureSwitches 的两个开关选择：线性 / 非线性双段 sqrt / 都关=原始 sqrt。
     Speed2D velocity_planning_1d(float dx, float dy, float dt, float end_speed = 0.0f,
                                 float seg_len_cm = -1.0f);
 private:
@@ -38,14 +39,16 @@ private:
 
 
 // ==========================================
-// 1b. Stanley 式平移横向纠偏（贴路径线跟踪）
+// 1b. 前瞻式路径线跟踪
 // ==========================================
-// 把"朝目标点收敛"改成"沿路径线行驶 + 横向 Stanley 纠偏"：
-// 沿轨方向用梯形规划器出主速度，垂直方向用 Stanley atan 律压回路径线。
-// 全向底盘下横纠表现为垂直于段方向的平移速度分量，不改逆运动学。
+// 沿路径线选择动态前瞻点，并按横向误差降速、拉回
+// 二维速度方向使用 alpha=0.25 一阶滤波，切段时保留连续切向
 class PathLineFollower {
 public:
-    inline void reset() { planner.reset(); }
+    inline void reset() {
+        planner.reset();
+        filtered_vel = {0.0f, 0.0f};
+    }
 
     /// \brief 计算沿路径线跟踪的全局期望速度
     /// \param px,py 当前全局位置 cm
@@ -58,7 +61,9 @@ public:
                    float tx, float ty, float dt, float end_speed = 0.0f);
 
 private:
+    Speed2D filter_direction(Speed2D desired, float speed_limit);
     Trajectory planner;
+    Speed2D filtered_vel = {0.0f, 0.0f};
 };
 
 

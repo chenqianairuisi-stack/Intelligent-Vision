@@ -347,8 +347,8 @@ __attribute__((section(".ramfunc"))) void check_is_stopped() {
 
     const auto& cur_spd = App::g_state.physical.current_wheel_speed;
     const auto& target_spd = s_target_wheel_speeds;
-    constexpr float STOPPED_WHEEL_SPEED_EPS = 0.5f;
-    constexpr float STOPPED_TARGET_SPEED_EPS = 0.5f;
+    constexpr float STOPPED_WHEEL_SPEED_EPS = 1.5f;
+    constexpr float STOPPED_TARGET_SPEED_EPS = 1.5f;
         
     // 判定条件：上一帧的控制目标几乎为0，且当前四个轮子的真实反馈速度极小
     App::g_state.physical.is_stopped = 

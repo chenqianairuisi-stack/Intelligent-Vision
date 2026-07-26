@@ -17,7 +17,7 @@ namespace SystemConfig {
     // 定时器参数
     static constexpr uint32_t PIT_CH0_PERIOD_MS = 1U;          // IMU 采样与姿态解算周期
     static constexpr uint32_t PIT_CH1_PERIOD_MS = 20U;         // 底盘控制与里程计周期
-    static constexpr uint32_t PIT_CH2_PERIOD_MS = 15U;         // 视觉修正周期（独立于 20ms 慢环，贴合 ~66fps 帧率，免混叠）
+    static constexpr uint32_t PIT_CH2_PERIOD_MS = 10U;         // 视觉修正周期（独立于 20ms 慢环，贴合 ~66fps 帧率，免混叠）
     static constexpr float PIT_CH0_DT_S = static_cast<float>(PIT_CH0_PERIOD_MS) * 0.001f;  // 转换为秒
     static constexpr float PIT_CH1_DT_S = static_cast<float>(PIT_CH1_PERIOD_MS) * 0.001f;  // 转换为秒
     static constexpr float PIT_CH2_DT_S = static_cast<float>(PIT_CH2_PERIOD_MS) * 0.001f;  // 转换为秒
@@ -63,6 +63,8 @@ namespace SystemConfig {
     static constexpr int MAX_PATH_LENGTH = 200;                 // 最大搜索步数
     
     // 其他全局常量
+    static constexpr float INITIAL_X = 124.0f;                  // 上电首轮初始点 X 坐标
+    static constexpr float INITIAL_Y = 15.0f;                   // 上电首轮初始点 Y 坐标
     static constexpr float ENTRY_X = 130.0f;                    // 入口/返航 home 点 X 坐标（连续发车每轮起止点）
     static constexpr float ENTRY_Y = 30.0f;                     // 入口/返航 home 点 Y 坐标
     static constexpr float ENTRY_YAW = 90.0f;                   // 入口位置航向（单位：度，0度为x轴正方向，逆时针为正）

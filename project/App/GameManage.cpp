@@ -23,10 +23,10 @@ namespace {
     constexpr Point2D RETURN_HOME_TARGET = {SystemConfig::ENTRY_X, SystemConfig::ENTRY_Y};
     constexpr float RETURN_HOME_YAW = SystemConfig::ENTRY_YAW;
 
-    // 连续发车轮次模式表：round 0 纯推箱，round 1/2 识别（巡图+推箱）。
-    // 顺序 [pure, advanced, advanced] 保证没有陈旧巡图状态泄漏进 advanced 轮。
+    // 三关模式轮次表：round 0 纯推箱，round 1/2 识别（巡图+推箱）。
+    // 单关模式不使用 round 0 的纯推箱配置，而是在 init() 中直接设为 advanced。
     constexpr bool ROUND_ADVANCED_SEQ[] = {false, true, true};
-    constexpr uint8_t CONTINUOUS_ROUND_COUNT =
+    constexpr uint8_t MAX_ROUND_COUNT =
         static_cast<uint8_t>(sizeof(ROUND_ADVANCED_SEQ) / sizeof(ROUND_ADVANCED_SEQ[0]));
     // 返航到家判定半径：放宽到比小车停车散布更大一圈，避免在过严的点位上反复蹭/挪
     constexpr float RETURN_HOME_REACH_RADIUS_CM = 1.5f;
@@ -221,11 +221,13 @@ void init() {
     system_delay_ms(10); 
 
     bool sw2_on = !gpio_get_level(C27);
+    bool sw1_on = !gpio_get_level(C26);
 
-    // 连续发车：一次上电默认连打 3 次（round 0 纯推箱，round 1/2 识别，见 ROUND_ADVANCED_SEQ）。
-    // sw1(C26) 不再决定赛段——赛段由轮次表在每轮返航到家时切换；C26 的 gpio_init 保留以便日后恢复该开关。
+    // sw1 开：连续跑 3 关，按 [纯推箱, 识别, 识别] 轮次表执行
+    // sw1 关：只跑 1 关，直接按 is_advanced_stage 识别关执行
     App::g_state.game.round_idx         = 0;
-    App::g_state.game.is_advanced_stage = ROUND_ADVANCED_SEQ[0];  // 第 0 轮固定纯推箱 (== false)
+    App::g_state.game.round_count       = sw1_on ? MAX_ROUND_COUNT : 1U;
+    App::g_state.game.is_advanced_stage = sw1_on ? ROUND_ADVANCED_SEQ[0] : true;
     App::g_state.game.is_debug_mode     = sw2_on;  // 调试模式：开-直接注入地图数据，绕过视觉输入；关-正常模式，等待视觉输入
 
     if (App::g_state.game.is_debug_mode) {
@@ -296,10 +298,11 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 vision_data.art1_pose_seq = 0U;
                 vision_data.art1_pose_tick_ms = 0U;
                 vision_data.art1_pose_stable_count = 0U;
-                // 先把里程计设回名义 home（round>=1 随后由视觉重定位覆盖；round0 就用这个）
-                Subsystem::PoseEstimator::set_position(ENTRY_X, ENTRY_Y, ENTRY_YAW);
-                // 停在 home 锁位（round>=1 停等重定位期间不许动；round0 下面立刻改发 OUT_TARGET）
-                Algorithm::Tracker::track_point({ENTRY_X, ENTRY_Y, ENTRY_YAW});
+                // 首轮从真实初始点发车，后续轮次停在入库 home 点等待视觉重定位
+                const float start_x = (game.round_idx == 0) ? INITIAL_X : ENTRY_X;
+                const float start_y = (game.round_idx == 0) ? INITIAL_Y : ENTRY_Y;
+                Subsystem::PoseEstimator::set_position(start_x, start_y, ENTRY_YAW);
+                Algorithm::Tracker::track_point({start_x, start_y, ENTRY_YAW});
 
                 // 复位炸弹爆炸等待与视觉抑制，防止上一局异常中断后抑制标志卡死导致视觉永久失效
                 s_pending_blast_cells.clear();
@@ -312,7 +315,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
 
             // 第 2、3 次发车（round>=1）：靠纯编码器返航回来、home 基准已漂——发车前先停在 home
             // 停等一段固定时长 + 吃一帧稳定视觉把里程计校准到真实起点，定好了再发车。
-            // round 0 从真实 home 起步，里程计准，无需重定位、直接发车。
+            // round 0 从真实初始点起步，里程计准，无需重定位、直接发车。
             if (game.round_idx >= 1 && !relocate_at_home()) {
                 break;  // 还在停等/稳定帧没到，原地停在 home 等下一拍
             }
@@ -722,12 +725,12 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 // 本轮已返航到家并停稳。若还有下一轮，推进轮次、切换赛段，重新进入
                 // INIT_CALIBRATE——它会重新 arm 地图接收闸、把里程计原点设回 home、重发去观测点
                 // 指令、清炸弹等待并解除视觉抑制，等价于一次完整的单轮复位（重新申请地图）。
-                if (game.round_idx + 1 < CONTINUOUS_ROUND_COUNT) {
+                if (game.round_idx + 1 < game.round_count) {
                     game.round_idx++;
                     game.is_advanced_stage = ROUND_ADVANCED_SEQ[game.round_idx];  // 下轮赛段：先设好再重进 INIT
                     game.phase = GamePhase::INIT_CALIBRATE;   // 重新发车
                 } else {
-                    game.phase = GamePhase::FINISHED;         // 第 3 轮完成，永久停止
+                    game.phase = GamePhase::FINISHED;         // 本次设定轮数完成，永久停止
                 }
             }
             break;
