@@ -16,14 +16,21 @@ namespace MotionFeatureSwitches {
 // 末端速度参数（距离归一化沿用 2he-new，当前对 k 做 1.5 次方整形）
 namespace LinearTerminalConfig {
     inline constexpr float CRUISE_SPEED_CM_S = 100.0f;         // 末端接近巡航速度 cm/s
-    inline constexpr float MIN_SPEED_CM_S = 12.0f;             // 到达前最低速度 cm/s
-    inline constexpr float SLOWDOWN_DIST_CM = 35.0f;           // 普通段开始减速距离 cm
-    inline constexpr float STOP_DIST_CM = 2.0f;                // 到达判定距离 cm（须 < SLOWDOWN_DIST_CM）
-    inline constexpr float LONG_SEGMENT_THRESHOLD_CM = 60.0f;  // 覆盖地图中标称 80cm 的四格长直段
+    inline constexpr float SHORT_MIN_SPEED_CM_S = 15.0f;       // 短段到达前最低速度 cm/s
+    inline constexpr float SHORT_SLOWDOWN_DIST_CM = 15.0f;     // 短段开始减速距离 cm
+    inline constexpr float LONG_MIN_SPEED_CM_S = 12.0f;        // 长段到达前最低速度 cm/s
+    inline constexpr float LONG_SLOWDOWN_DIST_CM = 35.0f;      // 长段开始减速距离 cm
+    inline constexpr float STOP_DIST_CM = 2.0f;                // 到达判定距离 cm，须小于两类减速距离
+    inline constexpr float LONG_SEGMENT_THRESHOLD_CM = 60.0f;  // 段长 >= 此值为长段，短段不含边界
     inline constexpr float LONG_CRUISE_GAIN = 1.50f;           // 长直段巡航速度倍率
     inline constexpr float LONG_MAX_CRUISE_CM_S = 150.0f;      // 长直段巡航速度封顶 cm/s
     inline constexpr float LONG_ACCEL_GAIN = 1.40f;            // 长直段加速倍率，对齐 2he-new
     inline constexpr float DECEL_STEP_CM_S = 36.0f;            // 每个控制周期最大降速 cm/s
+
+    static_assert(SHORT_SLOWDOWN_DIST_CM > STOP_DIST_CM,
+                  "short terminal slowdown distance must exceed stop distance");
+    static_assert(LONG_SLOWDOWN_DIST_CM > STOP_DIST_CM,
+                  "long terminal slowdown distance must exceed stop distance");
 }
 
 // 可复用 PID 参数块
@@ -158,13 +165,13 @@ struct TuningConfig {
     // 1.0=完全等于旧行为；旧 flash 无此区、memcpy 读出 0/垃圾 → sanitize 兜回 1.0。上车 !T H 直接调。
     float stop_approach_brake_gain;
 
-    // 短距离移动起步加速提升（2026-07-15 追加在结构体**最末尾**，不 bump magic）：段全长 <= short_seg_len_cm
+    // 短距离移动起步加速提升（2026-07-15 追加在结构体**最末尾**，不 bump magic）：非长段且段全长 <= short_seg_len_cm
     // 时，速度规划器**只**把加速斜坡上限抬到 short_seg_accel（刹车/sqrt 减速曲线保持温柔不变），让短段
     // 起步更快、不磨蹭；末端因刹车温柔不变而**自然物理慢下来**（不是把末端交给视觉控制，控制链仍是常规
     // 编码器+里程计闭环，只是慢了更准/更跟得上）。
     // 与其他尾部字段"默认零行为改变"不同，此二者**默认启用**（60/300，用户已实车拍板）。旧 flash 尾部
     // 读出 0/垃圾 → sanitize 用 repair 兜回 60/300（默认开）；上车 !T D / !T V 直接调，!T D 1≈关闭。
-    float short_seg_len_cm;   // 短段判定阈值 cm（段全长 <= 此值走高加速；1 以下≈关闭）
+    float short_seg_len_cm;   // 短段高加速阈值 cm（仅非长段生效；1 以下≈关闭）
     float short_seg_accel;    // 短段起步加速度 cm/s^2（只压加速斜坡，不动刹车）
 
     // 停车接近区双段刹车（2026-07-15 追加在结构体**最末尾**，不 bump magic）：治"末端总是出去一些、

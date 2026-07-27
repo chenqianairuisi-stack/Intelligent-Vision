@@ -80,7 +80,7 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
     bool long_segment = std::isfinite(seg_len_cm) &&
                         seg_len_cm >= LinearTerminalConfig::LONG_SEGMENT_THRESHOLD_CM;
 
-    // 短段起步加速提升：段全长 <= short_seg_len_cm 时，**只**把加速斜坡上限抬到 short_seg_accel，
+    // 短段起步加速提升：非长段且段全长 <= short_seg_len_cm 时，**只**把加速斜坡上限抬到 short_seg_accel，
     // 让短距离移动起步更快、不磨蹭。刹车加速度 brake_acc 与下方 sqrt 减速曲线**保持不变**（温柔刹车），
     // 末端因此自然物理慢下来（不是把末端交给视觉控制，只是放慢；慢下来后编码器+视觉融合更准）。
     // seg_len_cm<=0（未知）或段长超阈值：不提升，退回 max_acc，行为与改前完全一致。
@@ -88,7 +88,8 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
     {
         float boost = tune.short_seg_accel;
         float len_thresh = tune.short_seg_len_cm;
-        if (std::isfinite(seg_len_cm) && seg_len_cm >= 1.0f &&
+        if (!long_segment &&
+            std::isfinite(seg_len_cm) && seg_len_cm >= 1.0f &&
             std::isfinite(len_thresh) && seg_len_cm <= len_thresh &&
             std::isfinite(boost) && boost > 0.0f) {
             accel_ramp = boost;   // 只用于加速斜坡；不参与 brake_acc / sqrt 曲线
@@ -110,7 +111,7 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
     bool is_stop = (target_end_speed <= 0.1f);              // 停车工况（含 AUTO 推箱/终点）
     bool spring_terminal = (is_stop && !active_auto_track); // 弹簧静止死区仅非 AUTO 启用（AUTO 由 Tracker 到达状态收尾）
 
-    // k^1.5 模式下长直段补回 2he-new 的 1.6 倍加速，末端减速窗口与短段保持不变
+    // k^1.5 模式下长直段提高加速上限，末端减速窗口在下方按长短段分别选择
     if (is_stop && MotionFeatureSwitches::ENABLE_LINEAR_TERMINAL_BRAKE && long_segment) {
         accel_ramp *= LinearTerminalConfig::LONG_ACCEL_GAIN;
     }
@@ -171,11 +172,16 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
         // ---- k^1.5 整形末端刹车状态机 ----
         float terminal_cruise_speed = std::min(LinearTerminalConfig::CRUISE_SPEED_CM_S, max_speed);
         float cruise_speed = terminal_cruise_speed;
-        float min_speed = std::min(LinearTerminalConfig::MIN_SPEED_CM_S, cruise_speed);
+        float configured_min_speed = long_segment
+            ? LinearTerminalConfig::LONG_MIN_SPEED_CM_S
+            : LinearTerminalConfig::SHORT_MIN_SPEED_CM_S;
+        float min_speed = std::min(configured_min_speed, cruise_speed);
         float stop_dist = LinearTerminalConfig::STOP_DIST_CM;
-        float slowdown_dist = LinearTerminalConfig::SLOWDOWN_DIST_CM;
+        float slowdown_dist = long_segment
+            ? LinearTerminalConfig::LONG_SLOWDOWN_DIST_CM
+            : LinearTerminalConfig::SHORT_SLOWDOWN_DIST_CM;
 
-        // 长直段只提高远端巡航速度，停车末端与短段共用同一减速窗口
+        // 长直段提高远端巡航速度，并使用独立的末端减速窗口和最低速度
         if (long_segment) {
             cruise_speed = std::min(cruise_speed * LinearTerminalConfig::LONG_CRUISE_GAIN,
                                     LinearTerminalConfig::LONG_MAX_CRUISE_CM_S);
