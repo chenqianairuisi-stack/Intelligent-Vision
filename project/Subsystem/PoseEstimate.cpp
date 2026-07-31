@@ -76,9 +76,11 @@ namespace {
     constexpr uint32_t VISION_POSE_MAX_AGE_MS = 300;  // 视觉位姿数据的最大有效时间，超过这个时间就丢弃
     constexpr float DEFAULT_ENCODER_LATENCY_GAIN = TuningDefaults::DEFAULT_ENCODER_LATENCY_GAIN;
     constexpr float VISION_LATERAL_DEADBAND_CM = 0.15f;
-    constexpr float VISION_LATERAL_MAX_STEP_CM = 0.45f;
-    constexpr float VISION_LATERAL_CORRECTION_GAIN = 0.70f;
+    constexpr float VISION_LATERAL_MAX_STEP_CM = 0.85f;
+    constexpr float VISION_LATERAL_CORRECTION_GAIN = 0.90f;
     constexpr float VISION_ENCODER_RESET_THRESHOLD_CM = 12.0f;
+    // 段法向修正要求段向量至少 1cm，否则方向不可靠
+    constexpr float VISION_LATERAL_MIN_SEGMENT_LEN_SQ = 1.0f;   // (1 cm)^2
     // 延时外推封顶余量：指令位移(合速度模) × 该系数为外推矢量模上限。1.0=严格按指令；
     // >1 给运动学增益/yaw 投影误差留裕度。取 1.5 兼顾"匀速不误伤、刹车能夹掉打滑虚增"。
     constexpr float VISION_LATENCY_CMD_CLAMP_MARGIN = 1.5f;
@@ -510,7 +512,8 @@ namespace {
         return true;
     }
 
-    [[maybe_unused]] [[gnu::always_inline]] inline bool apply_projected_lateral_correction(const Pose2D& vision_pose,
+    // 段法向修正（当前在用）：只把视觉误差沿段法向投影后限步收敛，沿运动方向的分量丢弃
+    [[gnu::always_inline]] inline bool apply_projected_lateral_correction(const Pose2D& vision_pose,
                                                                           Pose2D& odom_pose,
                                                                           float segment_dx,
                                                                           float segment_dy,
@@ -537,9 +540,10 @@ namespace {
         return true;
     }
 
-    // 纯视觉全 2D 纠偏：X/Y 两轴各自限步收敛（替代只修横向），
-    // 每帧每轴限步避免控制环抖动；粗差由上层 reset 阈值兜底
-    [[gnu::always_inline]] inline bool apply_full_2d_correction(const Pose2D& vision_pose,
+    // 纯视觉全 2D 纠偏：X/Y 两轴各自限步收敛。
+    // 2026-07-28 起纵向交给零延迟编码器、视觉只纠段法向，本函数已不被调用，
+    // 保留作回滚路径（把 apply_vision_axis_correction 里的调用换回来即可）。
+    [[maybe_unused]] [[gnu::always_inline]] inline bool apply_full_2d_correction(const Pose2D& vision_pose,
                                                                Pose2D& odom_pose) {
         constexpr float FULL_MAX_STEP_CM = 5.0f;  // 每帧每轴最大纠偏步长（原 1.5，用户要求加大到 5）
         float step_x = 0.0f, step_y = 0.0f;
@@ -874,20 +878,50 @@ void update_position_20ms_tick(const int16_t* encoder_counts, float current_yaw_
 // 模块 4: 视觉标定与坐标修正
 // =============================================================================
 
-/// \brief 用最新视觉位姿对全局坐标做纯视觉全 2D 闭环修正
+/// \brief 取零延迟纯编码器位姿（不含任何视觉修正）
+Pose2D get_encoder_pose() {
+    return s_encoder_pose;
+}
+
+/// \brief 把纯编码器位姿 XY 重新钉到给定坐标
+///
+/// \details
+/// 只做平移：s_encoder_pose 与整个 s_odom_history 一起加同一个偏移量。
+/// 不能用 reset_odom_history —— 那会把历史清空，导致此后 ~L(≈320ms) 内
+/// match_vision_pose_to_odom_history 找不到样本，横向修正整段丢失。
+void set_encoder_pose_xy(float x, float y) {
+    float ox = x - s_encoder_pose.x;
+    float oy = y - s_encoder_pose.y;
+    if (!std::isfinite(ox) || !std::isfinite(oy)) {
+        return;
+    }
+    s_encoder_pose.x = x;
+    s_encoder_pose.y = y;
+    for (auto& sample : s_odom_history) {
+        if (!sample.valid) continue;
+        sample.pose.x += ox;
+        sample.pose.y += oy;
+    }
+}
+
+/// \brief 用最新视觉位姿只修正"与运动方向垂直"的那个轴（段法向）
+/// \param segment_start 当前直线段起点，与 segment_end 一起定义运动方向
+/// \param segment_end 当前直线段终点（当前追踪目标）
 /// \param last_consumed_seq 外层保存的最后一帧已处理视觉序号
 /// \return 成功应用视觉修正时返回 true
 ///
 /// \details
-/// 纯视觉方案：先用编码器纯积分补偿视觉管线延时(tick 查表 + 实时 L)，再对 X/Y 两轴
-/// 各自限步收敛(不再只修横向、不再近终点冻结)；与编码器积分偏离过大时硬贴合并重置历史。
-/// segment_start/segment_end/allow_near_target_correction 仅为兼容旧接口保留，已不参与轴向判定。
+/// 先用编码器纯积分补偿视觉管线延时(tick 查表 + 实时 L)，再把视觉误差投影到
+/// **段法向**做限步收敛：横向(防蹭箱/贴线)延迟无害、该信视觉；纵向(沿运动方向)
+/// 被 ~L 延迟拽会造成过冲，交给零延迟编码器，视觉一律不碰。
+/// 段向量退化(<1cm，如原地保持/锁点)时方向不可靠，本帧不修，纯靠编码器保持。
+/// 与编码器积分偏离过大(粗差跳变)时仍走硬贴合并重置历史保护。
 /// 按视觉帧序号消费新数据，不清 art1_pose_updated，避免与标定/调试流程抢同一个 bool 标志。
 ///
 bool apply_vision_axis_correction(const Point2D& segment_start, const Point2D& segment_end,
                                   uint32_t& last_consumed_seq,
                                   bool allow_near_target_correction) {
-    (void)segment_start; (void)segment_end; (void)allow_near_target_correction;
+    (void)allow_near_target_correction;
 
     auto& vision_data = App::g_state.vision;
     uint32_t seq = vision_data.art1_pose_seq;
@@ -927,10 +961,18 @@ bool apply_vision_axis_correction(const Point2D& segment_start, const Point2D& s
         return true;
     }
 
-    // 纯视觉：X/Y 两轴全闭环限步纠偏（替代只修横向）
+    // 只纠段法向（与运动方向垂直的那一轴）；沿运动方向的分量丢弃，纵向纯靠编码器
+    float seg_dx = segment_end.x - segment_start.x;
+    float seg_dy = segment_end.y - segment_start.y;
+    float seg_len_sq = seg_dx * seg_dx + seg_dy * seg_dy;
+    if (seg_len_sq < VISION_LATERAL_MIN_SEGMENT_LEN_SQ) {
+        return false;   // 段太短/退化：方向不可靠，本帧不修
+    }
+
     float before_x = pose.x;
     float before_y = pose.y;
-    bool applied = apply_full_2d_correction(vision_pose, pose);
+    bool applied = apply_projected_lateral_correction(vision_pose, pose,
+                                                     seg_dx, seg_dy, seg_len_sq);
 
     s_vision_latency_debug.correction_x = pose.x - before_x;
     s_vision_latency_debug.correction_y = pose.y - before_y;

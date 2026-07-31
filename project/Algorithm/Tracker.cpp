@@ -30,6 +30,10 @@ namespace {
     constexpr float MIN_TERMINAL_REACH_RADIUS_CM = 0.8f;
     // 逐点停车模式下切段合速度的硬上限 cm/s：仅在手动启用逐点停车时生效
     constexpr float STRAIGHT_MODE_SWITCH_SPEED_CAP_CM_S = 5.0f;
+    // 2026-07-30 到点即硬锁（治"到绿框位置后原地蠕动徘徊"）：停车航点一进到达/越线判定就置
+    // ctrl.hard_lock，由 ChassisControl 清零四轮目标 + 4 拍内插铺到 0 主动刹停，不再靠位置伺服
+    // 贴点（伺服无死区 + 视觉 10ms 拽 pose = 持续追点）。置 false 回旧的位置伺服保持行为。
+    constexpr bool HARD_LOCK_ON_ARRIVAL = true;
     DTCM_DATA float s_box_push_final_press_cm = DEFAULT_BOX_PUSH_FINAL_PRESS_CM;
     // 参考 2he-new：中间拐点提前切段，终点和 force_stop 航点才停车
     DTCM_DATA bool s_stop_at_every_waypoint = false;
@@ -79,13 +83,14 @@ namespace {
     // 冲过头时 check_arrival 的小半径窗口可能被单拍滑行跳过，仅靠半径 arm 不上锁 →
     // velocity_planning_1d 翻向反追 → 来回震荡。加"越过目标线"判定，冲过即锁。
     [[gnu::always_inline]] inline bool crossed_target(Point2D segment_start, Point2D target) {
-        const auto& pose = App::g_state.physical.pose;
+        // 用零延迟编码器位姿判定：视觉管线 ~L 延迟下融合位姿反应慢，会造成"已冲过却还没检测到"
+        const Pose2D enc = Subsystem::PoseEstimator::get_encoder_pose();
         float sdx = target.x - segment_start.x;
         float sdy = target.y - segment_start.y;
         // 段向量退化(起点≈终点)方向不可靠，不做越过判定，避免误锁
         if (sdx * sdx + sdy * sdy < 1.0f) return false;   // <1cm 段
-        float pdx = pose.x - target.x;
-        float pdy = pose.y - target.y;
+        float pdx = enc.x - target.x;
+        float pdy = enc.y - target.y;
         return pdx * sdx + pdy * sdy >= 0.0f;   // 当前位置投影已过目标点
     }
 
@@ -115,6 +120,11 @@ namespace {
         s_force_vision_assist_current_segment = force_vision_assist;
         // 同步给底盘 Stanley 贴线用：段起点随切段一起更新
         App::g_state.control.segment_start = segment_start;
+
+        // 纵向重同步：切段时把编码器纯积分位姿 XY 贴齐当前融合位姿，消除横向纠偏累积的纵向漂移。
+        // set_encoder_pose_xy 只平移历史整体（不清历史），保留延时匹配所需的帧间差值。
+        const auto& fused = App::g_state.physical.pose;
+        Subsystem::PoseEstimator::set_encoder_pose_xy(fused.x, fused.y);
     }
 
     [[maybe_unused]] [[gnu::always_inline]] inline bool has_trackable_segment(Point2D segment_start, Point2D target) {
@@ -367,7 +377,8 @@ namespace {
     /// 只在主运动轴接近终点且横向误差较小时切换，减少拐角停车又避免斜切过早
     ///
     [[gnu::always_inline]] inline bool check_corner_switch(Point2D segment_start, Point2D target) {
-        const auto& pose = App::g_state.physical.pose;
+        // 切段时使用零延迟编码器位姿；融合位姿包含视觉延迟，可能已经晚于实际切点。
+        const Pose2D pose = Subsystem::PoseEstimator::get_encoder_pose();
         float sx = target.x - segment_start.x;
         float sy = target.y - segment_start.y;
         float abs_sx = std::abs(sx);
@@ -684,7 +695,8 @@ __attribute__((section(".ramfunc"))) void update_target() {
 
     // 默认按停车规划；只有确认是"过弯不停顿"的拐点才在下面改成保留速度
     ctrl.segment_end_speed = 0.0f;
-    // hard_lock 与参考工程行为不一致，Tracker 路径中始终关闭
+    // 每拍先清 hard_lock：行进途中一律不锁，只有下面停车航点的到达/停稳分支才重新置位
+    // （见 HARD_LOCK_ON_ARRIVAL）。这样解锁靠"下一拍不再置位"自然完成，不需要额外解锁路径。
     ctrl.hard_lock = false;
 
     if (plan.physical_path.empty() || plan.current_wp_idx >= plan.physical_path.size()) {
@@ -717,11 +729,19 @@ __attribute__((section(".ramfunc"))) void update_target() {
     }
     // 非终点航点允许提前切换，终点必须按更小半径进入并停稳
     bool arrived = false;
+    bool crossed_continuous_corner = false;
 
     if (must_stop_at_wp) {
         // 终点和 force_stop 航点等四轮完全停住再放行
-        bool brief_pause_corner = false;
+        // 2026-07-30：越线即到达。旧代码把 brief_pause_corner 写死 false，使 crossed_target 恒不生效 →
+        // 车冲过 2cm 到达球后 check_arrival 永远 false → 位置伺服反向追点 + 末端速度地板 → 原地蠕动徘徊。
+        // 现在停车航点一律"半径内 或 已越过目标线"即算到达，冲过头就地刹停不反追，
+        // 残留误差留给下一段视觉横向纠偏（= 编码器为主 + 视觉纠偏）。
+        // 推箱补点保持严格半径不变：它靠持续顶箱产生压紧行程，越线即停会少压一段。
+        bool brief_pause_corner = !push_extra_wp;
         bool settled = App::g_state.physical.is_stopped;
+        // 推箱补点不锁：它靠位置伺服持续顶箱产生压紧行程，清零四轮会少压一段
+        bool lock_on_arrival = HARD_LOCK_ON_ARRIVAL && !push_extra_wp;
 
         if (s_stop_settle_active && s_stop_settle_wp_idx != plan.current_wp_idx) {
             clear_stop_settle();
@@ -729,11 +749,19 @@ __attribute__((section(".ramfunc"))) void update_target() {
 
         if (s_stop_settle_active) {
             if (!settled) {
-                // 到达后给位置规划器零距离目标，等待轮速停稳，不进入 hard_lock 分支
+                // 到达后原地锁死等轮速停稳。
+                // 2026-07-30：旧做法是"给位置规划器零距离目标"靠位置伺服保持，但伺服无死区、
+                // 视觉每 10ms 还在拽 pose → 目标点跟着漂 → 车持续小幅追点 = 原地蠕动。
+                // 现在直接 hard_lock：ChassisControl 把四轮目标清零并用 publish_wheel_target_interp
+                // 在 4 拍(80ms)内线性铺到 0（不是速度阶跃），PID 全程主动刹，停得干脆且不再追点。
+                // HARD_LOCK_ON_ARRIVAL=false 回旧的位置伺服保持。
                 Point2D hold = current_pose_point();
                 ctrl.current_target.x = hold.x;
                 ctrl.current_target.y = hold.y;
                 ctrl.current_target.yaw = App::g_state.physical.pose.yaw;
+                if (lock_on_arrival) {
+                    ctrl.hard_lock = true;
+                }
                 return;
             } else {
                 arrived = true;
@@ -756,23 +784,37 @@ __attribute__((section(".ramfunc"))) void update_target() {
                     ctrl.current_target.x = hold.x;
                     ctrl.current_target.y = hold.y;
                     ctrl.current_target.yaw = App::g_state.physical.pose.yaw;
+                    // 到点首拍即锁死（同上：4 拍内插铺到 0，非阶跃），不给位置伺服反追的机会
+                    if (lock_on_arrival) {
+                        ctrl.hard_lock = true;
+                    }
                     return;
                 }
                 arrived = true;
             }
         }
     } else {
-        // 普通中间拐点进入 2cm 圆形窗口才切下一段，规划器速度状态连续保留
+        // 普通中间拐点沿旧段纵向投影提前切换，避免实际位置越过理想拐点后再开新段。
+        // 圆形窗口保留作横向误差/异常回退；越线判定保证单拍跨过窗口时不会继续追旧点。
         float switch_radius = (push_extra_wp || finish_without_stop_at_last)
             ? current_radius
             : WAYPOINT_SWITCH_RADIUS_CM;
         arrived = check_arrival(target_phys, switch_radius);
+        if (!push_extra_wp && !finish_without_stop_at_last) {
+            crossed_continuous_corner = crossed_target(plan.vision_segment_start, target_phys);
+            arrived = arrived || check_corner_switch(plan.vision_segment_start, target_phys) ||
+                      crossed_continuous_corner;
+        }
     }
 
     if (arrived) {
         if (!is_last_point) {
-            // 参考 2he-new：以提前切段时的实际位姿作为新段起点，形成连续斜向切角
-            reset_vision_assist(current_pose_point());
+            // 正常提前切段时保留实际位置，形成连续切向；若已越过理想拐点，不能再用
+            // 越点后的 P 直接连 C，否则 P->C 会在旧方向上产生反向分量。
+            Point2D next_segment_start = crossed_continuous_corner
+                ? target_phys
+                : current_pose_point();
+            reset_vision_assist(next_segment_start);
             plan.current_wp_idx++;
             clear_stop_settle();
             target_phys = plan.physical_path[plan.current_wp_idx];
@@ -824,10 +866,11 @@ void track_point_with_vision_assist(const Pose2D& target) {
 
 // 检查是否到达当前目标点
 bool check_arrival(Point2D target, float radius) {
-    auto& current_pos = App::g_state.physical.pose;
+    // 用零延迟编码器位姿判定：避免视觉管线 ~L(≈320ms) 延迟使到达判定偏晚 → 过冲
+    const Pose2D enc = Subsystem::PoseEstimator::get_encoder_pose();
 
-    float dx = target.x - current_pos.x;
-    float dy = target.y - current_pos.y;
+    float dx = target.x - enc.x;
+    float dy = target.y - enc.y;
     float dist_sq = dx * dx + dy * dy;
 
     return dist_sq <= radius * radius;

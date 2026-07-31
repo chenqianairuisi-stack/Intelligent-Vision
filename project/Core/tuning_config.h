@@ -5,15 +5,15 @@
 // ==========================================
 // 停车段末端减速曲线有两套实现，各由下面一个开关单独控制，互不依赖：
 //   · ENABLE_NONLINEAR_TERMINAL_BRAKE：非线性（接近区双段 sqrt 提前刹车，见 tune.approach_*）
-//   · ENABLE_LINEAR_TERMINAL_BRAKE   ：距离归一化曲线（当前用 k^1.5 整形，见 LinearTerminalConfig）
+//   · ENABLE_LINEAR_TERMINAL_BRAKE   ：距离归一化线性曲线（见 LinearTerminalConfig）
 // 用哪套就把对应开关置 true、另一套置 false。两个都 false → 退回原始单段 sqrt 直落。
-// 两个都 true 时 k^1.5 曲线优先（双段 sqrt 分支不进），避免两条曲线互相打架。
+// 两个都 true 时线性曲线优先（双段 sqrt 分支不进），避免两条曲线互相打架。
 namespace MotionFeatureSwitches {
     inline constexpr bool ENABLE_NONLINEAR_TERMINAL_BRAKE = false;  // 非线性双段 sqrt 末端刹车
-    inline constexpr bool ENABLE_LINEAR_TERMINAL_BRAKE    = true;   // k^1.5 整形末端刹车
+    inline constexpr bool ENABLE_LINEAR_TERMINAL_BRAKE    = true;   // 线性整形末端刹车（当前在用）
 }
 
-// 末端速度参数（距离归一化沿用 2he-new，当前对 k 做 1.5 次方整形）
+// 末端速度参数（距离归一化沿用 2he-new；2026-07-30 起曲线为纯线性，见下方 USE_K15_SHAPING）
 namespace LinearTerminalConfig {
     inline constexpr float CRUISE_SPEED_CM_S = 100.0f;         // 末端接近巡航速度 cm/s
     inline constexpr float SHORT_MIN_SPEED_CM_S = 15.0f;       // 短段到达前最低速度 cm/s
@@ -25,7 +25,42 @@ namespace LinearTerminalConfig {
     inline constexpr float LONG_CRUISE_GAIN = 1.50f;           // 长直段巡航速度倍率
     inline constexpr float LONG_MAX_CRUISE_CM_S = 150.0f;      // 长直段巡航速度封顶 cm/s
     inline constexpr float LONG_ACCEL_GAIN = 1.40f;            // 长直段加速倍率，对齐 2he-new
-    inline constexpr float DECEL_STEP_CM_S = 36.0f;            // 每个控制周期最大降速 cm/s
+    inline constexpr float DECEL_STEP_CM_S = 36.0f;            // 【已停用，见 USE_FIXED_DECEL_STEP】每周期最大降速 cm/s
+
+    // ==== 2026-07-30 线性末端刹车整形（用户拍板："末端必须线性减速，不可非线性、不可阶跃"）====
+    // 下面四个开关都置回旧值即可完整回滚，代码保留不删。
+    //
+    // ① 末端曲线整形指数：false = 纯线性 v = v_min + (v_cruise-v_min)·k（k 一次方，对齐 1he）；
+    //    true = 旧的 k^1.5（k^1.5 < k，在减速区中段额外压速 → 主观"全程被压着跑"）。
+    inline constexpr bool USE_K15_SHAPING = false;
+    //
+    // ② 减速窗口/巡航速度由物理反推，而不是 35/15 两个死数字。
+    //    线性减速下 v(d)=v_c·d/D → 峰值减速度 a = v_c²/D，故 D = v_c²/a_real。
+    //    反过来限定"减速带不超过段长的 SLOWDOWN_SEG_RATIO"就得到该段能跑的巡航上限：
+    //        v_cruise = min(max_vel, sqrt(a_real · (seg_len-stop_dist) · ratio))
+    //        slowdown_dist = v_cruise² / a_real + stop_dist
+    //    a_real 直接取 dynamics.max_acc × dynamics.brake_limit（菜单/PC 都能调，见 storage 注释）。
+    //    好处：曲线永远物理可执行（不打滑）、长段照样跑满 max_vel、短段自动降巡航，
+    //    且没有 LONG_SEGMENT_THRESHOLD 那种 59/61cm 两种手感的断层。false = 回 35/15 死窗口。
+    inline constexpr bool AUTO_WINDOW_ENABLE = true;
+    inline constexpr float SLOWDOWN_SEG_RATIO = 0.50f;          // 减速带占段长比例上限（0.4 匀速感更强、0.5 更快）
+    // 算窗口时用 a_real×此余量（<1）：窗口略放长，曲线所需减速度低于物理上限，每拍限幅全程不 binding。
+    // 越小越保守（刹得越早越稳、末端越慢）；1.0 = 顶着物理上限算，临界易跟不上。
+    inline constexpr float WINDOW_ACC_MARGIN = 0.80f;
+    //
+    // ③ 每拍降速上限回归物理刹车能力 brake_acc·dt（= max_acc×brake_limit×dt）。
+    //    旧值 DECEL_STEP_CM_S=36 在 20ms 周期下等于 1800 cm/s² 的等效减速度，实车 acc=800/brake=0.65
+    //    时 brake_acc=520，它是其 3.5 倍（默认 acc=65 时更是 40 倍以上），等于绕过物理限幅 →
+    //    命令一拍砸 36cm/s → 轮胎锁死打滑 → 编码器少计数 → 判到达偏晚 → 过冲。
+    //    true = 回旧的固定 36 步长。
+    inline constexpr bool USE_FIXED_DECEL_STEP = false;
+    //
+    // ④ 末端速度地板：线性到零在时间上是指数收敛、数学上永远到不了点，所以必须留一个非零地板，
+    //    但旧的 12/15 太高 → 到点后仍以 12~15cm/s 反复追点 = 原地蠕动。降到 6cm/s：
+    //    一拍只走 0.12cm，配合到点 hard_lock（4 拍 80ms 内插到 0）收尾，既不阶跃也不蠕动。
+    //    USE_LEGACY_MIN_SPEED=true 回旧的 LONG/SHORT_MIN_SPEED。
+    inline constexpr bool USE_LEGACY_MIN_SPEED = false;
+    inline constexpr float TERMINAL_MIN_SPEED_CM_S = 12.0f;      // 末端地板 cm/s（越小末端越干净越慢）
 
     static_assert(SHORT_SLOWDOWN_DIST_CM > STOP_DIST_CM,
                   "short terminal slowdown distance must exceed stop distance");

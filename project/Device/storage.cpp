@@ -61,10 +61,6 @@ bool Storage::load_params() {
     memcpy(&tune, &flash_union_buffer[1], sizeof(TuningConfig));
 
     changed = TuningDefaults::sanitize(tune) || changed;
-    if (tune.dynamics.max_vel == 60.0f) {
-        tune.dynamics.max_vel = TuningDefaults::DEFAULT_DYNAMICS_MAX_VEL;
-        changed = true;
-    }
 
     if (tune.latency.encoder_latency_gain == 1.00f &&
         tune.latency.vision_latency_ms == 300.0f) {

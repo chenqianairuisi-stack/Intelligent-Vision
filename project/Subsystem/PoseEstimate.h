@@ -137,6 +137,11 @@ namespace Subsystem::PoseEstimator {
     // 强行重置里程计坐标
     void set_position(float x, float y, float yaw_deg);
 
+    // 零延迟纯编码器位姿（不含视觉修正）：供切向/到达判定使用，避免视觉管线延迟污染纵向
+    Pose2D get_encoder_pose();
+    // 把纯编码器位姿的 XY 重新钉到给定坐标（整段历史一起平移，保留延时匹配所需的差值）
+    void set_encoder_pose_xy(float x, float y);
+
     // Apply latency-compensated vision correction for the current straight segment.
     bool apply_vision_axis_correction(const Point2D& segment_start, const Point2D& segment_end,
                                       uint32_t& last_consumed_seq,

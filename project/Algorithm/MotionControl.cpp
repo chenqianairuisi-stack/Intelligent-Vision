@@ -5,11 +5,11 @@
 namespace Algorithm::Motion {
 
 namespace {
-// 末端速度曲线：先把剩余距离归一化为 k，再用 k^1.5 加强减速区中段压速
+// 末端速度曲线：先把剩余距离归一化为 k，再按 k 线性给目标速度
 //   k        = clamp((d - d_stop) / (d_slow - d_stop), 0, 1)
-//   k_shape  = k · sqrt(k) = k^1.5
+//   k_shape  = k（USE_K15_SHAPING=true 时退回旧的 k·sqrt(k)=k^1.5）
 //   v_target = v_min + (v_cruise - v_min) · k_shape
-// k=1 和 k=0 两端保持不变，只降低 0<k<1 时的目标速度
+// 线性下减速度 ∝ v：起刹最猛、末端最柔，是"末端刹得住又不阶跃"的来源
 constexpr float terminal_distance_progress(float remaining_dist,
                                            float slowdown_dist,
                                            float stop_dist) {
@@ -25,8 +25,47 @@ inline float shaped_terminal_target_speed(float remaining_dist,
                                           float cruise_speed,
                                           float min_speed) {
     float k = terminal_distance_progress(remaining_dist, slowdown_dist, stop_dist);
-    float shaped_k = k * sqrtf(k);
+    // 纯线性(k^1.0)：速度对剩余距离线性 → 减速度 ∝ v，起刹最猛、末端最柔，末端"刹得住"的手感来源。
+    // k^1.5 会在 0<k<1 中段额外压速（k^1.5<k），主观是"全程被压着跑"。开关见 tuning_config.h。
+    float shaped_k = LinearTerminalConfig::USE_K15_SHAPING ? (k * sqrtf(k)) : k;
     return min_speed + (cruise_speed - min_speed) * shaped_k;
+}
+
+// 线性减速下由段长与实测刹车能力反推 (巡航速度, 减速窗口)。
+//   线性律 v(d) = v_c·d/D ⇒ dv/dt = v·dv/dd = v_c²/D·(d/D)，峰值(d=D) a = v_c²/D
+//   要求 a <= a_real 且 D <= (seg_len-stop_dist)·ratio ⇒ v_c <= sqrt(a_real·(seg_len-stop_dist)·ratio)
+// 段长未知(<=0/NaN) 时返回 false，调用方退回原来的死窗口，行为与改前一致。
+struct TerminalWindow {
+    float cruise;
+    float slowdown;
+};
+
+inline bool auto_terminal_window(float seg_len_cm, float stop_dist, float a_real,
+                                 float max_speed, TerminalWindow& out) {
+    if (!LinearTerminalConfig::AUTO_WINDOW_ENABLE) return false;
+    if (!std::isfinite(seg_len_cm) || !std::isfinite(a_real) || a_real <= 1.0f) return false;
+
+    float usable = seg_len_cm - stop_dist;
+    if (!(usable > 1.0f)) return false;   // 段太短：交回死窗口分支，避免除零/病态窗口
+
+    float ratio = LinearTerminalConfig::SLOWDOWN_SEG_RATIO;
+    if (!(ratio > 0.05f && ratio <= 1.0f)) ratio = 0.5f;
+
+    // 留一点余量：窗口若正好按 a_real 算，曲线所需峰值减速度恰等于每拍限幅 brake_acc·dt，
+    // 限幅处于临界 binding 状态，命令会略微跟不上曲线。按 a_eff = a_real·margin 算窗口，
+    // 窗口略长一点、所需减速度低于物理上限，限幅全程不 binding。
+    float a_eff = a_real * LinearTerminalConfig::WINDOW_ACC_MARGIN;
+    if (!(a_eff > 1.0f)) a_eff = a_real;
+
+    float cruise = sqrtf(a_eff * usable * ratio);
+    cruise = std::min(cruise, max_speed);
+    if (!(cruise > 0.1f)) return false;
+
+    out.cruise = cruise;
+    out.slowdown = cruise * cruise / a_eff + stop_dist;
+    // 窗口不得超过可用段长，否则起步就在减速带里（龟速）
+    out.slowdown = std::min(out.slowdown, stop_dist + usable * ratio);
+    return out.slowdown > stop_dist;
 }
 
 static_assert(terminal_distance_progress(35.0f, 35.0f, 2.0f) == 1.0f,
@@ -111,8 +150,11 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
     bool is_stop = (target_end_speed <= 0.1f);              // 停车工况（含 AUTO 推箱/终点）
     bool spring_terminal = (is_stop && !active_auto_track); // 弹簧静止死区仅非 AUTO 启用（AUTO 由 Tracker 到达状态收尾）
 
-    // k^1.5 模式下长直段提高加速上限，末端减速窗口在下方按长短段分别选择
-    if (is_stop && MotionFeatureSwitches::ENABLE_LINEAR_TERMINAL_BRAKE && long_segment) {
+    // 长直段提高加速上限。自动窗口开启时不再叠这个 1.40 倍率：巡航速度已由 brake_acc 与段长
+    // 物理反推，加速侧再放大 1.4×（700→980cm/s²）只会把加速段也推到打滑边缘（加速打滑=编码器
+    // 多计数→提前判到达），而巡航上限并不会因此提高。关掉 AUTO_WINDOW_ENABLE 时自动恢复旧行为。
+    if (is_stop && MotionFeatureSwitches::ENABLE_LINEAR_TERMINAL_BRAKE && long_segment &&
+        !LinearTerminalConfig::AUTO_WINDOW_ENABLE) {
         accel_ramp *= LinearTerminalConfig::LONG_ACCEL_GAIN;
     }
 
@@ -169,20 +211,28 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
 
     float target_v = max_speed;
     if (is_stop && MotionFeatureSwitches::ENABLE_LINEAR_TERMINAL_BRAKE) {
-        // ---- k^1.5 整形末端刹车状态机 ----
+        // ---- 线性末端刹车状态机（曲线指数见 USE_K15_SHAPING）----
         float terminal_cruise_speed = std::min(LinearTerminalConfig::CRUISE_SPEED_CM_S, max_speed);
         float cruise_speed = terminal_cruise_speed;
-        float configured_min_speed = long_segment
-            ? LinearTerminalConfig::LONG_MIN_SPEED_CM_S
-            : LinearTerminalConfig::SHORT_MIN_SPEED_CM_S;
+        float configured_min_speed = LinearTerminalConfig::USE_LEGACY_MIN_SPEED
+            ? (long_segment ? LinearTerminalConfig::LONG_MIN_SPEED_CM_S
+                            : LinearTerminalConfig::SHORT_MIN_SPEED_CM_S)
+            : LinearTerminalConfig::TERMINAL_MIN_SPEED_CM_S;
         float min_speed = std::min(configured_min_speed, cruise_speed);
         float stop_dist = LinearTerminalConfig::STOP_DIST_CM;
         float slowdown_dist = long_segment
             ? LinearTerminalConfig::LONG_SLOWDOWN_DIST_CM
             : LinearTerminalConfig::SHORT_SLOWDOWN_DIST_CM;
 
-        // 长直段提高远端巡航速度，并使用独立的末端减速窗口和最低速度
-        if (long_segment) {
+        // 巡航速度/减速窗口按段长与实测刹车能力(brake_acc)反推：曲线始终物理可执行→不打滑，
+        // 长段跑满 max_vel、短段自动降巡航，无长短段阈值断层。段长未知时落回下面的死窗口分支。
+        TerminalWindow win{};
+        if (auto_terminal_window(seg_len_cm, stop_dist, brake_acc, max_speed, win)) {
+            cruise_speed = win.cruise;
+            slowdown_dist = win.slowdown;
+            min_speed = std::min(min_speed, cruise_speed);
+        } else if (long_segment) {
+            // 长直段提高远端巡航速度，并使用独立的末端减速窗口和最低速度
             cruise_speed = std::min(cruise_speed * LinearTerminalConfig::LONG_CRUISE_GAIN,
                                     LinearTerminalConfig::LONG_MAX_CRUISE_CM_S);
             cruise_speed = std::min(cruise_speed, max_speed);
@@ -224,9 +274,11 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
 
     // 每拍速度斜坡限幅：
     float max_dv_acc = accel_ramp * dt;   // 加速斜坡：短段被 accel_ramp 抬高（只影响此处）
-    // 刹车斜坡：k^1.5 末端刹车用它自己的每拍降速步长；否则用 brake_acc·dt
-    // （非线性接近区缓曲线只是目标更低，不需要更大限幅）
-    float max_dv_dec = (is_stop && MotionFeatureSwitches::ENABLE_LINEAR_TERMINAL_BRAKE)
+    // 每拍降速上限一律用物理刹车能力 brake_acc·dt（= max_acc×brake_limit×dt）。
+    // 旧的固定 DECEL_STEP_CM_S=36 在 20ms 下等于 1800 cm/s²，远超地面附着 → 命令一拍砸 36cm/s
+    // → 轮胎锁死打滑 → 编码器少计数 → 到达判定偏晚 → 过冲。USE_FIXED_DECEL_STEP=true 回旧行为。
+    float max_dv_dec = (is_stop && MotionFeatureSwitches::ENABLE_LINEAR_TERMINAL_BRAKE &&
+                        LinearTerminalConfig::USE_FIXED_DECEL_STEP)
         ? LinearTerminalConfig::DECEL_STEP_CM_S
         : brake_acc * dt;
 
