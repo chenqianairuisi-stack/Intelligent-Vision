@@ -18,12 +18,12 @@ namespace LinearTerminalConfig {
     inline constexpr float CRUISE_SPEED_CM_S = 100.0f;         // 末端接近巡航速度 cm/s
     inline constexpr float SHORT_MIN_SPEED_CM_S = 15.0f;       // 短段到达前最低速度 cm/s
     inline constexpr float SHORT_SLOWDOWN_DIST_CM = 15.0f;     // 短段开始减速距离 cm
-    inline constexpr float LONG_MIN_SPEED_CM_S = 12.0f;        // 长段到达前最低速度 cm/s
+    inline constexpr float LONG_MIN_SPEED_CM_S = 15.0f;        // 长段到达前最低速度 cm/s
     inline constexpr float LONG_SLOWDOWN_DIST_CM = 35.0f;      // 长段开始减速距离 cm
-    inline constexpr float STOP_DIST_CM = 2.0f;                // 到达判定距离 cm，须小于两类减速距离
+    inline constexpr float STOP_DIST_CM = 0.8f;                // 到达判定距离 cm，须小于两类
     inline constexpr float LONG_SEGMENT_THRESHOLD_CM = 60.0f;  // 段长 >= 此值为长段，短段不含边界
     inline constexpr float LONG_CRUISE_GAIN = 1.50f;           // 长直段巡航速度倍率
-    inline constexpr float LONG_MAX_CRUISE_CM_S = 150.0f;      // 长直段巡航速度封顶 cm/s
+    inline constexpr float LONG_MAX_CRUISE_CM_S = 200.0f;      // 长直段巡航速度封顶 cm/s
     inline constexpr float LONG_ACCEL_GAIN = 1.40f;            // 长直段加速倍率，对齐 2he-new
     inline constexpr float DECEL_STEP_CM_S = 36.0f;            // 【已停用，见 USE_FIXED_DECEL_STEP】每周期最大降速 cm/s
 
@@ -231,7 +231,7 @@ namespace TuningDefaults {
     inline constexpr float DEFAULT_ENCODER_LATENCY_GAIN = 1.00f;
     inline constexpr float DEFAULT_VISION_LATENCY_MS = 310.0f;
     inline constexpr float DEFAULT_VISION_REQUEST_INTERVAL_MS = 100.0f;
-    inline constexpr float DEFAULT_VISION_REJECT_DIST = 5.0f;  // 与 FULL_MAX_STEP_CM=5 匹配：差<5cm 都能一帧纠到位
+    inline constexpr float DEFAULT_VISION_REJECT_DIST = 1.0f;  // 与 FULL_MAX_STEP_CM=1.0 匹配：差<1cm 都能一帧纠到位
 
     // 拐点对齐实时延时估计默认参数
     inline constexpr bool  DEFAULT_LATENCY_EST_ENABLE = true;

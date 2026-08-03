@@ -78,7 +78,7 @@ namespace {
     constexpr float VISION_LATERAL_DEADBAND_CM = 0.15f;
     constexpr float VISION_LATERAL_MAX_STEP_CM = 0.85f;
     constexpr float VISION_LATERAL_CORRECTION_GAIN = 0.90f;
-    constexpr float VISION_ENCODER_RESET_THRESHOLD_CM = 12.0f;
+    constexpr float VISION_ENCODER_RESET_THRESHOLD_CM = 3.0f;
     // 段法向修正要求段向量至少 1cm，否则方向不可靠
     constexpr float VISION_LATERAL_MIN_SEGMENT_LEN_SQ = 1.0f;   // (1 cm)^2
     // 延时外推封顶余量：指令位移(合速度模) × 该系数为外推矢量模上限。1.0=严格按指令；

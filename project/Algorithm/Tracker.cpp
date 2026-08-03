@@ -22,7 +22,7 @@ namespace {
     constexpr float PUSH_EXTRA_REACH_RADIUS_CM = 0.05f;
     constexpr float DEFAULT_WAYPOINT_REACH_RADIUS_CM = 0.3f;
     constexpr float MAX_WAYPOINT_REACH_RADIUS_CM = 1.0f;
-    constexpr float WAYPOINT_SWITCH_RADIUS_CM = 2.0f;
+    constexpr float WAYPOINT_SWITCH_RADIUS_CM = 1.0f;
     constexpr float DEFAULT_CORNER_SWITCH_WINDOW_CM = 0.0f;   // 异常回退：宁可不提前切也不乱切
     constexpr float MAX_CORNER_SWITCH_WINDOW_CM = 8.0f;       // 提前切换窗口上限：现场用 !SN 在 0~8cm 间调
     constexpr float DEFAULT_CORNER_LINE_TOLERANCE_CM = 0.5f;
