@@ -1,5 +1,7 @@
 #pragma once
 
+#include "system_config.h"
+
 namespace Subsystem::Chassis {
     void init();
 
@@ -8,4 +10,7 @@ namespace Subsystem::Chassis {
     void update_speed_loop_5ms();  // 5ms 快环(200Hz)：测速后跑轮速 PID 出占空比驱动电机
 
     void check_is_stopped();
+
+    // 获取慢环最近发布的四轮目标速度快照，供遥测使用
+    WheelSpeed4 get_target_wheel_speeds();
 }

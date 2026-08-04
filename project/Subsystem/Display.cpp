@@ -49,47 +49,6 @@ namespace { // 匿名命名空间，确保这些数据只在本文件可见
     constexpr int UI_COL_W = 6; 
     constexpr int UI_ROW_H = 10;
 
-    // --- 巨大的参数字典放到最后或者单独抽离 ---
-    struct ParamItem { const char* name; float* val_ptr; float step; };
-    ParamItem tune_dict[] = { 
-    {"Yaw_Kp  ",   &tune.pid_yaw.kp,                  0.1f  },
-    {"Spd_Kp  ",   &tune.pid_speed.kp,                0.01f },
-    {"Spd_Ki  ",   &tune.pid_speed.ki,                0.01f },
-    {"ff_Kv   ",   &tune.ff.kv,                       0.01f },
-    {"ff_Ka   ",   &tune.ff.ka,                       1.0f  },
-    {"ff_Ks   ",   &tune.ff.k_stiction,               0.01f },
-    {"Max_Duty",   &tune.dynamics.max_duty,           1.0f  },
-    {"Max_Vel ",   &tune.dynamics.max_vel,            1.0f  },
-    {"Max_Acc ",   &tune.dynamics.max_acc,            5.0f  },
-    {"MaxAVel ",   &tune.dynamics.max_ang_vel,        0.1f  },
-    {"MaxAAcc ",   &tune.dynamics.max_ang_acc,        0.1f  },
-    {"Gain_X  ",   &tune.dynamics.kinematic_gain_x,   0.001f},
-    {"Gain_Y  ",   &tune.dynamics.kinematic_gain_y,   0.001f},
-    {"Brake_Lim",  &tune.dynamics.brake_limit,        0.05f },
-    {"Reach_R ",   &tune.tracker.reach_radius,        0.1f  },
-    {"Reach_M ",   &tune.tracker.reach_radius_min,    0.1f  },
-    // 现场过弯与视觉校正参数，和 Telemetry 的 !S B/N/M/G 指令保持同一组含义
-    {"Turn_V  ",   &tune.tracker.corner_pass_speed,   1.0f  },
-    {"Turn_W  ",   &tune.tracker.corner_switch_window,0.1f  },
-    {"LineTol ",   &tune.tracker.corner_line_tolerance,0.1f },
-    {"VisRej  ",   &tune.tracker.vision_reject_dist,  0.5f  },
-    {"EncLat  ",   &tune.latency.encoder_latency_gain,0.01f },
-    {"VisLat  ",   &tune.latency.vision_latency_ms,   10.0f },
-    {"Ang_Tol ",   &tune.tracker.ang_tolerance,       0.001 },
-    // 刹车/切向手感（和 !T G / !T A 同参数）：BrkHold 刹更狠锁更死，TurnAcc 大=切更直不磨圆
-    {"BrkHold ",   &tune.feel.brake_hold_gain,        0.05f },
-    {"TurnAcc ",   &tune.feel.corner_turn_acc,        10.0f },
-    // 停车接近区刹车倍率（和 !T H 同参数）：大=到航点抖减速更狠、进点更慢、过冲更小；1.0=旧行为。
-    // "到航点冲过头"就把它调大（2~4），进点太急/顿挫再往回收。
-    {"StopBrkG",   &tune.stop_approach_brake_gain,    0.25f },
-    // 停车接近区双段刹车（和 !T N / !T Z / !T R / !T C 同参数）：AprEn 总开关（步长1：Up→1开/Down→0关），
-    // AprZone 提前刹车距离上限，AprRatio 占段全长比例（20cm段→5cm），AprAcc 接近区缓减速度（越小末端越慢越准）。
-    {"AprEn   ",   &tune.approach_enable,             1.0f  },
-    {"AprZone ",   &tune.approach_zone_cm,            5.0f  },
-    {"AprRatio",   &tune.approach_zone_ratio,         0.05f },
-    {"AprAcc  ",   &tune.approach_brake_acc,          1.0f  },
-    };
-    constexpr int DICT_SIZE = sizeof(tune_dict) / sizeof(tune_dict[0]);   
     constexpr int PARAMS_PER_PAGE = 12; 
 }
 
@@ -110,7 +69,6 @@ static void draw_item(uint8_t row, const char* name, bool is_selected);
 static void draw_float_item(uint8_t row, const char* name, float val, bool is_selected, bool is_editing, uint8_t decimals);
 static void format_plan_time_line(char* out, size_t size, const char* label, uint32_t ms);
 static void fill_rect(uint8_t x, uint8_t y, uint8_t w, uint8_t h, uint16_t color);
-static void clamp_editable_params();
 
 
 // ====================================================================
@@ -191,7 +149,7 @@ void scan_keys() {
 ///
 /// \details
 /// 负责主菜单、仪表盘、参数调节、Mock/Demo 选图等页面跳转
-/// 参数页通过 tune_dict 指针直接修改全局调参项
+/// 参数页通过 TuningRegistry 与上位机共享参数定义和范围
 ///
 void process_logic() {
     // 高频刷新监控页面
@@ -213,15 +171,15 @@ void process_logic() {
 
                 // --- Flash 存储触发 ---
                 if (ctx.cursor_idx == 3) {
-                    Storage::save_params();
-                    tft180_show_string(15 * UI_COL_W, 5 * UI_ROW_H, "[OK]");
+                    const bool saved = Storage::save_params();
+                    tft180_show_string(15 * UI_COL_W, 5 * UI_ROW_H,
+                                       saved ? "[OK]" : "[ERR]");
                     system_delay_ms(300);
                 }
                 if (ctx.cursor_idx == 4) {
-                    if (Storage::load_params()) {
-                        Storage::save_params();
-                    }
-                    tft180_show_string(15 * UI_COL_W, 6 * UI_ROW_H, "[OK]");
+                    const bool loaded = Storage::load_params();
+                    tft180_show_string(15 * UI_COL_W, 6 * UI_ROW_H,
+                                       loaded ? "[OK]" : "[ERR]");
                     system_delay_ms(300);
                 }
                 // --- 息屏模式 ---
@@ -243,8 +201,9 @@ void process_logic() {
         case MenuPage::TUNE_PARAMS:
             if (!ctx.is_editing) {
                 // 列表上下移动
-                if (ctx.key_down_pressed) ctx.cursor_idx = (ctx.cursor_idx + 1) % DICT_SIZE;
-                if (ctx.key_up_pressed)   ctx.cursor_idx = (ctx.cursor_idx == 0) ? (DICT_SIZE - 1) : ctx.cursor_idx - 1;
+                const std::size_t param_count = TuningRegistry::screen_count();
+                if (ctx.key_down_pressed) ctx.cursor_idx = (ctx.cursor_idx + 1) % param_count;
+                if (ctx.key_up_pressed)   ctx.cursor_idx = (ctx.cursor_idx == 0) ? (param_count - 1) : ctx.cursor_idx - 1;
                 
                 // 自动计算滚动窗口，保证光标始终在屏幕内
                 if (ctx.cursor_idx < ctx.scroll_offset) ctx.scroll_offset = ctx.cursor_idx;
@@ -253,10 +212,9 @@ void process_logic() {
                 if (ctx.key_enter_pressed) ctx.is_editing = true;
                 if (ctx.key_back_pressed) { ctx.current_page = MenuPage::MAIN_MENU; ctx.cursor_idx = 2; ctx.need_full_redraw = true; ctx.ui_dirty = true; }
             } else {
-                // 编辑模式：直接操作字典中的指针，一键修改全局黑板变量
-                if (ctx.key_up_pressed)   *(tune_dict[ctx.cursor_idx].val_ptr) += tune_dict[ctx.cursor_idx].step;
-                if (ctx.key_down_pressed) *(tune_dict[ctx.cursor_idx].val_ptr) -= tune_dict[ctx.cursor_idx].step;
-                clamp_editable_params();
+                auto& item = TuningRegistry::screen_param(ctx.cursor_idx);
+                if (ctx.key_up_pressed) TuningRegistry::adjust_from_screen(item, item.step);
+                if (ctx.key_down_pressed) TuningRegistry::adjust_from_screen(item, -item.step);
                 if (ctx.key_enter_pressed || ctx.key_back_pressed) ctx.is_editing = false;
             }
             break;
@@ -473,16 +431,17 @@ void draw_odometry_data() {
 /// 根据参数步长自动选择小数位数，避免小屏幕上显示过宽
 ///
 void draw_tune_params() {
+    const std::size_t param_count = TuningRegistry::screen_count();
     tft180_show_string(0, 0, "PARAMETERS");
     
     // 进度提示 (例如 1/8)，放在右上角
     tft180_show_int(14 * UI_COL_W, 0, ctx.cursor_idx + 1, 2);
     tft180_show_string(16 * UI_COL_W, 0, "/");
-    tft180_show_int(17 * UI_COL_W, 0, DICT_SIZE, 2);
+    tft180_show_int(17 * UI_COL_W, 0, param_count, 2);
     
     for (int i = 0; i < PARAMS_PER_PAGE; i++) {
         int item_idx = ctx.scroll_offset + i;
-        if (item_idx >= DICT_SIZE) {
+        if (item_idx >= static_cast<int>(param_count)) {
             // 清理多余行，打印 21 个空格正好覆盖一整行
             tft180_show_string(0, (i + 1) * UI_ROW_H, "                     ");
             continue;
@@ -490,7 +449,8 @@ void draw_tune_params() {
 
         // 根据调节步长动态计算需要显示的小数位数
         uint8_t dec = 0;
-        float step = tune_dict[item_idx].step;
+        const auto& item = TuningRegistry::screen_param(item_idx);
+        float step = item.step;
         if (step < 0.005f) {
             dec = 3;       // 步长 0.001 对应 3 位小数
         } else if (step < 0.05f) {
@@ -502,8 +462,8 @@ void draw_tune_params() {
         }
 
         draw_float_item(i + 1, 
-            tune_dict[item_idx].name, 
-            *(tune_dict[item_idx].val_ptr), 
+            item.name,
+            *item.value,
             ctx.cursor_idx == item_idx, 
             ctx.is_editing && (ctx.cursor_idx == item_idx),
             dec);
@@ -516,47 +476,6 @@ void draw_tune_params() {
 /// 从 GameEngine 获取渲染上下文，合成地图、路径、观测点和小车位置
 /// 地图采用 back_buffer 做格子级增量刷新，小车单独作为像素级覆盖层绘制
 ///
-void clamp_editable_params() {
-    (void)TuningDefaults::clamp_if_outside(tune.dynamics.max_vel,
-                                           TuningDefaults::MIN_DYNAMICS_MAX_VEL,
-                                           TuningDefaults::MAX_DYNAMICS_MAX_VEL,
-                                           TuningDefaults::DEFAULT_DYNAMICS_MAX_VEL);
-
-    if (tune.latency.encoder_latency_gain < TuningDefaults::MIN_ENCODER_LATENCY_GAIN) {
-        tune.latency.encoder_latency_gain = TuningDefaults::MIN_ENCODER_LATENCY_GAIN;
-    } else if (tune.latency.encoder_latency_gain > TuningDefaults::MAX_ENCODER_LATENCY_GAIN) {
-        tune.latency.encoder_latency_gain = TuningDefaults::MAX_ENCODER_LATENCY_GAIN;
-    }
-
-    if (tune.latency.vision_latency_ms < TuningDefaults::MIN_VISION_LATENCY_MS) {
-        tune.latency.vision_latency_ms = TuningDefaults::MIN_VISION_LATENCY_MS;
-    } else if (tune.latency.vision_latency_ms > TuningDefaults::MAX_VISION_LATENCY_MS) {
-        tune.latency.vision_latency_ms = TuningDefaults::MAX_VISION_LATENCY_MS;
-    }
-
-    // 菜单可调的尾部追加参数一并夹紧，避免屏幕上加减越界成无效值（与 !T H/Z/R/C 串口一致）
-    (void)TuningDefaults::clamp_if_outside(tune.stop_approach_brake_gain,
-                                           TuningDefaults::MIN_STOP_APPROACH_BRAKE_GAIN,
-                                           TuningDefaults::MAX_STOP_APPROACH_BRAKE_GAIN,
-                                           TuningDefaults::DEFAULT_STOP_APPROACH_BRAKE_GAIN);
-    (void)TuningDefaults::clamp_if_outside(tune.approach_zone_cm,
-                                           TuningDefaults::MIN_APPROACH_ZONE_CM,
-                                           TuningDefaults::MAX_APPROACH_ZONE_CM,
-                                           TuningDefaults::DEFAULT_APPROACH_ZONE_CM);
-    (void)TuningDefaults::clamp_if_outside(tune.approach_zone_ratio,
-                                           TuningDefaults::MIN_APPROACH_ZONE_RATIO,
-                                           TuningDefaults::MAX_APPROACH_ZONE_RATIO,
-                                           TuningDefaults::DEFAULT_APPROACH_ZONE_RATIO);
-    (void)TuningDefaults::clamp_if_outside(tune.approach_brake_acc,
-                                           TuningDefaults::MIN_APPROACH_BRAKE_ACC,
-                                           TuningDefaults::MAX_APPROACH_BRAKE_ACC,
-                                           TuningDefaults::DEFAULT_APPROACH_BRAKE_ACC);
-    (void)TuningDefaults::clamp_if_outside(tune.approach_enable,
-                                           TuningDefaults::MIN_APPROACH_ENABLE,
-                                           TuningDefaults::MAX_APPROACH_ENABLE,
-                                           TuningDefaults::DEFAULT_APPROACH_ENABLE);
-}
-
 void draw_dashboard() {
     App::GameEngine::RenderContext render_ctx = App::GameEngine::get_render_context();
     auto& game = App::g_state.game;

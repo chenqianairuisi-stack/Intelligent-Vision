@@ -31,8 +31,6 @@ __attribute__((section(".dtcm_data"))) static Algorithm::Motion::Speed_PosPid pi
     Algorithm::Motion::Speed_PosPid(tune.wheels[3].pid)    // RB
 };
 
-// __attribute__((section(".dtcm_data"))) static Algorithm::Motion::Angle_PosPid pid_pos_yaw(tune.pid_yaw);
-
 __attribute__((section(".dtcm_data"))) static Algorithm::Motion::PathLineFollower path_follower;
 __attribute__((section(".dtcm_data"))) static Algorithm::Motion::YawProfiled yaw_controller;
 // 慢环(20ms)产出、快环(5ms)消费的四轮目标速度。两段同在 PIT 中断、不并发，无需加锁。
@@ -218,6 +216,13 @@ namespace {
 void init() {
     for(auto& m : motors) m.init();    // 电机初始化 (gpio + pwm)
     encoders.init();                   // 编码器初始化 (encoder)
+}
+
+WheelSpeed4 get_target_wheel_speeds() {
+    const uint32_t primask = interrupt_global_disable();
+    const WheelSpeed4 snapshot = s_target_wheel_speeds;
+    interrupt_global_enable(primask);
+    return snapshot;
 }
 
 /// \brief 20ms 底盘控制周期

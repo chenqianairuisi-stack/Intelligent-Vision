@@ -119,14 +119,14 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
     bool long_segment = std::isfinite(seg_len_cm) &&
                         seg_len_cm >= LinearTerminalConfig::LONG_SEGMENT_THRESHOLD_CM;
 
-    // 短段起步加速提升：非长段且段全长 <= short_seg_len_cm 时，**只**把加速斜坡上限抬到 short_seg_accel，
+    // 短段起步加速提升：非长段且段全长 <= terminal.short_segment_cm 时，只把加速斜坡上限抬高
     // 让短距离移动起步更快、不磨蹭。刹车加速度 brake_acc 与下方 sqrt 减速曲线**保持不变**（温柔刹车），
     // 末端因此自然物理慢下来（不是把末端交给视觉控制，只是放慢；慢下来后编码器+视觉融合更准）。
     // seg_len_cm<=0（未知）或段长超阈值：不提升，退回 max_acc，行为与改前完全一致。
     float accel_ramp = max_acc;
     {
-        float boost = tune.short_seg_accel;
-        float len_thresh = tune.short_seg_len_cm;
+        float boost = tune.terminal.short_acceleration;
+        float len_thresh = tune.terminal.short_segment_cm;
         if (!long_segment &&
             std::isfinite(seg_len_cm) && seg_len_cm >= 1.0f &&
             std::isfinite(len_thresh) && seg_len_cm <= len_thresh &&
@@ -188,10 +188,10 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
     float approach_acc = 0.0f;
     if (is_stop && MotionFeatureSwitches::ENABLE_NONLINEAR_TERMINAL_BRAKE &&
         !MotionFeatureSwitches::ENABLE_LINEAR_TERMINAL_BRAKE &&
-        tune.approach_enable >= 0.5f) {   // 运行期旋钮 !T N 0 仍可临时关掉非线性接近区
-        float z_cap = tune.approach_zone_cm;
-        float z_ratio = tune.approach_zone_ratio;
-        float a_apr = tune.approach_brake_acc;
+        tune.terminal.approach_enable >= 0.5f) {
+        float z_cap = tune.terminal.approach_zone_cm;
+        float z_ratio = tune.terminal.approach_ratio;
+        float a_apr = tune.terminal.approach_acceleration;
         if (std::isfinite(z_cap) && z_cap >= 1.0f &&
             std::isfinite(a_apr) && a_apr >= 1.0f && a_apr < brake_acc) {
             approach_zone = z_cap;
@@ -288,7 +288,7 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
     // 车已在曲线上时 target_v≈current_v，限幅本就不 binding→放大它零行为改变；gain=1.0 完全等于旧行为。
     if (is_stop && MotionFeatureSwitches::ENABLE_NONLINEAR_TERMINAL_BRAKE &&
         !MotionFeatureSwitches::ENABLE_LINEAR_TERMINAL_BRAKE) {
-        float brake_gain = tune.stop_approach_brake_gain;
+        float brake_gain = tune.terminal.stop_brake_gain;
         if (!(brake_gain >= 1.0f && brake_gain <= 100.0f)) {
             brake_gain = 1.0f;   // 运行期兜底：NaN/越界（比较恒 false 落此）→ 退回旧行为，不依赖 sanitize
         }

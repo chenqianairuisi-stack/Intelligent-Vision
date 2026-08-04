@@ -1,555 +1,637 @@
+/// \file Telemetry.cpp
+/// \brief 无线遥测、在线调参和调试命令实现
+
 #include "Telemetry.h"
-#include "RobotState.h"
-#include "tuning_config.h"
-#include "system_config.h"
+
+#include <cmath>
+#include <cstdarg>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <cmath>
 
-#include "CoreScheduler.h"
-#include "Vision.h"
+#include "ChassisControl.h"
+#include "Icm42688.h"
 #include "MotionControl.h"
-#include "Tracker.h"
 #include "PoseEstimate.h"
+#include "RobotState.h"
+#include "Storage.h"
+#include "Tracker.h"
+#include "Vision.h"
+#include "system_config.h"
+#include "tuning_config.h"
 
 #include "zf_common_headfile.h"
-#include "Encoder.h"
-#include "UartComm.h"
-
 
 namespace Subsystem::Telemetry {
-
-// ====================================================================
-// 内部变量
-// ====================================================================
-namespace {
-    #pragma pack(push, 1)
-    struct VofaJustFloat {
-        uint8_t head = 0xAA;
-        float data_1 = 0; float data_2 = 0; float data_3 = 0; 
-        float data_4 = 0; float data_5 = 0; float data_6 = 0;
-        uint8_t tail = 0xBB;
-    };
-    #pragma pack(pop)
-    VofaJustFloat tx_packet;
-
-    char rx_cmd_buf[64];
-    uint8_t rx_idx = 0;
-
-    // --- 运动时间监测 ---
-    bool is_timing_movement = false;   // 测时器状态标志
-    uint32_t movement_start_time = 0;  // 运动开始的系统时间戳 (ms)
-    ControlMode current_timing_mode = ControlMode::POINT_TRACKING;  // 当前测时器关联的控制模式
-
-    // --- 语义监测 ---
-    bool is_monitoring_semantics = false;                            // 语义监测开关
-    int8_t cached_semantic_labels[SystemConfig::MAX_ENTITIES] = {0}; // 语义缓存，用于比对差异
-
-    // --- 内部函数声明 ---
-    void start_movement_timing(ControlMode mode);  // 触发测时器
-    void check_movement_completion();              // 在后台循环中检查测时器状态，计算并发送结果
-    void dump_semantic_cache();                    // 发送语义缓存内容
-    void execute_command(const char* cmd);         // 命令解析函数声明
-}
-
-
-// ====================================================================
-// 公共接口
-// ====================================================================
-
-/// \brief 初始化无线遥测串口
-void init() {
-    wireless_uart_init();  
-}
-
-/// \brief 输出一次视觉标定日志
-/// \param v_x 视觉 X
-/// \param v_y 视觉 Y
-/// \param v_yaw 视觉 yaw
-/// \param o_x 里程计 X
-/// \param o_y 里程计 Y
-/// \param o_yaw 里程计 yaw
-/// \param accepted 本次标定是否被接受
-///
-void log_vision_calibration(float v_x, float v_y, float v_yaw, 
-                            float o_x, float o_y, float o_yaw, bool accepted) {
-    char msg[128];
-    // 计算偏差
-    float dx = std::abs(v_x - o_x);
-    float dy = std::abs(v_y - o_y);
-    float dyaw = std::abs(v_yaw - o_yaw);
-    if (dyaw > 180.0f) dyaw = 360.0f - dyaw;
-
-    snprintf(msg, sizeof(msg),
-             "[VIS_CALIB] %s | Vis(%.1f, %.1f, %.1f) Odom(%.1f, %.1f, %.1f) Err(%.1f, %.1f, %.1f)\r\n",
-             accepted ? "ACCEPT" : "REJECT",
-             v_x, v_y, v_yaw, o_x, o_y, o_yaw, dx, dy, dyaw);
-             
-    wireless_uart_send_buffer((uint8_t*)msg, strlen(msg));
-}
-
-/// \brief 周期发送遥测数据
-///
-/// \details
-/// 根据 telemetry_mode 输出不同波形数据，同时在语义监测开启时增量发送语义缓存变化
-///
-void send_wave_data() {
-
-    // 1. 常规高频波形推送
-    if (App::g_state.debug.telemetry_mode != -1) {
-        if (App::g_state.debug.telemetry_mode == 0) {
-            // 【模式 0】：底盘动力学监控
-            const auto& current_pose = App::g_state.physical.pose;
-            const auto& wheel_speed = App::g_state.physical.current_wheel_speed;
-            const auto& commanded_vel = App::g_state.control.commanded_vel;
-            Pose2D  target_pos  = App::g_state.control.current_target;  
-            
-            Velocity2D avg_speed = Algorithm::Motion::Kinematics::forward(
-                wheel_speed.lf, wheel_speed.lb,
-                wheel_speed.rf, wheel_speed.rb
-            );
-            float avg_speed_mag = std::sqrt(avg_speed.vx * avg_speed.vx + avg_speed.vy * avg_speed.vy);
-            float commanded_speed_mag = std::sqrt(commanded_vel.vx * commanded_vel.vx +
-                                                  commanded_vel.vy * commanded_vel.vy);
-
-            tx_packet.data_1 = commanded_speed_mag;
-            tx_packet.data_2 = avg_speed_mag;              
-            tx_packet.data_3 = target_pos.x;               
-            tx_packet.data_4 = current_pose.x;
-            tx_packet.data_5 = target_pos.y;               
-            tx_packet.data_6 = current_pose.y;
-            
-        } 
-        else if (App::g_state.debug.telemetry_mode == 1) {
-            // 【模式 1】：定位数据监控
-            const auto& current_pose = App::g_state.physical.pose;
-            const auto& vision_pose = App::g_state.vision.art1_pose;
-
-            tx_packet.data_1 = current_pose.x;
-            tx_packet.data_2 = current_pose.y;
-            tx_packet.data_3 = vision_pose.x;
-            tx_packet.data_4 = vision_pose.y;
-            tx_packet.data_5 = 0;
-            tx_packet.data_6 = 0;
-        }
-        else if (App::g_state.debug.telemetry_mode == 2) {
-            // 【模式 2】：IMU 四元数融合监控
-            const auto& probes = Subsystem::PoseEstimator::get_debug_probes();
-            const auto& cur_pose = App::g_state.physical.pose;
-
-            tx_packet.data_1 = probes.pitch_acc;     // 通道1: 假信号(红线)
-            tx_packet.data_2 = probes.pitch_gyro;    // 通道2: 积分信号(蓝线)
-            tx_packet.data_3 = probes.pitch_mahony;  // 通道3: 融合结果(绿线)
-            
-            // 为了在同一张图里看清，把 Kp(0~1) 放大 10 倍显示
-            tx_packet.data_4 = probes.kp_adaptive * 10.0f; // 通道4: 动态 Kp(放大10倍) 
-            
-            // 加速度模长减去 1G，再放大 10 倍，方便和 0 度基准线对比
-            tx_packet.data_5 = (probes.acc_norm - 1.0f) * 10.0f; 
-
-            // 附带监控我们最关心的 Yaw，看看它有没有漂移
-            tx_packet.data_6 = cur_pose.yaw;
-        }
-        else if (App::g_state.debug.telemetry_mode == 3) {
-            // 【模式 3】：视觉延时估计 & 纯视觉定位监控
-            const auto& lat = Subsystem::PoseEstimator::get_vision_latency_debug();
-            const auto& cur_pose = App::g_state.physical.pose;
-
-            tx_packet.data_1 = lat.est_raw_l_ms;    // 通道1: 单次配对原始 L (ms)
-            tx_packet.data_2 = lat.est_filt_l_ms;   // 通道2: 滤波后 L (ms)
-            tx_packet.data_3 = lat.used_l_ms;       // 通道3: 本帧实际采用 L (回退梯结果)
-            // 通道4: 待配对编码器拐点数 (放大10倍便于和 L 同图区分)
-            tx_packet.data_4 = (float)lat.est_pending_count * 10.0f;
-            // 通道5/6: 补偿后视觉 X/Y 与当前 pose X/Y 的偏差，看纯视觉闭环贴合程度
-            tx_packet.data_5 = lat.compensated_pose.x - cur_pose.x;
-            tx_packet.data_6 = lat.compensated_pose.y - cur_pose.y;
-        }
-        else if (App::g_state.debug.telemetry_mode == 4) {
-            // 【模式 4】：Stanley 横纠贴线监控
-            const auto& pose = App::g_state.physical.pose;
-            const auto& ctrl = App::g_state.control;
-            float sx = ctrl.segment_start.x, sy = ctrl.segment_start.y;
-            float dx = ctrl.current_target.x - sx;
-            float dy = ctrl.current_target.y - sy;
-            float len = sqrtf(dx * dx + dy * dy);
-            float e_ct = 0.0f, s_rem = 0.0f;
-            if (len > 1e-3f) {
-                float ax = dx / len, ay = dy / len;       // 沿轨单位向量
-                float nx = -ay, ny = ax;                  // 法向
-                e_ct = (pose.x - sx) * nx + (pose.y - sy) * ny;          // 横向偏差 cm
-                s_rem = (ctrl.current_target.x - pose.x) * ax +
-                        (ctrl.current_target.y - pose.y) * ay;           // 沿轨剩余 cm
-            }
-            tx_packet.data_1 = e_ct;                  // 通道1: 横向偏差 (压线目标=0)
-            tx_packet.data_2 = s_rem;                 // 通道2: 沿轨剩余距离
-            tx_packet.data_3 = pose.x;                // 通道3: pose X
-            tx_packet.data_4 = pose.y;                // 通道4: pose Y
-            tx_packet.data_5 = ctrl.current_target.x; // 通道5: 目标 X
-            tx_packet.data_6 = ctrl.current_target.y; // 通道6: 目标 Y
-        }
-        wireless_uart_send_buffer((uint8*)&tx_packet, sizeof(VofaJustFloat));
-    }
-
-    // 2. 增量式语义监测 (仅在监测开启，且数据有实质变更时发送)
-    if (is_monitoring_semantics) {
-        bool has_new_info = false;
-        const auto& current_labels = App::g_state.vision.semantic_labels;
-        
-        // 极速内存比对 (M7 执行这段循环耗时 < 0.1us)
-        for (int i = 0; i < SystemConfig::MAX_ENTITIES; ++i) {
-            if (current_labels[i] != cached_semantic_labels[i]) {
-                has_new_info = true;
-                cached_semantic_labels[i] = current_labels[i]; // 更新影子缓存
-            }
-        }
-        
-        // 只有当捕捉到“标签翻转”的跳变沿时，才组合字符串下发
-        if (has_new_info) {
-            dump_semantic_cache();
-        }
-    }
-    
-}
-
-/// \brief 接收并解析上位机指令
-///
-/// \details
-/// 无线串口按行拼装命令，收到换行后调用 execute_command
-/// 每次轮询末尾也会检查调试运动是否完成并回传耗时
-///
-void receive_and_parse_task() {
-    uint8_t temp_buf[32]; 
-    
-    // 读取接收缓冲区，返回实际读取到的数据个数
-    uint8_t data_len = wireless_uart_read_buffer(temp_buf, 32);
-    
-    if (data_len > 0) {
-        // 遍历读出的每一个字节，拼装字符串命令
-        for (uint8_t i = 0; i < data_len; i++) {
-            uint8_t byte = temp_buf[i];
-            
-            // 遇到回车或换行符，认为一条命令接收完毕
-            if (byte == '\n' || byte == '\r') {
-                if (rx_idx > 0) {
-                    rx_cmd_buf[rx_idx] = '\0';     // 加上字符串结束符
-                    
-                    execute_command(rx_cmd_buf);   // 解析并执行命令
-                    rx_idx = 0;                    // 清空缓冲区，准备下一次接收
-                }
-            } else {
-                if (rx_idx < sizeof(rx_cmd_buf) - 1) {
-                    rx_cmd_buf[rx_idx++] = byte;
-                }
-            }
-        }
-    }
-
-    // 每次轮询解析完串口数据后，顺便检查一下运动是否已经完成
-    check_movement_completion(); 
-}
-
-// ====================================================================
-// 内部实现细节：命令解析与执行
-// ====================================================================
 namespace {
 
-    /// \brief 启动一次运动耗时统计
-    /// \param mode 本次运动使用的控制模式
-    ///
-    void start_movement_timing(ControlMode mode) {
-        is_timing_movement = true;
-        current_timing_mode = mode;
-        movement_start_time = Core::Scheduler::get_sys_tick_ms(); 
-        
-        const char* msg = "[SYS] Movement Started.\r\n";
-        wireless_uart_send_buffer((uint8_t*)msg, strlen(msg));
+// ============================================================================
+// 模块 1：协议状态与文本工具
+// ============================================================================
+
+constexpr std::size_t COMMAND_CAPACITY = 96u;
+constexpr std::size_t WHEEL_COUNT = TUNING_WHEEL_COUNT;
+
+char command_buffer[COMMAND_CAPACITY] = {};
+std::size_t command_size = 0u;
+bool command_overflow = false;
+std::uint8_t selected_wheel = static_cast<std::uint8_t>(WHEEL_COUNT);
+
+bool movement_monitoring = false;
+ControlMode movement_mode = ControlMode::POINT_TRACKING;
+
+bool semantic_monitoring = false;
+int8_t cached_semantic_labels[SystemConfig::MAX_ENTITIES] = {};
+
+const char* skip_spaces(const char* text) {
+    while (*text == ' ' || *text == '\t') ++text;
+    return text;
+}
+
+char upper_ascii(char value) {
+    return value >= 'a' && value <= 'z'
+               ? static_cast<char>(value - 'a' + 'A')
+               : value;
+}
+
+bool same_word(const char* lhs, const char* rhs) {
+    while (*lhs != '\0' && *rhs != '\0' &&
+           upper_ascii(*lhs) == upper_ascii(*rhs)) {
+        ++lhs;
+        ++rhs;
+    }
+    return *lhs == '\0' && *rhs == '\0';
+}
+
+bool read_word(const char*& text, char* output, std::size_t capacity) {
+    text = skip_spaces(text);
+    std::size_t length = 0u;
+    while ((*text >= 'A' && *text <= 'Z') ||
+           (*text >= 'a' && *text <= 'z')) {
+        if (length + 1u < capacity) output[length++] = upper_ascii(*text);
+        ++text;
+    }
+    output[length] = '\0';
+    text = skip_spaces(text);
+    return length != 0u;
+}
+
+bool read_float(const char*& text, float& value) {
+    text = skip_spaces(text);
+    char* end = nullptr;
+    value = std::strtof(text, &end);
+    if (end == text || !std::isfinite(value)) return false;
+    text = skip_spaces(end);
+    return true;
+}
+
+bool read_int(const char*& text, int& value) {
+    text = skip_spaces(text);
+    char* end = nullptr;
+    const long parsed = std::strtol(text, &end, 10);
+    if (end == text) return false;
+    value = static_cast<int>(parsed);
+    text = skip_spaces(end);
+    return true;
+}
+
+void send_text(const char* text) {
+    wireless_uart_send_buffer(
+        reinterpret_cast<const uint8_t*>(text),
+        static_cast<uint32_t>(std::strlen(text)));
+}
+
+void send_format(const char* format, ...) {
+    char output[256];
+    va_list args;
+    va_start(args, format);
+    int length = std::vsnprintf(output, sizeof(output), format, args);
+    va_end(args);
+    if (length <= 0) return;
+    if (length >= static_cast<int>(sizeof(output))) {
+        length = static_cast<int>(sizeof(output)) - 1;
+    }
+    wireless_uart_send_buffer(
+        reinterpret_cast<const uint8_t*>(output),
+        static_cast<uint32_t>(length));
+}
+
+void send_error(const char* group, const char* reason) {
+    send_format("[%s] ERR: %s\r\n", group, reason);
+}
+
+bool debug_mode_active() {
+    return App::g_state.game.is_debug_mode || App::g_state.game.is_demo_mode;
+}
+
+Pose2D pose_snapshot() {
+    const std::uint32_t primask = interrupt_global_disable();
+    const Pose2D pose = App::g_state.physical.pose;
+    interrupt_global_enable(primask);
+    return pose;
+}
+
+// ============================================================================
+// 模块 2：波形、参数和语义输出
+// ============================================================================
+
+void send_wave_csv(const float (&data)[8]) {
+    send_format("%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\r\n",
+                static_cast<double>(data[0]), static_cast<double>(data[1]),
+                static_cast<double>(data[2]), static_cast<double>(data[3]),
+                static_cast<double>(data[4]), static_cast<double>(data[5]),
+                static_cast<double>(data[6]), static_cast<double>(data[7]));
+}
+
+const char* wheel_name(std::size_t index) {
+    constexpr const char* names[WHEEL_COUNT] = {"LF", "LB", "RF", "RB"};
+    return index < WHEEL_COUNT ? names[index] : "ALL";
+}
+
+void send_tune_snapshot() {
+    send_format("[TUNE] wheel=%u(%s)\r\n",
+                static_cast<unsigned>(selected_wheel), wheel_name(selected_wheel));
+    send_format("[TUNE] MD=%.3f MV=%.3f MA=%.3f AV=%.3f AA=%.3f BL=%.3f\r\n",
+                static_cast<double>(tune.dynamics.max_duty),
+                static_cast<double>(tune.dynamics.max_vel),
+                static_cast<double>(tune.dynamics.max_acc),
+                static_cast<double>(tune.dynamics.max_ang_vel),
+                static_cast<double>(tune.dynamics.max_ang_acc),
+                static_cast<double>(tune.dynamics.brake_limit));
+    for (std::size_t index = 0u; index < WHEEL_COUNT; ++index) {
+        const auto& wheel = tune.wheels[index];
+        send_format("[%s] KP=%.3f KI=%.3f KD=%.4f KV=%.3f KA=%.3f KB=%.3f KS=%.3f\r\n",
+                    wheel_name(index),
+                    static_cast<double>(wheel.pid.kp),
+                    static_cast<double>(wheel.pid.ki),
+                    static_cast<double>(wheel.pid.kd),
+                    static_cast<double>(wheel.kv),
+                    static_cast<double>(wheel.ka),
+                    static_cast<double>(wheel.kb),
+                    static_cast<double>(wheel.ks));
+    }
+}
+
+void send_tune_list() {
+    for (std::size_t index = 0u; index < TuningRegistry::screen_count(); ++index) {
+        const auto& item = TuningRegistry::screen_param(index);
+        send_format("[PARAM] %s=%.5f range[%.3f,%.3f]\r\n",
+                    item.key, static_cast<double>(*item.value),
+                    static_cast<double>(item.minimum),
+                    static_cast<double>(item.maximum));
+    }
+}
+
+void dump_semantic_cache() {
+    char output[256];
+    int offset = std::snprintf(output, sizeof(output), "[SEMANTIC] ");
+    for (int index = 0; index < SystemConfig::MAX_ENTITIES; ++index) {
+        if (offset >= 0 && offset < static_cast<int>(sizeof(output)) - 16) {
+            offset += std::snprintf(output + offset, sizeof(output) - offset,
+                                    "ID%d:%d ", index,
+                                    App::g_state.vision.semantic_labels[index]);
+        }
+    }
+    if (offset >= 0 && offset < static_cast<int>(sizeof(output)) - 2) {
+        output[offset++] = '\r';
+        output[offset++] = '\n';
+        wireless_uart_send_buffer(reinterpret_cast<const uint8_t*>(output),
+                                  static_cast<uint32_t>(offset));
+    }
+}
+
+void update_semantic_monitor() {
+    if (!semantic_monitoring) return;
+
+    bool changed = false;
+    for (int index = 0; index < SystemConfig::MAX_ENTITIES; ++index) {
+        const int8_t current = App::g_state.vision.semantic_labels[index];
+        if (current != cached_semantic_labels[index]) {
+            cached_semantic_labels[index] = current;
+            changed = true;
+        }
+    }
+    if (changed) dump_semantic_cache();
+}
+
+// ============================================================================
+// 模块 3：调试运动与参数写入
+// ============================================================================
+
+void start_movement_monitoring(ControlMode mode) {
+    movement_monitoring = true;
+    movement_mode = mode;
+    send_text("[MOVE] START\r\n");
+}
+
+void stop_at_current_pose() {
+    movement_monitoring = false;
+    Algorithm::Tracker::track_point(pose_snapshot());
+}
+
+void check_movement_completion() {
+    if (!movement_monitoring) return;
+
+    bool done = false;
+    if (movement_mode == ControlMode::AUTO_TRACKING) {
+        done = App::g_state.control.tracker_state == TrackerState::FINISHED;
+    } else {
+        const Pose2D pose = pose_snapshot();
+        const Pose2D target = App::g_state.control.current_target;
+        const float dx = target.x - pose.x;
+        const float dy = target.y - pose.y;
+        float dyaw = target.yaw - pose.yaw;
+        while (dyaw > 180.0f) dyaw -= 360.0f;
+        while (dyaw < -180.0f) dyaw += 360.0f;
+        done = std::sqrt(dx * dx + dy * dy) < 0.8f &&
+               std::fabs(dyaw) < 2.0f && App::g_state.physical.is_stopped;
     }
 
-    /// \brief 检查当前运动是否完成并输出耗时
-    ///
-    /// \details
-    /// AUTO_TRACKING 直接使用 Tracker 状态，POINT_TRACKING 通过位置、角度和停稳状态综合判断
-    ///
-    void check_movement_completion() {
-        if (!is_timing_movement) return;
+    if (done) {
+        movement_monitoring = false;
+        send_text("[MOVE] DONE\r\n");
+    }
+}
 
-        bool is_done = false;
-        const auto& ctrl = App::g_state.control;
-        const auto& phys = App::g_state.physical;
+TuningRegistry::SetResult set_wheel_param(char code, float value) {
+    const std::size_t first = selected_wheel < WHEEL_COUNT ? selected_wheel : 0u;
+    const std::size_t last = selected_wheel < WHEEL_COUNT
+                                 ? selected_wheel + 1u : WHEEL_COUNT;
+    for (std::size_t index = first; index < last; ++index) {
+        char key[3] = {static_cast<char>('0' + index), upper_ascii(code), '\0'};
+        const auto result = TuningRegistry::set_by_key(key, value);
+        if (result != TuningRegistry::SetResult::OK) return result;
+    }
+    return TuningRegistry::SetResult::OK;
+}
 
-        if (current_timing_mode == ControlMode::AUTO_TRACKING) {
-            // 路径循迹模式：听从 Tracker 的状态报告
-            if (ctrl.tracker_state == TrackerState::FINISHED) {
-                is_done = true;
-            }
+bool is_wheel_param_code(char code) {
+    const char normalized = upper_ascii(code);
+    return normalized == 'P' || normalized == 'I' || normalized == 'D' ||
+           normalized == 'V' || normalized == 'A' || normalized == 'B' ||
+           normalized == 'S';
+}
+
+void process_tune_assignment(const char* text) {
+    text = skip_spaces(text);
+    if (text[0] == '\0' || text[1] == '\0') {
+        send_error("TUNE", "bad key");
+        return;
+    }
+
+    char key[3] = {upper_ascii(text[0]), upper_ascii(text[1]), '\0'};
+    text = skip_spaces(text + 2);
+    if (*text == ':' || *text == '=') text = skip_spaces(text + 1);
+
+    float value = 0.0f;
+    if (!read_float(text, value) || *text != '\0') {
+        send_error("TUNE", "bad value");
+        return;
+    }
+
+    TuningRegistry::SetResult result = TuningRegistry::SetResult::UNKNOWN_KEY;
+    if (key[0] == 'W' && key[1] == 'H') {
+        const int wheel = static_cast<int>(value);
+        if (std::fabs(value - static_cast<float>(wheel)) < 0.001f &&
+            wheel >= 0 && wheel <= static_cast<int>(WHEEL_COUNT)) {
+            selected_wheel = static_cast<std::uint8_t>(wheel);
+            result = TuningRegistry::SetResult::OK;
         } else {
-            // 单点调试模式：根据物理状态反馈闭环判断
-            float dx = ctrl.current_target.x - phys.pose.x;
-            float dy = ctrl.current_target.y - phys.pose.y;
-            float dist = std::sqrt(dx * dx + dy * dy);
-            
-            // 航向误差归一化 [-180, 180]
-            float dyaw = ctrl.current_target.yaw - phys.pose.yaw;
-            while (dyaw > 180.0f) dyaw -= 360.0f;
-            while (dyaw < -180.0f) dyaw += 360.0f;
-
-            // 严苛结束条件：位置误差 < 0.8cm，角度误差 < 2度，且底层速度环判定彻底静止
-            if (dist < 0.8f && std::abs(dyaw) < 2.0f && phys.is_stopped) {
-                is_done = true;
-            }
+            result = TuningRegistry::SetResult::OUT_OF_RANGE;
         }
-
-        // 触发完成，结算耗时
-        if (is_done) {
-            uint32_t elapsed_ms = Core::Scheduler::get_sys_tick_ms() - movement_start_time;
-            is_timing_movement = false;
-            
-            char msg[64];
-            int len = snprintf(msg, sizeof(msg), "[SYS] Target Reached! Time: %lu ms\r\n", elapsed_ms);
-            wireless_uart_send_buffer((uint8_t*)msg, len);
-        }
+    } else if (key[0] == 'K' && is_wheel_param_code(key[1])) {
+        result = set_wheel_param(key[1], value);
+    } else {
+        result = TuningRegistry::set_by_key(key, value);
     }
 
-    /// \brief 将当前语义缓存池发送给上位机
-    ///
-    /// \details
-    /// 字符串长度受 dump_buf 限制，追加时预留余量防止越界
-    ///
-    void dump_semantic_cache() {
-        static char dump_buf[256];
-        const auto& labels = App::g_state.vision.semantic_labels;
-        
-        // 组装前缀
-        int offset = snprintf(dump_buf, sizeof(dump_buf), "[SEMANTIC_DUMP] ");
-        
-        // 遍历整个语义池，将每个实体的 ID 和标签值追加到字符串中
-        for (int i = 0; i < SystemConfig::MAX_ENTITIES; ++i) {
-            // 安全追加字符串，防止越界
-            if (offset < sizeof(dump_buf) - 16) {
-                offset += snprintf(dump_buf + offset, sizeof(dump_buf) - offset, 
-                                    "ID%d:%d ", i, labels[i]);
-            }
+    if (result == TuningRegistry::SetResult::OK) {
+        send_format("[TUNE] %s=%.5f\r\n", key, static_cast<double>(value));
+    } else if (result == TuningRegistry::SetResult::OUT_OF_RANGE) {
+        send_error("TUNE", "value out of range");
+    } else {
+        send_error("TUNE", "unknown key");
+    }
+}
+
+// ============================================================================
+// 模块 4：控制命令解析
+// ============================================================================
+
+void process_tel_command(const char* text) {
+    char operation[12] = {};
+    if (!read_word(text, operation, sizeof(operation))) {
+        send_error("TEL", "use Q, MODE <0..3>, or OFF");
+    } else if (same_word(operation, "Q")) {
+        send_format("[TEL] mode=%d (0=wheel 1=pose 2=imu 3=latency)\r\n",
+                    App::g_state.debug.telemetry_mode);
+    } else if (same_word(operation, "OFF")) {
+        App::g_state.debug.telemetry_mode = -1;
+        send_text("[TEL] OFF\r\n");
+    } else if (same_word(operation, "MODE")) {
+        int mode = -1;
+        if (!read_int(text, mode) || *text != '\0' || mode < 0 || mode > 3) {
+            send_error("TEL", "mode must be 0..3");
+        } else {
+            App::g_state.debug.telemetry_mode = mode;
+            send_format("[TEL] mode=%d\r\n", mode);
         }
-        
-        // 添加回车换行，方便 VOFA+ 终端显示
-        offset += snprintf(dump_buf + offset, sizeof(dump_buf) - offset, "\r\n");
-        
-        // 阻塞/异步推入发送缓冲
-        wireless_uart_send_buffer(reinterpret_cast<uint8_t*>(dump_buf), offset);
+    } else {
+        send_error("TEL", "unknown op");
+    }
+}
+
+void process_tune_command(const char* text) {
+    char operation[12] = {};
+    if (!read_word(text, operation, sizeof(operation))) {
+        send_error("TUNE", "use ON, OFF, Q, or LIST");
+    } else if (same_word(operation, "Q")) {
+        send_tune_snapshot();
+    } else if (same_word(operation, "LIST")) {
+        send_tune_list();
+    } else if (!debug_mode_active()) {
+        send_error("TUNE", "debug mode only");
+    } else if (same_word(operation, "ON")) {
+        selected_wheel = static_cast<std::uint8_t>(WHEEL_COUNT);
+        stop_at_current_pose();
+        App::g_state.debug.telemetry_mode = 0;
+        send_text("[TUNE] ON\r\n");
+        send_tune_snapshot();
+    } else if (same_word(operation, "OFF")) {
+        stop_at_current_pose();
+        App::g_state.debug.telemetry_mode = -1;
+        send_text("[TUNE] OFF\r\n");
+    } else {
+        send_error("TUNE", "unknown op");
+    }
+}
+
+void process_move_command(const char* text) {
+    if (!debug_mode_active()) {
+        send_error("MOVE", "debug mode only");
+        return;
     }
 
-    /// \brief 解析并执行上位机字符串命令
-    /// \param cmd 以 ! 开头的一行命令
-    ///
-    /// \details
-    /// 支持参数调节、视觉请求、路径调试和点位移动
-    /// 格式示例：!S Q 1.5 表示设置 yaw Kp，!M P x y yaw 表示移动到绝对位姿
-    ///
-    void execute_command(const char* cmd) {
+    char operation[12] = {};
+    if (!read_word(text, operation, sizeof(operation))) {
+        send_error("MOVE", "use POS, REL, HOME, or STOP");
+        return;
+    }
 
-        if (cmd[0] != '!') return;     // 命令必须以 ! 开头
-        char type = cmd[1];            // 主类型: 'S' 设置参数, 'M' 移动指令
-        char sub  = cmd[2];            // 子类型
-        float value = atof(&cmd[3]);   // 把后面的字符串转为浮点数 (跳过空格自动处理)
+    Pose2D target = pose_snapshot();
+    if (same_word(operation, "HOME") || same_word(operation, "STOP")) {
+        stop_at_current_pose();
+        send_text("[MOVE] STOP\r\n");
+    } else if (same_word(operation, "POS")) {
+        if (!read_float(text, target.x) || !read_float(text, target.y) ||
+            !read_float(text, target.yaw) || *text != '\0') {
+            send_error("MOVE", "use POS <x_cm> <y_cm> <yaw_deg>");
+            return;
+        }
+        Algorithm::Tracker::track_point(target);
+        start_movement_monitoring(ControlMode::POINT_TRACKING);
+    } else if (same_word(operation, "REL")) {
+        float dx = 0.0f;
+        float dy = 0.0f;
+        float dyaw = 0.0f;
+        if (!read_float(text, dx) || !read_float(text, dy) ||
+            !read_float(text, dyaw) || *text != '\0') {
+            send_error("MOVE", "use REL <dx_cm> <dy_cm> <dyaw_deg>");
+            return;
+        }
+        target.x += dx;
+        target.y += dy;
+        target.yaw += dyaw;
+        Algorithm::Tracker::track_point(target);
+        start_movement_monitoring(ControlMode::POINT_TRACKING);
+    } else {
+        send_error("MOVE", "unknown op");
+    }
+}
 
-        const auto& cur_pose = App::g_state.physical.pose;
-        Point2D cur_pos = {cur_pose.x, cur_pose.y};
-        float cur_yaw_deg = cur_pose.yaw;
+void process_path_command(const char* text) {
+    if (!debug_mode_active()) {
+        send_error("PATH", "debug mode only");
+        return;
+    }
 
-        switch (type) {
-            case 'S':  // 参数设置指令
-                switch (sub) {
-                    case 'Q': tune.pid_yaw.kp = value; break;
-                    case 'W': tune.pid_yaw.ki = value; break;
-                    case 'E': tune.pid_yaw.kd = value; break;
-                    case 'R': tune.pid_speed.kp = value; break;
-                    case 'T': tune.pid_speed.ki = value; break;
-                    case 'Y': tune.pid_speed.kd = value; break;
-                    case 'U': tune.ff.kv = value; break;
-                    case 'I': tune.ff.ka = value; break;
-                    case 'O': tune.ff.k_stiction = value; break;
-                    
-                    case 'A': tune.dynamics.max_duty = value; break;
-                    case 'S':
-                        tune.dynamics.max_vel = value;
-                        (void)TuningDefaults::clamp_if_outside(tune.dynamics.max_vel,
-                                                                TuningDefaults::MIN_DYNAMICS_MAX_VEL,
-                                                                TuningDefaults::MAX_DYNAMICS_MAX_VEL,
-                                                                TuningDefaults::DEFAULT_DYNAMICS_MAX_VEL);
-                        break;
-                    case 'D': tune.dynamics.max_acc = value; break;
-                    case 'F': tune.dynamics.max_ang_vel = value; break;
-                    case 'H': tune.dynamics.max_ang_acc = value; break;
-                    case 'J': tune.dynamics.kinematic_gain_x = value; break;
-                    case 'K': tune.dynamics.kinematic_gain_y = value; break;
-                    case 'L': tune.dynamics.brake_limit = value; break;
-
-                    case 'Z': tune.tracker.reach_radius = value; break;
-                    case 'X': tune.tracker.reach_radius_min = value; break;
-                    // 过弯和视觉校正常用参数，便于现场用无线串口快速调试
-                    case 'B': tune.tracker.corner_pass_speed = value; break;
-                    case 'N': tune.tracker.corner_switch_window = value; break;
-                    case 'M': tune.tracker.corner_line_tolerance = value; break;
-                    case 'G': tune.tracker.vision_reject_dist = value; break;
-                    case 'C': tune.tracker.ang_tolerance = value; break;
-                    case 'V': tune.estimate.mahony_kp = value; break;
-                    case '1': tune.latency.encoder_latency_gain = value; break;
-                    case '2': tune.latency.vision_latency_ms = value; break;
-                    case '3': Algorithm::Tracker::set_box_push_final_press_cm(value); break;
-
-                    case 'P': App::g_state.debug.telemetry_mode = (int)value; break; 
-                    default: return;
-                }
-                break;
-            
-            case 'V':  // 视觉控制类指令
-                switch (sub) {
-                    case 'R': {
-                        if (value == 1) Subsystem::Vision::request_map_ART1();
-                        else if (value == 2) Subsystem::Vision::request_pose_ART1();
-                        break;
-                    }
-                    case 'E': {
-                        // !V E 1 开启实时延时估计，!V E 0 关闭(回退固定 vision_latency_ms)
-                        tune.latency.enable_estimation = (value > 0.5f);
-                        wireless_uart_send_buffer(
-                            tune.latency.enable_estimation ?
-                                (uint8_t*)"[SYS] Latency Est: ON\r\n" :
-                                (uint8_t*)"[SYS] Latency Est: OFF\r\n",
-                            tune.latency.enable_estimation ? 23 : 24);
-                        break;
-                    }
-                    case 'G': {
-                        // !V G 1 开启监测，!V G 0 关闭监测
-                        if (value > 0.5f) {
-                            is_monitoring_semantics = true;
-                            // 将语义缓存全刷为 -2 (无效标签)，强制下一次轮询立即发送一次全量数据
-                            memset(cached_semantic_labels, -2, sizeof(cached_semantic_labels));
-                            wireless_uart_send_buffer((uint8_t*)"[SYS] Semantic Monitor: ON\r\n", 28);
-                        } else {
-                            is_monitoring_semantics = false;
-                            wireless_uart_send_buffer((uint8_t*)"[SYS] Semantic Monitor: OFF\r\n", 29);
-                        }
-                        break;
-                    }
-                    default: return;
-                }
-                break;
-
-            case 'L':  // 拐点延时估计调参指令 (latency estimator)
-                switch (sub) {
-                    case 'T': tune.latency.turn_thresh_deg = value; break;  // 拐点触发转角阈值 deg
-                    case 'E': tune.latency.enc_v_min = value; break;        // 编码器速度门 cm/20ms
-                    case 'V': tune.latency.vis_v_min = value; break;        // 视觉速度门 cm/frame
-                    case 'R': tune.latency.refractory_ms = value; break;    // 去抖间隔 ms
-                    case 'N': tune.latency.l_min_ms = value; break;         // L 接受下限 ms
-                    case 'X': tune.latency.l_max_ms = value; break;         // L 接受上限 ms
-                    case 'D': tune.latency.dtheta_tol_deg = value; break;   // 转角量级容差 deg
-                    case 'A': tune.latency.lowpass_alpha = value; break;    // L 低通系数
-                    case 'S': tune.latency.l_stale_ms = value; break;       // L 过期时间 ms
-                    default: return;
-                }
-                break;
-
-            case 'T':  // 运动控制调参（Stanley横纠 / 拐点略停 / 炸弹等待）
-                switch (sub) {
-                    case 'E': tune.stanley.enable = (value > 0.5f); break;  // Stanley 开关
-                    case 'K': tune.stanley.k_ct = value; break;            // 横向误差增益
-                    case 'F': tune.stanley.k_soft = value; break;          // 软化速度 cm/s
-                    case 'L': tune.stanley.v_lat_max = value; break;       // 横纠速度上限 cm/s
-                    case 'P': tune.tracker.corner_pause_speed = value; break; // 拐点略停阈值 cm/s
-                    case 'B': tune.bomb.explosion_wait_ms = value; break;  // 炸弹引信等待 ms
-                    case 'G': tune.feel.brake_hold_gain = value; break;    // 主动刹车前馈增益（刹更狠锁更死）
-                    case 'A': tune.feel.corner_turn_acc = value; break;    // 切向方向变化加速度限 cm/s^2（大=切更直不磨圆）
-                    // !T S 已移除：stop_approach_band_cm 字段保留占位但无任何行为（2026-07-15 删 StopBand）
-                    case 'H': tune.stop_approach_brake_gain = value; break; // 停车接近区刹车倍率（大=到点抖减速更狠进点更慢过冲更小，1=旧行为）
-                    case 'D': tune.short_seg_len_cm = value; break;        // 短段判定阈值 cm（段全长<=此值走高加速起步；设1≈关闭）
-                    case 'V': tune.short_seg_accel = value; break;         // 短段起步加速度 cm/s^2（只压加速斜坡，不动刹车）
-                    case 'Z': tune.approach_zone_cm = value; break;        // 停车接近区提前刹车距离上限 cm（默认40；0.5≈关闭回纯sqrt）
-                    case 'R': tune.approach_zone_ratio = value; break;     // 接近区占段全长比例（默认0.25：20cm段→5cm）
-                    case 'C': tune.approach_brake_acc = value; break;      // 接近区缓减速度 cm/s^2（默认15，越小末端越慢越准）
-                    case 'N': tune.approach_enable = (value > 0.5f) ? 1.0f : 0.0f; break; // 接近区总开关（!T N 1 开 / !T N 0 关，一键切）
-                    default: return;
-                }
-                break;
-
-            case 'W': {  // 每轮轮速环调参：!W <轮 0-3> <字段> <值>，字段 kp/ki/kd/kv/ka/kb/ks
-                int wi = -1; char field[8] = {0}; float v = 0.0f;
-                if (sscanf(&cmd[2], "%d %7s %f", &wi, field, &v) == 3 && wi >= 0 && wi < 4) {
-                    WheelControlParams& w = tune.wheels[wi];
-                    if      (strcmp(field, "kp") == 0) w.pid.kp = v;
-                    else if (strcmp(field, "ki") == 0) w.pid.ki = v;
-                    else if (strcmp(field, "kd") == 0) w.pid.kd = v;
-                    else if (strcmp(field, "kv") == 0) w.kv = v;
-                    else if (strcmp(field, "ka") == 0) w.ka = v;
-                    else if (strcmp(field, "kb") == 0) w.kb = v;
-                    else if (strcmp(field, "ks") == 0) w.ks = v;
-                }
-                break;
+    char operation[12] = {};
+    if (!read_word(text, operation, sizeof(operation))) {
+        send_error("PATH", "use CLEAR, ADD, or EXEC");
+    } else if (same_word(operation, "CLEAR")) {
+        auto& plan = App::g_state.planning;
+        plan.physical_path.clear();
+        plan.force_stop_at_wp.clear();
+        plan.current_wp_idx = 0u;
+        send_text("[PATH] CLEAR\r\n");
+    } else if (same_word(operation, "ADD")) {
+        float x = 0.0f;
+        float y = 0.0f;
+        if (!read_float(text, x) || !read_float(text, y) || *text != '\0') {
+            send_error("PATH", "use ADD <x_cm> <y_cm>");
+        } else {
+            auto& plan = App::g_state.planning;
+            if (plan.physical_path.size() >= SystemConfig::MAX_PATH_LENGTH) {
+                send_error("PATH", "path full");
+            } else {
+                plan.physical_path.push_back({x, y});
+                plan.force_stop_at_wp.push_back(0u);
+                send_format("[PATH] ADD %.2f %.2f\r\n",
+                            static_cast<double>(x), static_cast<double>(y));
             }
+        }
+    } else if (same_word(operation, "EXEC")) {
+        App::g_state.control.mode = ControlMode::AUTO_TRACKING;
+        App::g_state.control.tracker_state = TrackerState::TRACKING;
+        start_movement_monitoring(ControlMode::AUTO_TRACKING);
+    } else {
+        send_error("PATH", "unknown op");
+    }
+}
 
-            case 'P': { // 多点路径下发指令
-                auto& plan = App::g_state.planning;
-                if (sub == 'C') {
-                    // !P C -> 清空航点列表
-                    plan.physical_path.clear();
-                    plan.force_stop_at_wp.clear();
-                    plan.current_wp_idx = 0;
-                    wireless_uart_send_buffer((uint8_t*)"[PATH] Cleared.\r\n", 17);
-                } 
-                else if (sub == 'A') { 
-                    // !P A 10.5 20.0 -> 添加航点
-                    float px, py;
-                    if (sscanf(&cmd[3], "%f %f", &px, &py) == 2) {
-                        if (plan.physical_path.size() < SystemConfig::MAX_PATH_LENGTH) {
-                            plan.physical_path.push_back({px, py});
-                            plan.force_stop_at_wp.push_back(0U);
-                        }
-                    }
-                }
-                else if (sub == 'E') { 
-                    // !P E -> 切换模式，强制执行路径
-                    App::g_state.control.mode = ControlMode::AUTO_TRACKING;
-                    App::g_state.control.tracker_state = TrackerState::TRACKING;
-                    start_movement_timing(ControlMode::AUTO_TRACKING);
-                }
-                break;
-            }
+void process_vision_command(const char* text) {
+    char operation[12] = {};
+    if (!read_word(text, operation, sizeof(operation))) {
+        send_error("VISION", "use MAP, POSE, or LAG ON/OFF");
+    } else if (same_word(operation, "MAP")) {
+        Subsystem::Vision::request_map_ART1();
+        send_text("[VISION] MAP REQUESTED\r\n");
+    } else if (same_word(operation, "POSE")) {
+        Subsystem::Vision::request_pose_ART1();
+        send_text("[VISION] POSE REQUESTED\r\n");
+    } else if (same_word(operation, "LAG")) {
+        char state[8] = {};
+        if (!read_word(text, state, sizeof(state)) ||
+            (!same_word(state, "ON") && !same_word(state, "OFF"))) {
+            send_error("VISION", "use LAG ON or OFF");
+        } else {
+            tune.latency.enable_estimation = same_word(state, "ON") ? 1.0f : 0.0f;
+            send_text(tune.latency.enable_estimation > 0.5f
+                          ? "[VISION] LAG ON\r\n" : "[VISION] LAG OFF\r\n");
+        }
+    } else {
+        send_error("VISION", "unknown op");
+    }
+}
 
-            case 'M': {  // 全局移动与位移指令
-                float value = atof(&cmd[3]);
-                // 强制切入调试模式，不再理会 Tracker
-                App::g_state.control.mode = ControlMode::POINT_TRACKING;
-                Pose2D target = App::g_state.control.current_target; 
+void process_semantic_command(const char* text) {
+    char operation[8] = {};
+    if (!read_word(text, operation, sizeof(operation))) {
+        send_error("SEM", "use ON, OFF, or Q");
+    } else if (same_word(operation, "ON")) {
+        semantic_monitoring = true;
+        std::memset(cached_semantic_labels, -2, sizeof(cached_semantic_labels));
+        send_text("[SEM] ON\r\n");
+    } else if (same_word(operation, "OFF")) {
+        semantic_monitoring = false;
+        send_text("[SEM] OFF\r\n");
+    } else if (same_word(operation, "Q")) {
+        dump_semantic_cache();
+    } else {
+        send_error("SEM", "unknown op");
+    }
+}
 
-                switch (sub) {
-                    case 'P': {
-                        // !M P 10.0 20.0 90.0 -> 直接设置目标位姿
-                        float tx, ty, tyaw;
-                        if (sscanf(&cmd[3], "%f %f %f", &tx, &ty, &tyaw) == 3) {
-                            target.x = tx;
-                            target.y = ty;
-                            target.yaw = tyaw;
-                        }
-                        break;
-                    }
+void process_command(const char* text) {
+    char group[12] = {};
+    if (!read_word(text, group, sizeof(group))) return;
 
-                    case 'W': target.y += value; break;                  // 前进 (绝对坐标系 +Y 方向)
-                    case 'S': target.y -= value; break;                  // 后退 (绝对坐标系 -Y 方向)
-                    case 'A': target.x -= value; break;                  // 向左 (绝对坐标系 -X 方向)
-                    case 'D': target.x += value; break;                  // 向右 (绝对坐标系 +X 方向)
-                    case 'T': target.yaw = cur_yaw_deg + value; break;   // 转向 (逆时针为正)
-                    case 'M': target = { cur_pos.x, cur_pos.y, cur_yaw_deg }; break;
-                    default: return;
-                }
+    if (same_word(group, "TEL")) process_tel_command(text);
+    else if (same_word(group, "TUNE")) process_tune_command(text);
+    else if (same_word(group, "MOVE")) process_move_command(text);
+    else if (same_word(group, "PATH")) process_path_command(text);
+    else if (same_word(group, "VISION")) process_vision_command(text);
+    else if (same_word(group, "SEM")) process_semantic_command(text);
+    else if (same_word(group, "SAVE")) {
+        if (!debug_mode_active()) send_error("SAVE", "debug mode only");
+        else send_text(Storage::save_params() ? "[SAVE] OK\r\n" : "[SAVE] FAILED\r\n");
+    } else if (same_word(group, "LOAD")) {
+        if (!debug_mode_active()) send_error("LOAD", "debug mode only");
+        else send_text(Storage::load_params() ? "[LOAD] OK\r\n" : "[LOAD] FAILED\r\n");
+    } else if (same_word(group, "RESET")) {
+        if (!debug_mode_active()) send_error("RESET", "debug mode only");
+        else {
+            Storage::reset_params();
+            send_text("[RESET] OK\r\n");
+        }
+    } else {
+        send_error("CMD", "unknown group");
+    }
+}
 
-                // 通过 Tracker 进入点跟踪，顺带清掉旧路径和视觉校正状态
-                Algorithm::Tracker::track_point(target);
-                start_movement_timing(ControlMode::POINT_TRACKING);
-                break;
+void finish_command() {
+    if (command_overflow) {
+        send_error("CMD", "line too long");
+    } else if (command_size != 0u) {
+        command_buffer[command_size] = '\0';
+        const char* line = skip_spaces(command_buffer);
+        if (*line == '!') process_command(line + 1);
+        else if (*line != '\0') process_tune_assignment(line);
+    }
+    command_size = 0u;
+    command_overflow = false;
+}
+
+} // namespace
+
+// ============================================================================
+// 对外接口
+// ============================================================================
+
+void init() {
+    wireless_uart_init();
+    command_size = 0u;
+    command_overflow = false;
+    selected_wheel = static_cast<std::uint8_t>(WHEEL_COUNT);
+    App::g_state.debug.telemetry_mode = -1;
+}
+
+void receive_and_parse_task() {
+    uint8_t bytes[32];
+    const uint32_t count = wireless_uart_read_buffer(bytes, sizeof(bytes));
+    for (uint32_t index = 0u; index < count; ++index) {
+        const uint8_t byte = bytes[index];
+        if (byte == '\r' || byte == '\n') {
+            finish_command();
+        } else if (!command_overflow) {
+            if (command_size + 1u < COMMAND_CAPACITY) {
+                command_buffer[command_size++] = static_cast<char>(byte);
+            } else {
+                command_overflow = true;
             }
         }
     }
-    } // namespace (anonymous)
+    check_movement_completion();
+}
+
+void send_wave_data() {
+    float data[8] = {};
+    const int mode = App::g_state.debug.telemetry_mode;
+    if (mode == 0) {
+        const WheelSpeed4 target = Subsystem::Chassis::get_target_wheel_speeds();
+        const std::uint32_t primask = interrupt_global_disable();
+        const WheelSpeed4 current = App::g_state.physical.current_wheel_speed;
+        interrupt_global_enable(primask);
+        data[0] = target.lf; data[1] = target.lb;
+        data[2] = target.rf; data[3] = target.rb;
+        data[4] = current.lf; data[5] = current.lb;
+        data[6] = current.rf; data[7] = current.rb;
+        send_wave_csv(data);
+    } else if (mode == 1) {
+        const std::uint32_t primask = interrupt_global_disable();
+        const Pose2D target = App::g_state.control.current_target;
+        const Pose2D fused = App::g_state.physical.pose;
+        const Pose2D vision = App::g_state.vision.art1_pose;
+        interrupt_global_enable(primask);
+        const Pose2D encoder = Subsystem::PoseEstimator::get_encoder_pose();
+        data[0] = target.x; data[1] = fused.x;
+        data[2] = vision.x; data[3] = encoder.x;
+        data[4] = target.y; data[5] = fused.y;
+        data[6] = vision.y; data[7] = encoder.y;
+        send_wave_csv(data);
+    } else if (mode == 2) {
+        const auto& probes = Subsystem::PoseEstimator::get_debug_probes();
+        data[0] = probes.pitch_acc;
+        data[1] = probes.pitch_gyro;
+        data[2] = probes.pitch_mahony;
+        data[3] = probes.kp_adaptive;
+        data[4] = probes.acc_norm;
+        data[5] = App::g_state.physical.yaw_rate;
+        data[6] = imu_icm42688.data.gyro_x;
+        data[7] = App::g_state.physical.pose.yaw;
+        send_wave_csv(data);
+    } else if (mode == 3) {
+        const auto& latency = Subsystem::PoseEstimator::get_vision_latency_debug();
+        const Pose2D pose = pose_snapshot();
+        data[0] = latency.est_raw_l_ms;
+        data[1] = latency.est_filt_l_ms;
+        data[2] = latency.used_l_ms;
+        data[3] = static_cast<float>(latency.est_pending_count);
+        data[4] = latency.compensated_pose.x - pose.x;
+        data[5] = latency.compensated_pose.y - pose.y;
+        data[6] = latency.correction_x;
+        data[7] = latency.correction_y;
+        send_wave_csv(data);
+    }
+
+    update_semantic_monitor();
+}
+
+void log_vision_calibration(float vision_x, float vision_y, float vision_yaw,
+                            float odom_x, float odom_y, float odom_yaw,
+                            bool accepted) {
+    float yaw_error = std::fabs(vision_yaw - odom_yaw);
+    if (yaw_error > 180.0f) yaw_error = 360.0f - yaw_error;
+    send_format("[VIS_CALIB] %s Vis(%.1f,%.1f,%.1f) Odom(%.1f,%.1f,%.1f) Err(%.1f,%.1f,%.1f)\r\n",
+                accepted ? "ACCEPT" : "REJECT",
+                static_cast<double>(vision_x), static_cast<double>(vision_y),
+                static_cast<double>(vision_yaw), static_cast<double>(odom_x),
+                static_cast<double>(odom_y), static_cast<double>(odom_yaw),
+                static_cast<double>(std::fabs(vision_x - odom_x)),
+                static_cast<double>(std::fabs(vision_y - odom_y)),
+                static_cast<double>(yaw_error));
+}
 
 } // namespace Subsystem::Telemetry

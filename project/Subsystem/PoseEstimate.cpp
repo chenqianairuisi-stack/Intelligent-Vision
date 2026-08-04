@@ -48,8 +48,7 @@ namespace {
     DTCM_DATA AsyncCalibState s_calib_state = AsyncCalibState::IDLE;  // 当前标定状态
     DTCM_DATA uint32_t s_last_calib_vision_seq = 0;                   // 标定流程已消费的最后一帧视觉序号
 
-    constexpr uint32_t MAX_VISION_LATENCY_LOOKBACK_MS =
-        static_cast<uint32_t>(TuningDefaults::MAX_VISION_LATENCY_MS);
+    constexpr uint32_t MAX_VISION_LATENCY_LOOKBACK_MS = 1000U;
     constexpr uint32_t ODOM_HISTORY_LOOKBACK_MS = 1000U;
     static_assert(ODOM_HISTORY_LOOKBACK_MS >= MAX_VISION_LATENCY_LOOKBACK_MS,
                   "Odom history must cover the configured vision latency range");
@@ -74,7 +73,12 @@ namespace {
     constexpr float PLUSE_TO_CM = (2.0f * PI * SystemConfig::WHEEL_RADIUS) / SystemConfig::PULSES_PER_REV;  // 编码器计数转换为轮子移动的距离（cm）
     constexpr float SAMPLE_FREQ = 1.0f / SystemConfig::PIT_CH0_DT_S;  // 采样频率 (Hz)，根据系统定时器周期计算
     constexpr uint32_t VISION_POSE_MAX_AGE_MS = 300;  // 视觉位姿数据的最大有效时间，超过这个时间就丢弃
-    constexpr float DEFAULT_ENCODER_LATENCY_GAIN = TuningDefaults::DEFAULT_ENCODER_LATENCY_GAIN;
+    constexpr float DEFAULT_ENCODER_LATENCY_GAIN =
+        DEFAULT_TUNE_CONFIG.latency.encoder_latency_gain;
+    constexpr float MIN_ENCODER_LATENCY_GAIN = 0.01f;
+    constexpr float MAX_ENCODER_LATENCY_GAIN = 2.0f;
+    constexpr float DEFAULT_VISION_LATENCY_MS =
+        DEFAULT_TUNE_CONFIG.latency.vision_latency_ms;
     constexpr float VISION_LATERAL_DEADBAND_CM = 0.15f;
     constexpr float VISION_LATERAL_MAX_STEP_CM = 0.85f;
     constexpr float VISION_LATERAL_CORRECTION_GAIN = 0.90f;
@@ -103,11 +107,11 @@ namespace {
         if (!std::isfinite(gain)) {
             gain = DEFAULT_ENCODER_LATENCY_GAIN;
         }
-        if (gain < TuningDefaults::MIN_ENCODER_LATENCY_GAIN) {
-            return TuningDefaults::MIN_ENCODER_LATENCY_GAIN;
+        if (gain < MIN_ENCODER_LATENCY_GAIN) {
+            return MIN_ENCODER_LATENCY_GAIN;
         }
-        if (gain > TuningDefaults::MAX_ENCODER_LATENCY_GAIN) {
-            return TuningDefaults::MAX_ENCODER_LATENCY_GAIN;
+        if (gain > MAX_ENCODER_LATENCY_GAIN) {
+            return MAX_ENCODER_LATENCY_GAIN;
         }
         return gain;
     }
@@ -208,7 +212,7 @@ namespace {
     DTCM_DATA PendingCorner s_pending[PENDING_FIFO_CAP];
     DTCM_DATA uint8_t  s_pending_count = 0;
 
-    DTCM_DATA float    s_L_filt = TuningDefaults::DEFAULT_VISION_LATENCY_MS;
+    DTCM_DATA float    s_L_filt = DEFAULT_VISION_LATENCY_MS;
     DTCM_DATA bool     s_L_locked = false;
     DTCM_DATA uint32_t s_L_last_update_tick = 0;
     DTCM_DATA float    s_L_median[L_MEDIAN_WIN] = {0};
@@ -222,7 +226,7 @@ namespace {
         s_vis_det.reset();
         s_pending_count = 0;
         if (full) {
-            s_L_filt = TuningDefaults::DEFAULT_VISION_LATENCY_MS;
+            s_L_filt = DEFAULT_VISION_LATENCY_MS;
             s_L_locked = false;
             s_L_last_update_tick = 0;
             s_L_med_count = 0;
@@ -246,7 +250,7 @@ namespace {
     float current_L() {
         float fallback = tune.latency.vision_latency_ms;
         if (!std::isfinite(fallback)) {
-            fallback = TuningDefaults::DEFAULT_VISION_LATENCY_MS;
+            fallback = DEFAULT_VISION_LATENCY_MS;
         }
         if (tune.latency.enable_estimation && s_L_locked) {
             uint32_t now = Core::Scheduler::get_sys_tick_ms();

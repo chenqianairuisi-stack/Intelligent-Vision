@@ -145,13 +145,13 @@ namespace {
     [[gnu::always_inline]] inline uint32_t vision_request_interval_ms() {
         float interval = tune.tracker.vision_request_interval_ms;
         if (!std::isfinite(interval)) {
-            interval = TuningDefaults::DEFAULT_VISION_REQUEST_INTERVAL_MS;
+            interval = DEFAULT_TUNE_CONFIG.tracker.vision_request_interval_ms;
         }
-        if (interval < TuningDefaults::MIN_VISION_REQUEST_INTERVAL_MS) {
-            interval = TuningDefaults::MIN_VISION_REQUEST_INTERVAL_MS;
+        if (interval < 20.0f) {
+            interval = 20.0f;
         }
-        if (interval > TuningDefaults::MAX_VISION_REQUEST_INTERVAL_MS) {
-            interval = TuningDefaults::MAX_VISION_REQUEST_INTERVAL_MS;
+        if (interval > 1500.0f) {
+            interval = 1500.0f;
         }
         return static_cast<uint32_t>(interval);
     }
@@ -347,7 +347,7 @@ namespace {
     [[maybe_unused]] [[gnu::always_inline]] inline float corner_pause_speed() {
         float s = tune.tracker.corner_pause_speed;
         if (!std::isfinite(s) || s < 0.0f) {
-            return TuningDefaults::DEFAULT_CORNER_PAUSE_SPEED;
+            return DEFAULT_TUNE_CONFIG.tracker.corner_pause_speed;
         }
         return s;
     }
