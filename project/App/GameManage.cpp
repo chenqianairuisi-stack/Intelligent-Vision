@@ -308,6 +308,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 s_pending_blast_cells.clear();
                 s_explosion_wait_active = false;
                 Algorithm::Tracker::set_vision_correction_suppressed(false);
+                Subsystem::Vision::finish_capture_ART2();
 
                 // 复位发车前重定位 arm 标志，防止上一轮异常中断后卡在 armed 半途
                 s_home_relocate_armed = false;
@@ -411,6 +412,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             game.action_idx = 0;
 
             Subsystem::Vision::reset_semantic_labels();   // 清空语义池，准备重新填充
+            art2_capture_request_sent = false;
             game.phase = GamePhase::EXEC_ACTION_DISPATCH;
             break;
         }
@@ -530,32 +532,30 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     break;
                 }
                 case TaskType::WAIT_ART2_CAPTURE: {
-                    static bool req_sent = false;
-                    static bool ack_seen = false;
-                    uint8_t entity_id = task.param.capture.entity_id;
-                    if (!req_sent) {
-                        ack_seen = false;
-                        Subsystem::Vision::request_capture_ART2(entity_id, task.param.capture.is_box);
-                        req_sent = true;
+                    const uint32_t requested_mask = task.param.capture.active_mask;
+                    if (!art2_capture_request_sent) {
+                        if (!Subsystem::Vision::request_capture_ART2(
+                                logical_level,
+                                current_macro_action.observe.view.pos,
+                                current_macro_action.observe.view.target_yaw,
+                                requested_mask)) {
+                            game.error_stage = 7;
+                            game.phase = GamePhase::ERROR_OCCURRED;
+                            break;
+                        }
+                        art2_capture_request_sent = true;
                     }
 
-                    if (vision_data.capture_ack_received) {
-                        vision_data.capture_ack_received = false;
-                        ack_seen = true;
-                    }
-
-                    // RESULT 和 ACK 都到齐后，才把该实体计入已观测
-                    if (ack_seen && vision_data.semantic_labels[entity_id] != -1) {
-
+                    // 一次目标点观测最多回传三个实体，必须等请求掩码完整返回后才能提交给 Macro
+                    if (vision_data.capture_ack_received &&
+                        (vision_data.art2_received_mask & requested_mask) == requested_mask) {
                         logical_level.player_start = current_macro_action.observe.view.pos;
+                        observed_mask |= requested_mask;
+                        current_observe_yaw = current_macro_action.observe.view.target_yaw;
                         macro_planner.sync_semantics(vision_data.semantic_labels);
-                        // 单个抓拍完成后立即更新观测位，便于 Macro 尽早触发完成式推箱
-                        uint32_t entity_bit = (1UL << entity_id);
-                        observed_mask |= entity_bit;
-                        macro_planner.apply_observation(logical_level, entity_bit);
-                        
-                        req_sent = false;
-                        ack_seen = false;
+                        macro_planner.apply_observation(logical_level, requested_mask);
+                        Subsystem::Vision::finish_capture_ART2();
+                        art2_capture_request_sent = false;
                         task_done = true;
                     }
                     break;
@@ -601,15 +601,6 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
 
             if (task_done) {
                 current_task_idx++;
-                if (current_task_idx >= task_queue.size()) {
-                    if (current_macro_action.kind == MacroActionKind::OBSERVE) {
-                        uint32_t mask = observe_mask_of(current_macro_action);
-                        observed_mask |= mask;
-                        current_observe_yaw = current_macro_action.observe.view.target_yaw;
-                        macro_planner.sync_semantics(vision_data.semantic_labels);
-                        macro_planner.apply_observation(logical_level, mask);
-                    }
-                }
             }
             break;
         }
@@ -797,6 +788,19 @@ bool GameManager::plan_next_macro_action(MacroAction& out_action) {
     ctx.yaw = current_observe_yaw;
     ctx.bomb_tasks = &App::g_state.planning.bomb_tasks;
 
+    if (macro_planner.plan_next_action(ctx, out_action)) return true;
+    if (!macro_planner.needs_exploration_replan()) return false;
+
+    // 参考观测位被实际地图变化遮挡后，只重建未观测部分，不能清空已回传语义
+    patrol_planner.load_level(logical_level);
+    reference_patrol_actions = patrol_planner.plan_optimal_patrol(
+        ctx.player,
+        *ctx.bomb_tasks,
+        ctx.yaw,
+        macro_planner.observed_mask());
+    macro_planner.set_reference_plan(reference_patrol_actions);
+
+    // 单轮只重试一次，新的参考序列仍不可推进时交由上层错误分支收敛
     return macro_planner.plan_next_action(ctx, out_action);
 }
 
@@ -817,6 +821,7 @@ void GameManager::start_macro_action(const MacroAction& action) {
     // 根据宏动作类型生成底层任务队列
     task_queue.clear();
     current_task_idx = 0;
+    art2_capture_request_sent = false;
 
     if (action.kind == MacroActionKind::PUSH_BOMB) {
         task_queue.push_back(RobotTask::make_path_bomb(action.bomb_push));
@@ -834,12 +839,8 @@ void GameManager::start_macro_action(const MacroAction& action) {
         task_queue.push_back(RobotTask::make_wait_track());
         task_queue.push_back(RobotTask::make_align(view.target_yaw));
 
-        // 根据激活掩码为每个需要观测的实体生成一个捕获任务
-        for (uint8_t entity_id = 0; entity_id < SystemConfig::MAX_ENTITIES; ++entity_id) {
-            if (mask & (1UL << entity_id)) {
-                task_queue.push_back(RobotTask::make_capture(entity_id, entity_id < logical_level.box_count));
-            }
-        }
+        // 一个 OBSERVE 宏动作对应一次 ART2 批量请求，等待该 mask 内全部语义返回再结束动作
+        task_queue.push_back(RobotTask::make_capture(mask));
     }
 }
 

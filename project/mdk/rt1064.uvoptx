@@ -597,32 +597,8 @@
       <tvExp>0</tvExp>
       <tvExpOptDlg>0</tvExpOptDlg>
       <bDave2>0</bDave2>
-      <PathWithFileName>..\Algorithm\StrategyCommon.cpp</PathWithFileName>
-      <FilenameWithoutPath>StrategyCommon.cpp</FilenameWithoutPath>
-      <RteFlg>0</RteFlg>
-      <bShared>0</bShared>
-    </File>
-    <File>
-      <GroupNumber>3</GroupNumber>
-      <FileNumber>369</FileNumber>
-      <FileType>8</FileType>
-      <tvExp>0</tvExp>
-      <tvExpOptDlg>0</tvExpOptDlg>
-      <bDave2>0</bDave2>
-      <PathWithFileName>..\Algorithm\StrategyPhase1.cpp</PathWithFileName>
-      <FilenameWithoutPath>StrategyPhase1.cpp</FilenameWithoutPath>
-      <RteFlg>0</RteFlg>
-      <bShared>0</bShared>
-    </File>
-    <File>
-      <GroupNumber>3</GroupNumber>
-      <FileNumber>370</FileNumber>
-      <FileType>8</FileType>
-      <tvExp>0</tvExp>
-      <tvExpOptDlg>0</tvExpOptDlg>
-      <bDave2>0</bDave2>
-      <PathWithFileName>..\Algorithm\StrategyPhase2.cpp</PathWithFileName>
-      <FilenameWithoutPath>StrategyPhase2.cpp</FilenameWithoutPath>
+      <PathWithFileName>..\Algorithm\Strategy.cpp</PathWithFileName>
+      <FilenameWithoutPath>Strategy.cpp</FilenameWithoutPath>
       <RteFlg>0</RteFlg>
       <bShared>0</bShared>
     </File>

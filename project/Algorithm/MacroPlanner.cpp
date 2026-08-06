@@ -1,5 +1,8 @@
+/// \file macro_planner.cpp
+/// \brief 巡图宏动作生成、语义观测和推箱任务调度实现
+
 #include "MacroPlanner.h"
-#include "Strategy.h"
+#include <cmath>
 #include <cstring>
 
 DTCM_DATA MacroPlanner macro_planner;
@@ -8,14 +11,13 @@ DTCM_DATA MacroPlanner macro_planner;
 // 参数面板
 // ============================================================================
 
+#define MACRO_ENABLE_COMPLETION_PUSH_SLOT      0
+
 namespace MacroConfig {
     // ------------------------------------------------------------------------
     // 槽位功能开关
     // ------------------------------------------------------------------------
-    inline constexpr bool ENABLE_COMPLETION_PUSH_SLOT = false;       // 是否启用完成式推箱候选位
-    inline constexpr bool ENABLE_APPROACH_PUSH_SLOT = false;         // 是否启用接近式推箱候选位
-    inline constexpr bool ENABLE_OPPORTUNISTIC_BOMB_SLOT = false;    // 是否启用机会性炸弹候选位
-    inline constexpr bool ENABLE_SUPPLEMENTAL_OBSERVE_SLOT = false;  // 是否启用补充式观测候选位
+    inline constexpr bool ENABLE_COMPLETION_PUSH_SLOT = MACRO_ENABLE_COMPLETION_PUSH_SLOT != 0;
 
     // ------------------------------------------------------------------------
     // 完成式推箱候选位
@@ -40,10 +42,6 @@ namespace MacroConfig {
     inline constexpr int REFERENCE_CLEAR_MAX_PATH = 20;    // 单次清障推箱允许的最大展开路径长度
     inline constexpr int REFERENCE_MATERIALIZED_CLEAR_BONUS = 950; // Strategy 已验证清障序列的优先级奖励
 
-    // ------------------------------------------------------------------------
-    // 补充式观测候选位
-    // ------------------------------------------------------------------------
-    inline constexpr int SUPPLEMENTAL_NON_BOX_PENALTY = 8; // 补看目标点而不是箱子时的收尾惩罚
 }
 
 static constexpr int kInfScore = 1000000;
@@ -64,11 +62,18 @@ static constexpr int kInfScore = 1000000;
 /// 当前只有完成式推箱启用，其余槽位保留接口。
 bool MacroPlanner::plan_next_action(const MacroPlanContext& ctx, MacroAction& out_action) {
     sync_semantics(semantic_labels);
+    exploration_replan_needed = false;
 
     if (pending_cursor < pending_actions.size()) {
-        MacroAction pending = pending_actions[pending_cursor++];
+        MacroAction pending = pending_actions[pending_cursor];
         MacroAction prepared;
-        out_action = prepare_reference_action(ctx, pending, prepared) ? prepared : pending;
+        if (prepare_reference_action(ctx, pending, prepared)) {
+            out_action = prepared;
+        } else {
+            exploration_replan_needed = pending.kind == MacroActionKind::OBSERVE;
+            return false;
+        }
+        ++pending_cursor;
         if (pending_cursor >= pending_actions.size()) {
             pending_actions.clear();
             pending_cursor = 0;
@@ -78,14 +83,7 @@ bool MacroPlanner::plan_next_action(const MacroPlanContext& ctx, MacroAction& ou
 
     SlotCandidate reference_slot;
     if (!build_reference_slot(ctx, reference_slot)) {
-        SlotCandidate supplemental_slot;
-        if (build_supplemental_observe_slot(ctx, supplemental_slot)) {
-            out_action = supplemental_slot.action;
-            pending_actions = supplemental_slot.followups;
-            pending_cursor = 0;
-            return true;
-        }
-        force_supplemental_fallback(ctx.level);
+        // Exploration 已一次性给出参考序列，序列结束后不再动态补充观测
         return false;
     }
 
@@ -95,16 +93,6 @@ bool MacroPlanner::plan_next_action(const MacroPlanContext& ctx, MacroAction& ou
     SlotCandidate completion_slot;
     if (build_completion_push_slot(ctx, reference_slot.action, completion_slot)) {
         best_optional = completion_slot;
-    }
-
-    SlotCandidate approach_slot;
-    if (build_approach_push_slot(ctx, reference_slot.action, approach_slot)) {
-        if (!best_optional.valid || approach_slot.score > best_optional.score) best_optional = approach_slot;
-    }
-
-    SlotCandidate bomb_slot;
-    if (build_opportunistic_bomb_slot(ctx, reference_slot.action, bomb_slot)) {
-        if (!best_optional.valid || bomb_slot.score > best_optional.score) best_optional = bomb_slot;
     }
 
     SlotCandidate chosen = best_optional.valid ? best_optional : reference_slot;
@@ -140,13 +128,6 @@ static int first_unused_semantic_id(const int box_counts[10], const int target_c
         if (box_counts[s] == 0 && target_counts[s] == 0) return s;
     }
     return 0;
-}
-
-static bool mask_contains_box(uint32_t mask, int box_count) {
-    for (int b = 0; b < box_count; ++b) {
-        if (mask & (1UL << b)) return true;
-    }
-    return false;
 }
 
 // 判断参考炸弹是否还没执行；炸弹被使用后会在地图里标记为 {-1, -1}
@@ -195,7 +176,20 @@ static int first_step_direction(point from, point to) {
     return -1;
 }
 
+// 将车头朝向转换为 MOVE 下标，供普通观测接入路径计入首步拐点。
+static int yaw_to_move_direction(float yaw) {
+    if (!std::isfinite(yaw) || yaw < 0.0f) return -1;
+    float normalized = yaw;
+    while (normalized < 0.0f) normalized += 360.0f;
+    while (normalized >= 360.0f) normalized -= 360.0f;
+    const int yaw_index = static_cast<int>((normalized + 45.0f) / 90.0f) & 3;
+    // 0 度为右，90 度为上，180 度为左，270 度为下。
+    static constexpr int YAW_TO_MOVE[4] = {1, 0, 3, 2};
+    return YAW_TO_MOVE[yaw_index];
+}
+
 // 粗略估计某箱子到目标集合的静态可达距离，用于完成式推箱的压力奖励
+#if MACRO_ENABLE_COMPLETION_PUSH_SLOT
 static int best_box_to_target_distance(const SokobanLevel& level, uint8_t box_id, uint16_t target_mask) {
     if (box_id >= level.box_count || target_mask == 0) return kInfScore;
     int best = kInfScore;
@@ -222,6 +216,7 @@ static int player_to_box_access_distance(const SokobanLevel& level, point player
     if (best == kInfScore) best = manhattan(player, box) + 8;
     return best;
 }
+#endif
 
 // 参考动作的接入点：观测看观测位，炸弹看炸弹初始位，推箱看箱子初始位
 static point action_anchor(const MacroAction& action) {
@@ -297,15 +292,14 @@ void MacroPlanner::reset(const SokobanLevel& level) {
     pending_actions.clear();
     reference_cursor = 0;
     pending_cursor = 0;
+    exploration_replan_needed = false;
     box_count = level.box_count;
     target_count = level.target_count;
 
     for (int i = 0; i < MAX_ENTITIES; ++i) semantic_labels[i] = -1;
     for (int i = 0; i < MAX_ENTITIES; ++i) knowledge_state.inferred_semantics[i] = -1;
     knowledge_state.semantics_ready = false;
-    knowledge_state.needs_supplemental_observe = false;
     for (int i = 0; i < MAX_BOXES; ++i) {
-        knowledge_state.candidate_targets[i] = default_candidate_mask();
         knowledge_state.bound_target[i] = 0;
         knowledge_state.is_bound[i] = false;
     }
@@ -318,6 +312,7 @@ void MacroPlanner::set_reference_plan(const StaticArray<MacroAction, 32>& plan) 
     reference_cursor = 0;
     pending_actions.clear();
     pending_cursor = 0;
+    exploration_replan_needed = false;
 }
 
 // ============================================================================
@@ -391,8 +386,7 @@ bool MacroPlanner::reference_sequence_done(const SokobanLevel& level) const {
 /// 这时需要补充式观测。补充式观测关闭时，才把这一组补成 0-9 中未出现的新语义。
 MacroPlanner::SemanticInferenceStatus MacroPlanner::infer_semantics(const SokobanLevel& level,
                                                                     const int8_t* labels,
-                                                                    int8_t* out_labels,
-                                                                    bool allow_supplemental_observe) const {
+                                                                    int8_t* out_labels) const {
     if (!labels || !out_labels) return SemanticInferenceStatus::INVALID;
     if (level.box_count != level.target_count) return SemanticInferenceStatus::INVALID;
 
@@ -492,16 +486,6 @@ MacroPlanner::SemanticInferenceStatus MacroPlanner::infer_semantics(const Sokoba
     }
 
     if (box_need_total == 0 && target_need_total == 0) {
-        if constexpr (MacroConfig::ENABLE_SUPPLEMENTAL_OBSERVE_SLOT) {
-            if (!allow_supplemental_observe) {
-                int fallback_sem = first_unused_semantic_id(box_counts, target_counts);
-                out_labels[hidden_box] = static_cast<int8_t>(fallback_sem);
-                out_labels[level.box_count + hidden_target] = static_cast<int8_t>(fallback_sem);
-                return SemanticInferenceStatus::INFERRED;
-            }
-            return SemanticInferenceStatus::NEED_SUPPLEMENTAL;
-        }
-
         int fallback_sem = first_unused_semantic_id(box_counts, target_counts);
         out_labels[hidden_box] = static_cast<int8_t>(fallback_sem);
         out_labels[level.box_count + hidden_target] = static_cast<int8_t>(fallback_sem);
@@ -511,15 +495,13 @@ MacroPlanner::SemanticInferenceStatus MacroPlanner::infer_semantics(const Sokoba
     return SemanticInferenceStatus::INVALID;
 }
 
-/// \brief 为旧版 Phase2 求解器导出一个确定的 box -> target_id 兼容映射
+/// \brief 为在线推箱候选生成确定的 box -> target 映射
 /// \param level 当前逻辑地图
 /// \param labels Macro 已推断出的完整语义标签
 /// \param out_matched_ids 输出映射，out_matched_ids[box_id] 为目标点编号
 /// \return 所有箱子均能在同语义目标集合中分配到目标时返回 true
 ///
-/// \details
-/// 这是兼容层，不是 Macro 的语义模型。重复语义下会按同语义目标的自然顺序
-/// 给旧求解器生成一个一一匹配；后续 Sokoban 融合成语义组后，这层可以移除。
+/// \details 重复语义按同语义目标的自然顺序生成一一映射，仅用于 Macro 局部候选评分
 bool MacroPlanner::build_semantic_matched_ids(const SokobanLevel& level,
                                               const int8_t* labels,
                                               uint8_t* out_matched_ids) const {
@@ -547,14 +529,12 @@ bool MacroPlanner::build_semantic_matched_ids(const SokobanLevel& level,
     return true;
 }
 
-// 将推断出的完整语义写回 Macro 状态，并同步到 semantic_labels。
-// 这样后续 sync_semantics 再次运行时，不会把补充观测失败后的回退结果冲掉。
+// 将推断出的完整语义写回状态，后续同步不得覆盖已经收敛的结果
 bool MacroPlanner::apply_inferred_semantics(const SokobanLevel& level, const int8_t* inferred_labels) {
     if (!inferred_labels) return false;
 
     for (int i = 0; i < MAX_ENTITIES; ++i) knowledge_state.inferred_semantics[i] = -1;
     for (int b = 0; b < box_count; ++b) {
-        knowledge_state.candidate_targets[b] = default_candidate_mask();
         knowledge_state.bound_target[b] = 0;
         knowledge_state.is_bound[b] = false;
     }
@@ -567,35 +547,16 @@ bool MacroPlanner::apply_inferred_semantics(const SokobanLevel& level, const int
     }
 
     knowledge_state.semantics_ready = true;
-    knowledge_state.needs_supplemental_observe = false;
-
     uint8_t matched[MAX_BOXES];
     if (!build_semantic_matched_ids(level, knowledge_state.inferred_semantics, matched)) return false;
 
     for (int b = 0; b < box_count; ++b) {
         if (matched[b] >= target_count) continue;
-        knowledge_state.candidate_targets[b] = (1U << matched[b]);
         knowledge_state.bound_target[b] = matched[b];
         knowledge_state.is_bound[b] = true;
     }
 
     return true;
-}
-
-bool MacroPlanner::force_supplemental_fallback(const SokobanLevel& level) {
-    if (!needs_supplemental_observation(level)) return false;
-
-    SokobanLevel semantic_level{};
-    semantic_level.box_count = box_count;
-    semantic_level.target_count = target_count;
-
-    int8_t inferred[MAX_ENTITIES];
-    SemanticInferenceStatus status = infer_semantics(semantic_level, semantic_labels, inferred, false);
-    if (status != SemanticInferenceStatus::INFERRED) return false;
-
-    // 补充观测点不可达时，退回到“补充观测关闭”的语义策略：
-    // 给最后一组未观测箱子/目标点分配一个前面没有出现过的新语义。
-    return apply_inferred_semantics(semantic_level, inferred);
 }
 
 /// \brief 写入一次观测结果
@@ -609,9 +570,7 @@ void MacroPlanner::apply_observation(const SokobanLevel& level, uint32_t mask) {
 /// \brief 同步视觉语义池并更新内部配对状态
 /// \param labels ART2 语义标签数组，-1 表示未知
 ///
-/// \details
-/// 函数先同步 vision 语义池，再按“同语义数量相等”的规则做实体语义推断。
-/// 只有语义完整后，才额外生成旧版 Sokoban 所需的兼容匹配，避免重复语义时留下脏绑定。
+/// \details 函数先同步视觉标签，再按同语义数量相等的规则推断完整实体语义
 void MacroPlanner::sync_semantics(const int8_t* labels) {
     if (!labels) return;
     for (int i = 0; i < MAX_ENTITIES; ++i) {
@@ -619,10 +578,8 @@ void MacroPlanner::sync_semantics(const int8_t* labels) {
     }
 
     knowledge_state.semantics_ready = false;
-    knowledge_state.needs_supplemental_observe = false;
     for (int i = 0; i < MAX_ENTITIES; ++i) knowledge_state.inferred_semantics[i] = -1;
     for (int b = 0; b < box_count; ++b) {
-        knowledge_state.candidate_targets[b] = default_candidate_mask();
         knowledge_state.bound_target[b] = 0;
         knowledge_state.is_bound[b] = false;
     }
@@ -633,10 +590,6 @@ void MacroPlanner::sync_semantics(const int8_t* labels) {
 
     int8_t inferred[MAX_ENTITIES];
     SemanticInferenceStatus status = infer_semantics(semantic_level, semantic_labels, inferred);
-    if (status == SemanticInferenceStatus::NEED_SUPPLEMENTAL) {
-        knowledge_state.needs_supplemental_observe = true;
-        return;
-    }
     if (status != SemanticInferenceStatus::INFERRED) return;
     apply_inferred_semantics(semantic_level, inferred);
 }
@@ -648,24 +601,8 @@ bool MacroPlanner::ready_for_sokoban(const SokobanLevel& level) const {
     if (pending_cursor < pending_actions.size()) return false;
     if (!reference_sequence_done(level)) return false;
     if (!has_required_observations(level)) return false;
-    if (needs_supplemental_observation(level)) return false;
-
     // 语义是否完整交给 BIND_SEMANTICS 阶段判定
     // 否则最后一个观测点完成后若绑定尚未收敛，会继续请求下一条宏动作并误报 error1
-    return true;
-}
-
-/// \brief 输出第二阶段需要的 box -> target 配对
-/// \param out_ids 输出数组，out_ids[box_id] = target_id
-/// \param count 当前箱子数量
-/// \return 配对完整时返回 true
-bool MacroPlanner::fill_matched_ids(uint8_t* out_ids, uint8_t count) {
-    if (!semantics_ready()) return false;
-    for (int b = 0; b < count; ++b) {
-        if (!knowledge_state.is_bound[b]) return false;
-        if (knowledge_state.bound_target[b] >= target_count) return false;
-        out_ids[b] = knowledge_state.bound_target[b];
-    }
     return true;
 }
 
@@ -681,36 +618,23 @@ bool MacroPlanner::fill_semantic_labels(int8_t* out_labels) const {
     return true;
 }
 
-/// \brief 将 Macro 推断语义写回当前地图
-/// \param level 当前逻辑地图
-/// \return 推断语义完整且数量匹配时返回 true
-bool MacroPlanner::apply_semantics_to_level(SokobanLevel& level) const {
-    if (!semantics_ready()) return false;
-    if (level.box_count != box_count || level.target_count != target_count) return false;
-
-    for (int b = 0; b < level.box_count; ++b) {
-        int8_t label = knowledge_state.inferred_semantics[b];
-        if (!is_valid_semantic_id(label)) return false;
-        level.box_semantics[b] = static_cast<uint8_t>(label);
-    }
-    for (int t = 0; t < level.target_count; ++t) {
-        int idx = box_count + t;
-        int8_t label = knowledge_state.inferred_semantics[idx];
-        if (!is_valid_semantic_id(label)) return false;
-        level.target_semantics[t] = static_cast<uint8_t>(label);
-    }
-    return true;
-}
-
 bool MacroPlanner::semantics_ready() const {
     return knowledge_state.semantics_ready;
 }
 
-bool MacroPlanner::needs_supplemental_observation(const SokobanLevel& level) const {
-    return reference_sequence_done(level) &&
-           has_required_observations(level) &&
-           knowledge_state.needs_supplemental_observe &&
-           !knowledge_state.semantics_ready;
+bool MacroPlanner::apply_semantics_to_level(SokobanLevel& level) const {
+    if (level.box_count != box_count || level.target_count != target_count) return false;
+
+    int8_t labels[MAX_ENTITIES];
+    if (!fill_semantic_labels(labels)) return false;
+
+    for (int b = 0; b < level.box_count; ++b) {
+        level.box_semantics[b] = static_cast<uint8_t>(labels[b]);
+    }
+    for (int t = 0; t < level.target_count; ++t) {
+        level.target_semantics[t] = static_cast<uint8_t>(labels[level.box_count + t]);
+    }
+    return true;
 }
 
 // ============================================================================
@@ -719,21 +643,43 @@ bool MacroPlanner::needs_supplemental_observation(const SokobanLevel& level) con
 
 // 刷新观测动作在当前地图下的可见掩码，剔除已经观测过的实体
 bool MacroPlanner::refresh_observe_action(const SokobanLevel& level, MacroAction& action) const {
-    if (action.kind != MacroActionKind::OBSERVE) return true;
-
-    auto views = patrol_planner.build_current_views(level);
-    for (int i = 0; i < views.size(); ++i) {
-        if (views[i].pos == action.observe.view.pos && views[i].target_yaw == action.observe.view.target_yaw) {
-            action.observe.view = views[i];
-            action.observe.active_mask = views[i].mask[0] & ~knowledge_state.observed_mask;
-            return true;
-        }
+    if (action.kind != MacroActionKind::OBSERVE) {
+        return true;
     }
 
-    // Exploration 输出的参考观测属于主线任务，Macro 不能按新增 mask 多少跳过它
-    // 如果观测位路径不可达，prepare_reference_action 会失败并触发清障
-    action.observe.active_mask = action.observe.view.mask[0] & ~knowledge_state.observed_mask;
-    return true;
+    // 本地清障可能改变箱子位置与遮挡关系，执行前必须用当前地图刷新 mask
+    uint32_t visible_mask = 0u;
+    uint16_t penalty = 0u;
+    if (!PlanningCommon::evaluate_observe_pose(
+            level,
+            action.observe.view.pos,
+            action.observe.view.target_yaw,
+            visible_mask,
+            penalty)) {
+        action.observe.active_mask = 0u;
+        return false;
+    }
+
+    // Exploration 将箱子和目标点挂在两套候选观测位上。参考动作携带的
+    // active_mask 用于在 Core1 刷新时保留原候选类别，避免同一物理位姿
+    // 因地图变化把另一类实体顺带提交。
+    const uint32_t box_mask = level.box_count == 0u
+        ? 0u
+        : (uint32_t{1u} << level.box_count) - 1u;
+    const uint32_t target_mask =
+        ((uint32_t{1u} << (level.box_count + level.target_count)) - 1u) & ~box_mask;
+    const uint32_t requested_mask = action.observe.active_mask;
+    const bool requests_boxes = (requested_mask & box_mask) != 0u;
+    const bool requests_targets = (requested_mask & target_mask) != 0u;
+    if (requests_boxes && !requests_targets) {
+        visible_mask &= box_mask;
+    } else if (requests_targets && !requests_boxes) {
+        visible_mask &= target_mask;
+    }
+    action.observe.active_mask = visible_mask & ~knowledge_state.observed_mask;
+    action.observe.view.mask[0] = visible_mask;
+    action.observe.view.penalty[0] = penalty;
+    return action.observe.active_mask != 0u;
 }
 
 // 验证参考动作在当前地图和当前位置下是否可执行，并刷新真实代价
@@ -743,10 +689,15 @@ bool MacroPlanner::prepare_reference_action(const MacroPlanContext& ctx, const M
     if (prepared_action.kind == MacroActionKind::OBSERVE) {
         if (!refresh_observe_action(ctx.level, prepared_action)) return false;
         StaticArray<point, MAX_PATH_LENGTH> path;
-        if (!PlanningCommon::get_grid_time_path(ctx.level, ctx.player, prepared_action.observe.view.pos, path)) return false;
+        const int initial_dir = yaw_to_move_direction(ctx.yaw);
+        if (!PlanningCommon::get_grid_time_path(
+                ctx.level, ctx.player, prepared_action.observe.view.pos, path, initial_dir)) {
+            return false;
+        }
         prepared_action.real_cost =
-            PlanningCommon::path_time_cost(ctx.player, path) +
-            PlanningCommon::yaw_turn_time_cost(ctx.yaw, prepared_action.observe.view.target_yaw);
+            PlanningCommon::path_time_cost(ctx.player, path, initial_dir) +
+            PlanningCommon::yaw_turn_time_cost(ctx.yaw, prepared_action.observe.view.target_yaw) +
+            prepared_action.observe.view.penalty[0];
         return true;
     }
 
@@ -755,7 +706,8 @@ bool MacroPlanner::prepare_reference_action(const MacroPlanContext& ctx, const M
         SokobanLevel probe = ctx.level;
         point probe_player = ctx.player;
         if (!PlanningCommon::append_box_push_path(probe, probe_player, macro_box_task(prepared_action), path)) return false;
-        prepared_action.real_cost = PlanningCommon::path_time_cost(ctx.player, path);
+        prepared_action.real_cost = PlanningCommon::path_time_cost(
+            ctx.player, path, yaw_to_move_direction(ctx.yaw));
         return true;
     }
 
@@ -765,11 +717,104 @@ bool MacroPlanner::prepare_reference_action(const MacroPlanContext& ctx, const M
 
         StaticArray<point, MAX_PATH_LENGTH> path;
         if (!PlanningCommon::get_bomb_push_path(ctx.level, ctx.player, bomb, path)) return false;
-        prepared_action.real_cost = PlanningCommon::path_time_cost(ctx.player, path);
+        prepared_action.real_cost = PlanningCommon::path_time_cost(
+            ctx.player, path, yaw_to_move_direction(ctx.yaw));
         return true;
     }
 
     return false;
+}
+
+/// \brief 尝试用当前位置直接完成当前参考观测。
+/// \param ctx 当前在线调度上下文
+/// \param reference_action 已按当前地图刷新的参考观测动作
+/// \param slot 输出局部替代候选
+/// \return 当前位置观测代价严格更低时返回 true
+///
+/// \details
+/// 参考序列由 Core2 生成，不能假设其观测位在地图变化或在线接入后仍然最优。
+/// 这里只枚举当前位置的四个车头方向，并固定沿用参考动作的实体类别；
+/// 若只覆盖参考动作的一部分，则不推进 reference_cursor，下一轮仍会补齐剩余实体。
+bool MacroPlanner::build_local_observe_slot(const MacroPlanContext& ctx,
+                                            const MacroAction& reference_action,
+                                            SlotCandidate& slot) const {
+    if (reference_action.kind != MacroActionKind::OBSERVE) return false;
+    // 参考位已经在当前位置时不再拆成两个同点观测动作；同点换向由参考动作自身承担。
+    if (reference_action.observe.view.pos == ctx.player) return false;
+
+    const uint32_t box_mask = ctx.level.box_count == 0u
+        ? 0u
+        : (uint32_t{1u} << ctx.level.box_count) - 1u;
+    const uint32_t entity_mask = (ctx.level.box_count + ctx.level.target_count) == 0u
+        ? 0u
+        : (uint32_t{1u} << (ctx.level.box_count + ctx.level.target_count)) - 1u;
+    const uint32_t target_mask = entity_mask & ~box_mask;
+    const uint32_t requested_mask = reference_action.observe.active_mask & entity_mask;
+    const uint32_t requested_new = requested_mask & ~knowledge_state.observed_mask;
+    if (requested_new == 0u) return false;
+
+    const bool requests_boxes = (requested_mask & box_mask) != 0u;
+    const bool requests_targets = (requested_mask & target_mask) != 0u;
+    uint32_t allowed_mask = entity_mask;
+    if (requests_boxes && !requests_targets) {
+        allowed_mask = box_mask;
+    } else if (requests_targets && !requests_boxes) {
+        allowed_mask = target_mask;
+    }
+
+    const int reference_cost = reference_action.real_cost;
+    int best_cost = reference_cost;
+    int best_pop = -1;
+    MacroAction best_action;
+    bool found = false;
+    static constexpr float CARDINAL_YAW[4] = {0.0f, 90.0f, 180.0f, 270.0f};
+
+    for (int i = 0; i < 4; ++i) {
+        const float yaw = CARDINAL_YAW[i];
+        uint32_t visible_mask = 0u;
+        uint16_t penalty = 0u;
+        if (!PlanningCommon::evaluate_observe_pose(
+                ctx.level, ctx.player, yaw, visible_mask, penalty)) {
+            continue;
+        }
+
+        visible_mask &= allowed_mask;
+        const uint32_t newly_seen = visible_mask & ~knowledge_state.observed_mask;
+        if (newly_seen == 0u) continue;
+
+        const int cost = static_cast<int>(penalty) +
+            PlanningCommon::yaw_turn_time_cost(ctx.yaw, yaw);
+        // 同一观测动作的停车开销在两侧相同；这里比较移动、拐点、转向和几何罚分。
+        if (cost >= reference_cost) continue;
+
+        int pop = 0;
+        for (int bit = 0; bit < MAX_ENTITIES; ++bit) {
+            if (newly_seen & (uint32_t{1u} << bit)) ++pop;
+        }
+        if (found && (cost > best_cost || (cost == best_cost && pop <= best_pop))) continue;
+
+        best_action = reference_action;
+        best_action.observe.view.pos = ctx.player;
+        best_action.observe.view.target_yaw = yaw;
+        best_action.observe.view.mask[0] = visible_mask;
+        best_action.observe.view.penalty[0] = penalty;
+        best_action.observe.active_mask = newly_seen;
+        best_action.real_cost = static_cast<uint16_t>(cost);
+        best_cost = cost;
+        best_pop = pop;
+        found = true;
+    }
+
+    if (!found) return false;
+
+    slot.action = best_action;
+    slot.followups.clear();
+    slot.slot = SlotKind::REFERENCE;
+    slot.score = -best_cost;
+    slot.valid = true;
+    slot.consumes_reference =
+        (best_action.observe.active_mask & requested_new) == requested_new;
+    return true;
 }
 
 /// \brief 将推炸弹参考动作拆成“推到中途、观测、继续引爆”
@@ -833,13 +878,8 @@ bool MacroPlanner::build_bomb_observe_split(const MacroPlanContext& ctx,
 
             MacroAction observe = raw_observe;
             MacroAction refreshed_observe = observe;
-            refresh_observe_action(pause_level, refreshed_observe);
-            if (refreshed_observe.observe.active_mask != 0) {
-                observe = refreshed_observe;
-                observe.observe.active_mask |= raw_newly_seen;
-            } else {
-                observe.observe.active_mask = raw_newly_seen;
-            }
+            if (!refresh_observe_action(pause_level, refreshed_observe)) continue;
+            observe = refreshed_observe;
 
             StaticArray<point, MAX_PATH_LENGTH> observe_path;
             if (!PlanningCommon::get_grid_time_path(pause_level, prefix_end, observe.observe.view.pos, observe_path)) continue;
@@ -856,11 +896,15 @@ bool MacroPlanner::build_bomb_observe_split(const MacroPlanContext& ctx,
             StaticArray<point, MAX_PATH_LENGTH> suffix_path;
             if (!PlanningCommon::get_bomb_push_path(pause_level, observe.observe.view.pos, macro_bomb_task(suffix), suffix_path)) continue;
 
-            prefix.real_cost = PlanningCommon::path_time_cost(ctx.player, prefix_path);
+            prefix.real_cost = PlanningCommon::path_time_cost(
+                ctx.player, prefix_path, yaw_to_move_direction(ctx.yaw));
             observe.real_cost =
                 PlanningCommon::path_time_cost(prefix_end, observe_path) +
-                PlanningCommon::yaw_turn_time_cost(ctx.yaw, observe.observe.view.target_yaw);
-            suffix.real_cost = PlanningCommon::path_time_cost(observe.observe.view.pos, suffix_path);
+                PlanningCommon::yaw_turn_time_cost(ctx.yaw, observe.observe.view.target_yaw) +
+                observe.observe.view.penalty[0];
+            suffix.real_cost = PlanningCommon::path_time_cost(
+                observe.observe.view.pos, suffix_path,
+                yaw_to_move_direction(observe.observe.view.target_yaw));
 
             prefix_action = prefix;
             observe_action = observe;
@@ -913,7 +957,7 @@ void MacroPlanner::advance_reference_cursor(const SokobanLevel& level) {
 /// \return 找到可执行清障动作时返回 true
 ///
 /// \details
-/// 优先沿用 Strategy materialize_bomb_task 已验证的移障序列；
+/// 优先沿用 Core2 Strategy Phase 1 已返回的移障序列；
 /// 若没有可用序列，则根据忽略动态物体的软路径找第一个挡路箱子，
 /// 尝试把它短推离参考路径。
 bool MacroPlanner::build_reference_clearance(const MacroPlanContext& ctx, const MacroAction& reference_action, SlotCandidate& slot) const {
@@ -981,7 +1025,8 @@ bool MacroPlanner::build_reference_clearance(const MacroPlanContext& ctx, const 
         StaticArray<point, MAX_PATH_LENGTH> path;
         if (!PlanningCommon::append_box_push_path(probe, probe_player, task, path)) return;
         if (path.size() > MacroConfig::REFERENCE_CLEAR_MAX_PATH) return;
-        uint16_t push_cost = PlanningCommon::path_time_cost(ctx.player, path);
+        uint16_t push_cost = PlanningCommon::path_time_cost(
+            ctx.player, path, yaw_to_move_direction(ctx.yaw));
 
         if (!clearance_keeps_semantic_options(probe, probe_player, box_id)) return;
 
@@ -1048,7 +1093,8 @@ bool MacroPlanner::build_reference_clearance(const MacroPlanContext& ctx, const 
         int after_access = reference_access_cost(seq_probe, seq_player, ctx.yaw, reference_action);
         if (after_access >= kInfScore) return;
 
-        uint16_t push_cost = PlanningCommon::path_time_cost(ctx.player, first_path);
+        uint16_t push_cost = PlanningCommon::path_time_cost(
+            ctx.player, first_path, yaw_to_move_direction(ctx.yaw));
         int score = bonus - static_cast<int>(push_cost) - after_access;
         if (!best.valid || score > best.score) {
             MacroAction action = make_box_push_macro_action(
@@ -1065,20 +1111,13 @@ bool MacroPlanner::build_reference_clearance(const MacroPlanContext& ctx, const 
         }
     };
 
-    // 如果参考动作被箱子挡住，优先沿用 Strategy 已验证过的移障序列。
-    if (reference_action.kind == MacroActionKind::PUSH_BOMB) {
-        BombTask materialized;
-        if (strategic_planner.materialize_bomb_task(ctx.level, ctx.player, macro_bomb_task(reference_action), materialized)) {
-            consider_materialized_sequence(materialized, MacroConfig::REFERENCE_MATERIALIZED_CLEAR_BONUS);
-        }
-    } else if (ctx.bomb_tasks) {
+    // 直接使用 Phase1 Strategy 已经返回的清障序列，Macro 运行期间不再回调 Strategy
+    if (ctx.bomb_tasks) {
         for (int i = 0; i < ctx.bomb_tasks->size(); ++i) {
             const BombTask& bomb = (*ctx.bomb_tasks)[i];
             if (!bomb_still_present(ctx.level, bomb)) continue;
-            BombTask materialized;
-            if (strategic_planner.materialize_bomb_task(ctx.level, ctx.player, bomb, materialized)) {
-                consider_materialized_sequence(materialized, MacroConfig::REFERENCE_MATERIALIZED_CLEAR_BONUS);
-            }
+            consider_materialized_sequence(
+                bomb, MacroConfig::REFERENCE_MATERIALIZED_CLEAR_BONUS);
         }
     }
 
@@ -1112,6 +1151,12 @@ bool MacroPlanner::build_reference_slot(const MacroPlanContext& ctx, SlotCandida
         MacroAction prepared;
         const MacroAction& raw = reference_plan[reference_cursor];
         if (prepare_reference_action(ctx, raw, prepared)) {
+            SlotCandidate local_observe;
+            if (build_local_observe_slot(ctx, prepared, local_observe)) {
+                slot = local_observe;
+                return true;
+            }
+
             if (prepared.kind == MacroActionKind::PUSH_BOMB) {
                 MacroAction prefix;
                 MacroAction observe;
@@ -1147,6 +1192,7 @@ bool MacroPlanner::build_reference_slot(const MacroPlanContext& ctx, SlotCandida
         }
 
         // 参考观测和仍存在的必推炸弹不能被 Macro 擅自跳过
+        exploration_replan_needed = raw.kind == MacroActionKind::OBSERVE;
         return false;
     }
 
@@ -1194,23 +1240,27 @@ bool MacroPlanner::simulate_action(const SokobanLevel& level, point player, uint
 
 // 估计从当前位置接入参考动作的代价，不修改地图
 int MacroPlanner::reference_access_cost(const SokobanLevel& level, point player, float observe_yaw, const MacroAction& reference_action) const {
+    const int initial_dir = yaw_to_move_direction(observe_yaw);
     if (reference_action.kind == MacroActionKind::OBSERVE) {
-        uint16_t d = PlanningCommon::shortest_grid_time_cost(level, player, reference_action.observe.view.pos);
+        uint16_t d = PlanningCommon::shortest_grid_time_cost(
+            level, player, reference_action.observe.view.pos, initial_dir);
         if (d == 65535) return kInfScore;
-        return d + PlanningCommon::yaw_turn_time_cost(observe_yaw, reference_action.observe.view.target_yaw);
+        return d + PlanningCommon::yaw_turn_time_cost(
+                   observe_yaw, reference_action.observe.view.target_yaw) +
+               reference_action.observe.view.penalty[0];
     }
 
     StaticArray<point, MAX_PATH_LENGTH> path;
     if (reference_action.kind == MacroActionKind::PUSH_BOMB) {
         if (!PlanningCommon::get_bomb_push_path(level, player, macro_bomb_task(reference_action), path)) return kInfScore;
-        return PlanningCommon::path_time_cost(player, path);
+        return PlanningCommon::path_time_cost(player, path, initial_dir);
     }
 
     if (reference_action.kind == MacroActionKind::PUSH_BOX) {
         SokobanLevel probe = level;
         point probe_player = player;
         if (!PlanningCommon::append_box_push_path(probe, probe_player, macro_box_task(reference_action), path)) return kInfScore;
-        return PlanningCommon::path_time_cost(player, path);
+        return PlanningCommon::path_time_cost(player, path, initial_dir);
     }
 
     return kInfScore;
@@ -1272,12 +1322,12 @@ bool MacroPlanner::validate_completion_push(const SokobanLevel& level, point pla
 /// 评分不惩罚自身推箱路径，因为这部分动作第二阶段早晚也要做；
 /// 重点评估接回参考主线收益、未来返程收益和降低 Sokoban 搜索压力。
 bool MacroPlanner::build_completion_push_slot(const MacroPlanContext& ctx, const MacroAction& reference_action, SlotCandidate& slot) const {
-    if constexpr (!MacroConfig::ENABLE_COMPLETION_PUSH_SLOT) {
-        (void)ctx;
-        (void)reference_action;
-        (void)slot;
-        return false;
-    }
+#if !MACRO_ENABLE_COMPLETION_PUSH_SLOT
+    (void)ctx;
+    (void)reference_action;
+    (void)slot;
+    return false;
+#else
 
     SlotCandidate best;
     best.score = -kInfScore;
@@ -1344,93 +1394,5 @@ bool MacroPlanner::build_completion_push_slot(const MacroPlanContext& ctx, const
     if (!best.valid || best.score < MacroConfig::COMPLETION_SCORE_THRESHOLD) return false;
     slot = best;
     return true;
-}
-
-// 构造接近式推箱候选位
-bool MacroPlanner::build_approach_push_slot(const MacroPlanContext& ctx, const MacroAction& reference_action, SlotCandidate& slot) const {
-    if constexpr (!MacroConfig::ENABLE_APPROACH_PUSH_SLOT) {
-        (void)ctx;
-        (void)reference_action;
-        (void)slot;
-        return false;
-    }
-
-    // 预留：后续只在已观测箱子上做短推，不改变参考主线
-    (void)ctx;
-    (void)reference_action;
-    (void)slot;
-    return false;
-}
-
-// 构造机会炸弹候选位
-bool MacroPlanner::build_opportunistic_bomb_slot(const MacroPlanContext& ctx, const MacroAction& reference_action, SlotCandidate& slot) const {
-    if constexpr (!MacroConfig::ENABLE_OPPORTUNISTIC_BOMB_SLOT) {
-        (void)ctx;
-        (void)reference_action;
-        (void)slot;
-        return false;
-    }
-
-    // 预留：后续只选择 Strategy 中未进入参考序列的近距离炸弹
-    (void)ctx;
-    (void)reference_action;
-    (void)slot;
-    return false;
-}
-
-/// \brief 构造补充式观测候选位
-/// \param ctx 当前在线调度上下文
-/// \param slot 输出补充观测动作
-/// \return 找到可执行补充观测时返回 true
-///
-/// \details
-/// 补充式观测只在参考序列已经结束、N-1 数量达标但最后一组语义仍无法唯一推断时启用。
-/// 评分沿用“剩余那个近看哪个”的原则：优先距离和转向小的位姿；如果候选没有看到未知箱子，
-/// 则加入非箱子惩罚，避免收尾时停在离箱子很远的目标点旁边。
-bool MacroPlanner::build_supplemental_observe_slot(const MacroPlanContext& ctx, SlotCandidate& slot) const {
-    if constexpr (!MacroConfig::ENABLE_SUPPLEMENTAL_OBSERVE_SLOT) {
-        (void)ctx;
-        (void)slot;
-        return false;
-    }
-
-    if (!needs_supplemental_observation(ctx.level)) return false;
-
-    StaticArray<ViewPose, MAX_OBS_POINTS> views = patrol_planner.build_current_views(ctx.level);
-    SlotCandidate best;
-    best.score = kInfScore;
-
-    for (int i = 0; i < views.size(); ++i) {
-        uint32_t newly_seen = views[i].mask[0] & ~knowledge_state.observed_mask;
-        if (newly_seen == 0) continue;
-
-        StaticArray<point, MAX_PATH_LENGTH> path;
-        if (!PlanningCommon::get_grid_time_path(ctx.level, ctx.player, views[i].pos, path)) continue;
-
-        int score =
-            PlanningCommon::path_time_cost(ctx.player, path) +
-            PlanningCommon::yaw_turn_time_cost(ctx.yaw, views[i].target_yaw) +
-            views[i].penalty[0];
-
-        if (!mask_contains_box(newly_seen, ctx.level.box_count)) {
-            score += MacroConfig::SUPPLEMENTAL_NON_BOX_PENALTY;
-        }
-
-        if (!best.valid || score < best.score) {
-            MacroAction action = make_observe_macro_action(views[i], newly_seen);
-            action.real_cost =
-                PlanningCommon::path_time_cost(ctx.player, path) +
-                PlanningCommon::yaw_turn_time_cost(ctx.yaw, views[i].target_yaw);
-
-            best.action = action;
-            best.slot = SlotKind::SUPPLEMENTAL_OBSERVE;
-            best.score = score;
-            best.valid = true;
-            best.consumes_reference = false;
-        }
-    }
-
-    if (!best.valid) return false;
-    slot = best;
-    return true;
+#endif
 }

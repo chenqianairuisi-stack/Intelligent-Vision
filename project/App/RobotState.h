@@ -47,9 +47,9 @@ struct RobotState {
         bool art1_map_ready = false;
         bool art1_pose_updated = false;
         bool art1_pose_request_pending = false;
-        // ART2 业务同步标志位
-        bool art2_result_ready = false;
-        // ART2 异步流水线状态
+        // ART2 当前批量观测状态，结果掩码只累计本次请求要求的实体
+        uint32_t art2_expected_mask = 0;
+        uint32_t art2_received_mask = 0;
         bool capture_ack_received = false;
         // 语义缓存池（-1 表示未知，0~9 表示识别到的特征数字；索引顺序为先箱子、再目标点）
         int8_t semantic_labels[SystemConfig::MAX_ENTITIES];

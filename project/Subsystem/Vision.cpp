@@ -7,6 +7,7 @@
 #include <string.h> 
 #include <array>
 #include <cmath>
+#include <cstring>
 
 #include "UartComm.h"
 
@@ -45,6 +46,63 @@ namespace {
     constexpr uint8_t MSG_POSE_DATA    = 0x21;  // ART1 发送的定位数据
     constexpr uint8_t MSG_CAPTURE_ACK  = 0x40;  // ART2 发送的拍照确认ACK
     constexpr uint8_t MSG_ART2_RESULT  = 0x41;  // ART2 发送的语义识别结果
+
+    struct Art2TargetEntry {
+        int8_t entity_id;
+        int8_t relative_x;
+        int8_t relative_y;
+    };
+
+    struct Art2CameraOffset {
+        int8_t x;
+        int8_t y;
+    };
+
+    static int count_mask_bits(uint32_t mask) {
+        int count = 0;
+        while (mask != 0u) {
+            count += static_cast<int>(mask & 1u);
+            mask >>= 1u;
+        }
+        return count;
+    }
+
+    static uint32_t level_entity_mask(const SokobanLevel& level) {
+        const int entity_count = static_cast<int>(level.box_count) +
+                                 static_cast<int>(level.target_count);
+        if (entity_count <= 0) return 0u;
+        return (uint32_t{1u} << entity_count) - 1u;
+    }
+
+    // 将规划地图格差旋转到 ART2 相机坐标，X 为车身右侧，Y 为车头前方
+    static Art2CameraOffset to_art2_camera_offset(point entity_grid,
+                                                   point vehicle_grid,
+                                                   int yaw_index) {
+        static constexpr point kForward[4] = {
+            {1, 0}, {0, 1}, {-1, 0}, {0, -1}
+        };
+        const point forward = kForward[yaw_index & 3];
+        // 与规划层的 yaw 定义一致，构造车辆右向轴
+        const point right = {
+            static_cast<int8_t>(-forward.y),
+            forward.x
+        };
+        const int map_dx = static_cast<int>(entity_grid.x) - vehicle_grid.x;
+        const int map_dy = static_cast<int>(entity_grid.y) - vehicle_grid.y;
+        return {
+            static_cast<int8_t>(map_dx * right.x + map_dy * right.y),
+            static_cast<int8_t>(map_dx * forward.x + map_dy * forward.y)
+        };
+    }
+
+    static bool camera_yaw_to_index(float camera_yaw, int& yaw_index) {
+        if (!std::isfinite(camera_yaw)) return false;
+        float normalized_yaw = camera_yaw;
+        while (normalized_yaw < 0.0f) normalized_yaw += 360.0f;
+        while (normalized_yaw >= 360.0f) normalized_yaw -= 360.0f;
+        yaw_index = static_cast<int>((normalized_yaw + 45.0f) / 90.0f) & 3;
+        return true;
+    }
 
     /// \brief 通用串口协议状态机
     /// \param uart 数据来源串口
@@ -200,13 +258,21 @@ namespace {
         auto& vis = App::g_state.vision;
 
         if (parser_art2.msg_type == MSG_CAPTURE_ACK && parser_art2.payload_len == 1) {
-            vis.capture_ack_received = true;
+            if (vis.art2_expected_mask != 0u) {
+                vis.capture_ack_received = true;
+            }
         }
         else if (parser_art2.msg_type == MSG_ART2_RESULT && parser_art2.payload_len == 2) {
             uint8_t entity_id = parser_art2.payload_buf[0];
             int8_t semantic_id = parser_art2.payload_buf[1];
-            if (entity_id < SystemConfig::MAX_ENTITIES) {
+            const uint32_t entity_bit = entity_id < SystemConfig::MAX_ENTITIES
+                ? (uint32_t{1u} << entity_id) : 0u;
+            // ACK 到达前的结果可能属于上一批尚未排空的帧，不能计入当前观测
+            if (vis.capture_ack_received &&
+                semantic_id >= 0 && semantic_id <= 9 &&
+                (vis.art2_expected_mask & entity_bit) != 0u) {
                 vis.semantic_labels[entity_id] = semantic_id;
+                vis.art2_received_mask |= entity_bit;
             }
         }
     }
@@ -235,6 +301,7 @@ void init() {
 void reset_semantic_labels() {
     for(int i=0; i < SystemConfig::MAX_ENTITIES; ++i) 
         App::g_state.vision.semantic_labels[i] = -1;
+    finish_capture_ART2();
 }
 
 /// \brief 请求 ART1 返回地图数据
@@ -252,14 +319,115 @@ void schedule_pose_request_ART1() {
     App::g_state.vision.art1_pose_request_pending = true;
 }
 
-/// \brief 请求 ART2 捕获并识别一个实体
-/// \param entity_id 实体编号
-/// \param is_box true 表示箱子，false 表示目标点
+/// \brief 请求 ART2 完成一个宏观观测动作
+/// \param level 当前逻辑地图
+/// \param vehicle_grid 当前观测位的小车格点
+/// \param camera_yaw 本次观测的相机朝向
+/// \param active_mask 本次请求的同类别实体掩码
+/// \return active_mask 合法且请求已发送时返回 true
 ///
-void request_capture_ART2(uint8_t entity_id, bool is_box) {
-    App::g_state.vision.capture_ack_received = false;
-    uint8_t payload[2] = {entity_id, static_cast<uint8_t>(is_box ? 1 : 0)};
-    uart_cam2.send_packet(CMD_TRIG_CAPTURE, payload, 2);
+/// \details
+/// 箱子请求固定发送一组 [id, camera_x, camera_y]，目标点请求固定发送三组。
+/// 相机坐标 X 指向车身右侧，Y 指向车头前方，目标点按 X 从小到大排列。
+bool request_capture_ART2(const SokobanLevel& level,
+                          point vehicle_grid,
+                          float camera_yaw,
+                          uint32_t active_mask) {
+    const uint32_t valid_mask = level_entity_mask(level);
+    const uint32_t box_mask = level.box_count == 0u
+        ? 0u
+        : (uint32_t{1u} << level.box_count) - 1u;
+    const uint32_t target_mask = valid_mask & ~box_mask;
+    const uint32_t requested_boxes = active_mask & box_mask;
+    const uint32_t requested_targets = active_mask & target_mask;
+
+    int camera_yaw_index = 0;
+    if (active_mask == 0u || (active_mask & ~valid_mask) != 0u ||
+        !camera_yaw_to_index(camera_yaw, camera_yaw_index) ||
+        (requested_boxes != 0u && requested_targets != 0u)) {
+        return false;
+    }
+
+    auto& vis = App::g_state.vision;
+    // 一个观测宏动作只能持有一批请求，禁止覆盖仍在等待结果的掩码
+    if (vis.art2_expected_mask != 0u) {
+        return false;
+    }
+    vis.capture_ack_received = false;
+    vis.art2_expected_mask = active_mask;
+    vis.art2_received_mask = 0u;
+
+    if (requested_boxes != 0u) {
+        if (count_mask_bits(requested_boxes) != 1) {
+            finish_capture_ART2();
+            return false;
+        }
+
+        int box_id = 0;
+        while ((requested_boxes & (uint32_t{1u} << box_id)) == 0u) ++box_id;
+        const Art2CameraOffset offset = to_art2_camera_offset(
+            level.boxes[box_id], vehicle_grid, camera_yaw_index);
+        uint8_t payload[3] = {
+            static_cast<uint8_t>(box_id),
+            static_cast<uint8_t>(offset.x),
+            static_cast<uint8_t>(offset.y)
+        };
+        uart_cam2.send_packet(CMD_TRIG_CAPTURE, payload, sizeof(payload));
+        return true;
+    }
+
+    if (requested_targets == 0u || count_mask_bits(requested_targets) > 3) {
+        finish_capture_ART2();
+        return false;
+    }
+
+    Art2TargetEntry entries[3] = {};
+    int entry_count = 0;
+    for (int target_id = 0; target_id < level.target_count; ++target_id) {
+        const int entity_id = static_cast<int>(level.box_count) + target_id;
+        if ((requested_targets & (uint32_t{1u} << entity_id)) == 0u) continue;
+
+        const Art2CameraOffset offset = to_art2_camera_offset(
+            level.targets[target_id], vehicle_grid, camera_yaw_index);
+        entries[entry_count++] = {
+            static_cast<int8_t>(entity_id),
+            offset.x,
+            offset.y
+        };
+    }
+
+    for (int i = 0; i < entry_count - 1; ++i) {
+        for (int j = 0; j < entry_count - 1 - i; ++j) {
+            const Art2TargetEntry& lhs = entries[j];
+            const Art2TargetEntry& rhs = entries[j + 1];
+            // X 正方向是相机右侧，故从左到右应按 X 从小到大发送
+            if (lhs.relative_x > rhs.relative_x ||
+                (lhs.relative_x == rhs.relative_x && lhs.relative_y > rhs.relative_y) ||
+                (lhs.relative_x == rhs.relative_x && lhs.relative_y == rhs.relative_y &&
+                 lhs.entity_id > rhs.entity_id)) {
+                Art2TargetEntry temp = entries[j];
+                entries[j] = entries[j + 1];
+                entries[j + 1] = temp;
+            }
+        }
+    }
+
+    uint8_t payload[9];
+    std::memset(payload, 0xFF, sizeof(payload));
+    for (int i = 0; i < entry_count; ++i) {
+        payload[i * 3] = static_cast<uint8_t>(entries[i].entity_id);
+        payload[i * 3 + 1] = static_cast<uint8_t>(entries[i].relative_x);
+        payload[i * 3 + 2] = static_cast<uint8_t>(entries[i].relative_y);
+    }
+    uart_cam2.send_packet(CMD_TRIG_CAPTURE, payload, sizeof(payload));
+    return true;
+}
+
+void finish_capture_ART2() {
+    auto& vis = App::g_state.vision;
+    vis.capture_ack_received = false;
+    vis.art2_expected_mask = 0u;
+    vis.art2_received_mask = 0u;
 }
 
 /// \brief 视觉模块主循环轮询入口
@@ -268,10 +436,11 @@ void request_capture_ART2(uint8_t entity_id, bool is_box) {
 /// 从两路相机串口 FIFO 中解析完整帧，并将结果写入全局视觉黑板
 ///
 __attribute__((section(".ramfunc"))) void update() {
-    if (step_parser(uart_cam1, parser_art1)) {
+    while (step_parser(uart_cam1, parser_art1)) {
         process_art1_packet();
     }
-    if (step_parser(uart_cam2, parser_art2)) {
+    // 目标点批量识别会连续回传多个结果帧，本轮全部取出以缩短等待窗口
+    while (step_parser(uart_cam2, parser_art2)) {
         process_art2_packet();
     }
 

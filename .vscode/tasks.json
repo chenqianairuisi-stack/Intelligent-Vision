@@ -1,0 +1,61 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Simulation: Build",
+            "type": "shell",
+            "command": "g++",
+            "args": [
+                "-std=c++17",
+                "-O3",
+                "-Iproject\\Core",
+                "-Iproject\\Algorithm",
+                "-Iproject\\App",
+                "simulation\\main.cpp",
+                "project\\Algorithm\\Sokoban.cpp",
+                "project\\Algorithm\\Exploration.cpp",
+                "project\\Algorithm\\PlanningCommon.cpp",
+                "project\\Algorithm\\Strategy.cpp",
+                "project\\Algorithm\\MacroPlanner.cpp",
+                "-o",
+                "simulation\\solver.exe"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "Simulation: Run Visualizer",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "simulation\\visualizer\\visualizer.py"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "Simulation: Build + Run Visualizer",
+            "dependsOn": [
+                "Simulation: Build",
+                "Simulation: Run Visualizer"
+            ],
+            "dependsOrder": "sequence",
+            "problemMatcher": []
+        }
+    ]
+}

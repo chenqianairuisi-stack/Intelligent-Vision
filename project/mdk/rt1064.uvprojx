@@ -479,19 +479,9 @@
           <GroupName>Algorithm</GroupName>
           <Files>
             <File>
-              <FileName>StrategyCommon.cpp</FileName>
+              <FileName>Strategy.cpp</FileName>
               <FileType>8</FileType>
-              <FilePath>..\Algorithm\StrategyCommon.cpp</FilePath>
-            </File>
-            <File>
-              <FileName>StrategyPhase1.cpp</FileName>
-              <FileType>8</FileType>
-              <FilePath>..\Algorithm\StrategyPhase1.cpp</FilePath>
-            </File>
-            <File>
-              <FileName>StrategyPhase2.cpp</FileName>
-              <FileType>8</FileType>
-              <FilePath>..\Algorithm\StrategyPhase2.cpp</FilePath>
+              <FilePath>..\Algorithm\Strategy.cpp</FilePath>
             </File>
             <File>
               <FileName>Strategy.h</FileName>

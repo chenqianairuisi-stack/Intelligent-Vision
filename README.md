@@ -25,7 +25,7 @@
 │   ├── zf_components/
 │   ├── components/
 │   └── doc/
-└── project/                          # 业务主工程
+├── project/                          # 业务主工程
     ├── App/                          # 主循环、全局状态、业务状态机
     │   ├── main.cpp
     │   ├── GameManage.cpp/.h
@@ -63,6 +63,11 @@
         ├── Listings/
         ├── scf/
         └── MDK删除临时文件.bat
+└── simulation/                        # 桌面仿真入口与地图/回归工具
+    ├── main.cpp                       # 按 MCU GameManage 微任务流程运行
+    ├── map/                            # 地图与地图生成器
+    ├── test/                           # 批量回归脚本
+    └── visualizer/                     # PC 可视化工具
 ```
 
 ## 3. 分层职责
@@ -74,6 +79,7 @@
 | project/Subsystem | 子系统协调层 | 连接算法层和设备层，承接业务接口 |
 | project/Device | 设备抽象层 | 封装电机、编码器、IMU、串口、存储 |
 | project/Core | 系统核心层 | 中断入口、调度器、系统参数与调参项 |
+| simulation | 桌面仿真层 | 直接链接 project/Algorithm，模拟 GameManage、RobotTask 和 ART2 回传 |
 | libraries | 平台/第三方库 | SDK、驱动、组件与文档 |
 
 ## 4. 运行流程概览
@@ -156,7 +162,7 @@ Checksum = MsgType + Len + Sum(Payload)
 关键消息方向：
 
 - 主控 -> ART1：请求地图、请求定位
-- 主控 -> ART2：触发抓拍（实体 ID + 是否箱子）
+- 主控 -> ART2：触发箱子单实体观测或目标点三实体批量观测
 - ART1 -> 主控：地图包、定位包
 - ART2 -> 主控：抓拍 ACK、语义识别结果
 
@@ -164,7 +170,10 @@ ART2 语义缓存规则：
 
 - `semantic_labels[i] = -1` 表示未知；`0~9` 表示识别到的图案类别。
 - 实体索引按 ART1 地图顺序排列：`0..box_count-1` 为箱子，`box_count..box_count+target_count-1` 为目标点。
-- 实车抓拍任务在对应实体的语义结果与 ACK 都到齐后才结算。
+- `relative_x`、`relative_y` 为相机坐标格差：X 指向车身右侧，Y 指向车头前方，按本次观测 yaw 从地图坐标旋转得到。
+- 箱子请求发送 `[id, relative_x, relative_y]` 三字节负载。
+- 目标点请求发送三组 `[id, relative_x, relative_y]`，共九字节；按相机 X 从小到大，即从左到右排列，空槽全部填 `-1`。
+- ART2 仍逐实体回传语义结果，实车任务在 ACK 与本次请求 mask 内全部实体的语义结果都到齐后才结算。
 - Mock 模式在自身流程中注入同格式语义，不修改基类真实视觉请求逻辑。
 
 语义匹配采用 N-1 规则：先用已观测的同语义箱子和目标点直接配对；若只剩一个未识别目标点，则把已识别但未找到同标签目标的箱子补到它；若只剩一个未识别箱子，则把已识别但未找到同标签箱子的目标反向补到它；最后只允许唯一剩余箱子和唯一剩余目标互补。

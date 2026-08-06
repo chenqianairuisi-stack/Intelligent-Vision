@@ -1,8 +1,22 @@
+/// \file strategy.h
+/// \brief Core2 炸弹策略规划器，仅根据请求快照生成建议任务
 #pragma once
 
 #include "PlanningCommon.h"
 
 using namespace SystemConfig;
+
+#ifndef STRATEGY_ENABLE_CLEAR_DIAG
+#define STRATEGY_ENABLE_CLEAR_DIAG 0
+#endif
+
+#ifndef STRATEGY_ENABLE_HOT_PROFILE
+#define STRATEGY_ENABLE_HOT_PROFILE 0
+#endif
+
+#ifndef STRATEGY_ENABLE_SHADOW_CLEAR_CLASSIFIER
+#define STRATEGY_ENABLE_SHADOW_CLEAR_CLASSIFIER 0
+#endif
 
 #ifndef STRATEGY_ENABLE_SHADOW_CLEAR_DECISION
 #define STRATEGY_ENABLE_SHADOW_CLEAR_DECISION 1
@@ -10,10 +24,17 @@ using namespace SystemConfig;
 
 namespace StrategyConfig {
     // ------------------------------------------------------------------------
-    // 清障候选开关：shadow decision 会影响候选来源，调参需回归清障图
+    // 诊断与 profile 开关：多数只影响日志，shadow decision 会影响清障候选来源
     // ------------------------------------------------------------------------
+    inline constexpr bool ENABLE_PROFILE = true;                  // profile 总开关，可按 PC 诊断需要调整
+    inline constexpr bool ENABLE_CLEAR_DIAG = STRATEGY_ENABLE_CLEAR_DIAG != 0; // 清障诊断开关，只影响报告
+    inline constexpr bool ENABLE_HOT_PROFILE = STRATEGY_ENABLE_HOT_PROFILE != 0; // 热点 profile 开关，只影响日志
+    inline constexpr bool ENABLE_SHADOW_CLEAR_CLASSIFIER = STRATEGY_ENABLE_SHADOW_CLEAR_CLASSIFIER != 0; // shadow 分类开关，只影响诊断
     inline constexpr bool ENABLE_SHADOW_CLEAR_DECISION = STRATEGY_ENABLE_SHADOW_CLEAR_DECISION != 0; // 候选剪枝：shadow 决策开关，调参需回归清障图
-    inline constexpr int REAL_CLEAR_TRACE_LIMIT = 8;              // 接口约束：真实清障搜索保留的推箱链长度
+    inline constexpr int PROFILE_EVAL_LIMIT = 8;                  // 日志/profile：单次策略评估最多记录的 profile pass 数，可调
+    inline constexpr int PROFILE_TOP_CANDIDATES = 3;              // 日志/profile：根层候选诊断只保留前几个高分墙位，可调
+    inline constexpr int CLEAR_DIAG_LIMIT = 48;                   // 日志/profile：清障诊断最多记录的任务条目数，可调
+    inline constexpr int CLEAR_DIAG_PUSH_LIMIT = 4;               // 日志/profile：单个炸弹任务最多记录的清障推箱动作数，可调
 
     // ------------------------------------------------------------------------
     // DFS 搜索宽度：候选剪枝，调大更稳但更慢
@@ -61,9 +82,9 @@ namespace StrategyConfig {
 }
 
 // ============================================================================
-// 策略 cpp 共享 helper 与缓存结构
+// 策略实现共享 helper 与缓存结构
 // ============================================================================
-// 这些声明由 StrategyCommon.cpp 提供实现，Phase1/Phase2 只使用，不再各自重复声明
+// 这些声明由 Strategy.cpp 提供实现，Phase1/Phase2 共用
 
 int strategy_box_at(const SokobanLevel& lvl, point p);
 bool strategy_target_allowed_for_box(const SokobanLevel& lvl, int box_id, int target_id, bool phase2_specific);
@@ -73,6 +94,8 @@ int strategy_nearest_goal_distance(const SokobanLevel& lvl, int box_id, point p,
 int strategy_bomb_count(const SokobanLevel& lvl);
 int strategy_direct_bomb_cost_for_score(const SokobanLevel& lvl, point player, point bomb_start, point target_wall, int fallback_dist);
 int16_t strategy_clamp_i16(int value);
+uint32_t strategy_profile_now_us();
+uint32_t strategy_profile_elapsed_us(uint32_t start_us);
 void mark_soft_deadlock_boxes(const SokobanLevel& lvl, bool out_hard[MAX_BOXES]);
 
 struct LogicBlastScores {
@@ -140,11 +163,94 @@ struct DFSResult {
     int bomb_supply_score = 0;              // Phase1：当前炸弹对关键缺陷墙的可执行供给
 };
 
+// ============================================================================
+// 炸弹战略规划器
+// ============================================================================
+
+struct StrategyCandidateProfile {
+    int8_t bomb_x = -1;
+    int8_t bomb_y = -1;
+    int8_t wall_x = -1;
+    int8_t wall_y = -1;
+    int32_t score = 0;
+};
+
+struct StrategyPassProfile {
+    int16_t result_deadlocks = 9999;
+    int32_t result_profit = -999999;
+    uint8_t result_tasks = 0;
+    uint16_t root_candidates = 0;
+    uint8_t root_branch_limit = 0;
+    uint16_t dfs_nodes = 0;
+    uint16_t fast_bfs_calls = 0;
+    uint16_t candidate_evals = 0;
+    uint16_t candidate_kept = 0;
+    uint16_t child_branches = 0;
+    uint8_t logic_builds = 0;
+    uint8_t top_count = 0;
+    StrategyCandidateProfile top[StrategyConfig::PROFILE_TOP_CANDIDATES];
+    uint16_t local_clear_calls = 0;
+    uint16_t local_clear_successes = 0;
+    uint16_t materialize_calls = 0;
+    uint16_t materialize_successes = 0;
+};
+
+enum class StrategyPhase1RepairReject : uint8_t {
+    NONE = 0,
+    NOT_RUN,
+    MATERIALIZE_FAILED,
+    UNRESOLVED_OBLIGATION,
+    RESIDUAL_DEADLOCKS,
+    RESIDUAL_UNREACHABLE,
+    NOT_BETTER_THAN_HARD
+};
+
 enum class StrategyRescueObligationKind : uint8_t {
     NONE = 0,
     EXPLICIT_PHASE1_TASK,
     EXPLICIT_FUTURE_BOMB,
     UNRESOLVED
+};
+
+struct StrategyPhase1RepairStepProfile {
+    uint8_t index = 0;
+    uint8_t direct_executable = 0;
+    uint8_t materialized = 0;
+    uint8_t apply_ok = 0;
+    uint8_t outstanding_obligations = 0;
+    int16_t deadlocks = 9999;
+    int16_t unreachable = 9999;
+    int32_t distance = 999999;
+    int32_t sequence_cost = 0;
+    point player = {-1, -1};
+    BombTask task;
+};
+
+struct StrategyPhase1RepairProfile {
+    uint8_t valid = 0;
+    uint8_t selected_soft = 0;
+    uint8_t source_pass = 0;
+    uint8_t repaired_ok = 0;
+    uint8_t beats_hard = 0;
+    uint8_t repaired_outstanding_obligations = 0;
+    uint8_t hard_outstanding_obligations = 0;
+    StrategyPhase1RepairReject reject_reason = StrategyPhase1RepairReject::NOT_RUN;
+
+    int16_t soft_deadlocks = 9999;
+    int16_t soft_unreachable = 9999;
+    int32_t soft_profit = -999999;
+    int16_t hard_deadlocks = 9999;
+    int16_t hard_unreachable = 9999;
+    int32_t hard_distance = 999999;
+    int16_t repaired_deadlocks = 9999;
+    int16_t repaired_unreachable = 9999;
+    int32_t repaired_distance = 999999;
+    int32_t repaired_cost = 0;
+
+    StaticArray<BombTask, MAX_BOMBS> raw_tasks;
+    StaticArray<BombTask, MAX_BOMBS> repaired_tasks;
+    uint8_t step_count = 0;
+    StrategyPhase1RepairStepProfile steps[MAX_BOMBS];
 };
 
 enum class StrategyClearReason : uint8_t {
@@ -185,7 +291,7 @@ enum class StrategyClearMethod : uint8_t {
     REAL_CLEAR_SEARCH
 };
 
-struct StrategyClearPushTrace {
+struct StrategyClearPushProfile {
     uint8_t box_id = 255;
     StrategyClearReason reason = StrategyClearReason::NONE;
     StrategyClearParking parking = StrategyClearParking::UNKNOWN;
@@ -201,17 +307,135 @@ struct StrategyClearPushTrace {
     int16_t score = 0;
 };
 
-struct StrategyClearRouteTrace {
+struct StrategyClearRouteProfile {
+    uint8_t valid = 0;
+    uint8_t eval_index = 255;
+    uint8_t pass = 255;
+    uint8_t success = 0;
+    StrategyClearMethod method = StrategyClearMethod::NONE;
+    uint8_t phase2_specific = 0;
+    uint8_t include_player_access_clear = 0;
+    point bomb_start = {-1, -1};
+    point target_wall = {-1, -1};
+    int16_t cost = 0;
+    uint8_t route_len = 0;
+    uint8_t blocker_count = 0;
     uint8_t push_count = 0;
+    StrategyClearPushProfile pushes[StrategyConfig::CLEAR_DIAG_PUSH_LIMIT];
 };
 
-// ============================================================================
-// 炸弹战略规划器
-// ============================================================================
+struct StrategyEvalProfile {
+    uint8_t mode = 0;
+    uint8_t selected_pass = 255;
+    int16_t selected_deadlocks = 9999;
+    int32_t selected_profit = -999999;
+    uint8_t selected_tasks = 0;
+    StrategyPassProfile passes[3];
+};
+
+struct StrategyHotProfile {
+    uint32_t fast_bfs_calls = 0;
+    uint32_t fast_bfs_us = 0;
+    uint32_t fast_bfs_player_reach_calls = 0;
+    uint32_t fast_bfs_state_pops = 0;
+    uint16_t fast_bfs_max_queue = 0;
+
+    uint32_t macro_soft_calls = 0;
+    uint32_t macro_soft_us = 0;
+    uint32_t macro_soft_state_pops = 0;
+    uint16_t macro_soft_max_queue = 0;
+
+    uint32_t local_clear_calls = 0;
+    uint32_t local_clear_successes = 0;
+    uint32_t local_clear_us = 0;
+    uint32_t soft_route_builds = 0;
+    uint32_t soft_route_successes = 0;
+
+    uint32_t box_push_checks = 0;
+    uint32_t box_push_successes = 0;
+    uint32_t bomb_path_checks = 0;
+    uint32_t bomb_path_successes = 0;
+    uint32_t player_path_checks = 0;
+
+    uint32_t real_clear_nodes = 0;
+    uint32_t real_clear_candidate_total = 0;
+    uint32_t real_clear_try_total = 0;
+    uint16_t real_clear_max_depth = 0;
+};
+
+#if STRATEGY_ENABLE_SHADOW_CLEAR_CLASSIFIER
+struct StrategyShadowClearProfile {
+    uint32_t route_clear_attempts = 0;
+    uint32_t route_clear_successes = 0;
+    uint32_t route_clear_failed_no_blocker = 0;
+    uint32_t blocker_bomb_corridor = 0;
+    uint32_t blocker_bomb_real_path = 0;
+    uint32_t blocker_push_stand_nearby = 0;
+    uint32_t blocker_push_stand_exact = 0;
+    uint32_t blocker_push_stand_near_only = 0;
+    uint32_t blocker_route_nearby = 0;
+    uint32_t blocker_recursive = 0;
+    uint32_t blocker_real_support = 0;
+
+    uint32_t accepted_direct_safe = 0;
+    uint32_t accepted_theoretical_rescue = 0;
+    uint32_t accepted_open_path_only = 0;
+    uint32_t accepted_dead_parking = 0;
+    uint32_t accepted_exact_reason = 0;
+    uint32_t accepted_nearby_reason = 0;
+
+    uint32_t real_nodes = 0;
+    uint32_t real_source_exact = 0;
+    uint32_t real_source_near = 0;
+    uint32_t real_source_far = 0;
+    uint32_t real_push_candidates = 0;
+    uint32_t real_push_executable = 0;
+    uint32_t real_opens_path = 0;
+    uint32_t real_parking_checks = 0;
+    uint32_t real_parking_direct_safe = 0;
+    uint32_t real_parking_theoretical = 0;
+    uint32_t real_parking_dead = 0;
+    uint32_t real_parking_rejected = 0;
+
+    uint32_t decide_keep_exact_blocker = 0;
+    uint32_t decide_deprioritize_near_stand = 0;
+    uint32_t decide_deprioritize_route_near = 0;
+    uint32_t decide_keep_recursive = 0;
+    uint32_t decide_validate_real_exact = 0;
+    uint32_t decide_validate_real_near = 0;
+    uint32_t decide_deprioritize_real_far = 0;
+    uint32_t decide_accept_direct_safe = 0;
+    uint32_t decide_require_theory_proof = 0;
+    uint32_t decide_require_open_path = 0;
+    uint32_t decide_reject_dead_parking = 0;
+    uint32_t decide_reject_no_blocker = 0;
+};
+#endif
+
+struct StrategyProfile {
+    uint8_t eval_count = 0;
+    uint16_t dropped_evals = 0;
+    StrategyEvalProfile evals[StrategyConfig::PROFILE_EVAL_LIMIT];
+    StrategyPhase1RepairProfile phase1_repair;
+    StrategyHotProfile hot;
+#if STRATEGY_ENABLE_SHADOW_CLEAR_CLASSIFIER
+    // PC 端 softpass 清障影子分类，移植 MCU 时关闭 STRATEGY_ENABLE_SHADOW_CLEAR_CLASSIFIER 可裁掉
+    StrategyShadowClearProfile shadow_clear;
+#endif
+#if STRATEGY_ENABLE_CLEAR_DIAG
+    // PC 端 softpass 清障诊断，移植 MCU 时关闭 STRATEGY_ENABLE_CLEAR_DIAG 可裁掉
+    uint8_t clear_diag_count = 0;
+    uint16_t dropped_clear_diags = 0;
+    StrategyClearRouteProfile clear_diags[StrategyConfig::CLEAR_DIAG_LIMIT];
+#endif
+};
 
 class StrategicPlanner {
 public:
     StrategicPlanner() = default;
+
+    void reset_profile();
+    const StrategyProfile& get_profile() const { return profile; }
 
     StaticArray<BombTask, MAX_BOMBS> plan_phase1_bombs(const SokobanLevel& level);
     StaticArray<BombTask, MAX_BOMBS> plan_phase2_bombs(
@@ -255,12 +479,14 @@ private:
     void execute_phase2_search_pass(const SokobanLevel& level, uint8_t pass, DFSResult& out_res);
 
     void stamp_selected_tasks(DFSResult& result);
+    void optimize_phase1_bomb_assignment(const SokobanLevel& level, DFSResult& result);
 
     bool apply_executable_bomb_task(SokobanLevel& work, point& player, const BombTask& task, int* sequence_cost = nullptr);
     bool materialize_phase1_sequence(
         const SokobanLevel& level,
         StaticArray<BombTask, MAX_BOMBS>& seq,
         int* out_sequence_cost = nullptr,
+        StrategyPhase1RepairProfile* repair_diag = nullptr,
         StaticArray<StrategyClearObligation, MAX_BOMBS * 8>* out_obligations = nullptr);
     bool evaluate_phase1_task_sequence(
         const SokobanLevel& level,
@@ -370,18 +596,23 @@ private:
     void record_shadow_real_opens_path();
     void record_shadow_real_parking(StrategyClearParking parking, bool accepted);
 
-    StrategyClearRouteTrace* begin_profile_clear(
+    StrategyProfile profile;
+    StrategyEvalProfile* active_profile_eval = nullptr;
+    uint8_t active_profile_eval_index = 255;
+    uint8_t active_profile_pass = 0;
+
+    StrategyClearRouteProfile* begin_profile_clear(
         const SokobanLevel& level,
         int bomb_idx,
         point target_wall,
         bool phase2_specific,
         bool include_player_access_clear);
     void record_profile_clear_route(
-        StrategyClearRouteTrace* diag,
+        StrategyClearRouteProfile* diag,
         int route_len,
         int blocker_count);
     void record_profile_clear_push(
-        StrategyClearRouteTrace* diag,
+        StrategyClearRouteProfile* diag,
         uint8_t box_id,
         StrategyClearReason reason,
         StrategyClearParking parking,
@@ -396,7 +627,7 @@ private:
         bool safe_without_open_path,
         int score);
     void finish_profile_clear(
-        StrategyClearRouteTrace* diag,
+        StrategyClearRouteProfile* diag,
         bool success,
         StrategyClearMethod method,
         int cost);

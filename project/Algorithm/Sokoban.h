@@ -1,3 +1,6 @@
+/// \file sokoban_planner.h
+/// \brief C++ 宏动作候选与 IDA* 混合推箱子求解器
+
 #pragma once
 
 #include <array>
@@ -44,6 +47,24 @@ struct alignas(4) TTEntry {
 // 推箱子核心求解器
 // ============================================================================
 
+// ============================================================================
+// Sokoban 搜索性能探针
+// ============================================================================
+
+struct SokobanProfile {
+    uint32_t expanded_nodes = 0;          // 真正展开并生成动作的搜索节点数
+    uint32_t generated_moves = 0;         // 所有节点累计生成的候选推动作数量
+    uint32_t tt_hits = 0;                 // 置换表命中并剪枝的次数
+    uint32_t heuristic_dead_prunes = 0;   // 启发式判断不可达/死锁而剪枝的次数
+    uint32_t threshold_prunes = 0;        // IDA* f 值超过当前阈值的剪枝次数
+    uint32_t path_cycle_prunes = 0;       // 当前递归路径内状态重复的剪枝次数
+    uint32_t static_deadlock_prunes = 0;  // 推入静态死锁格或目标距离场不可达的剪枝次数
+    uint32_t block_2x2_prunes = 0;        // 2x2 团块死锁剪枝次数
+    uint16_t max_depth = 0;               // 本次搜索达到的最大递归深度
+    uint16_t threshold_iterations = 0;    // IDA* 阈值迭代轮数
+    uint16_t final_threshold = 0;         // 搜索结束时的阈值，便于对比启发式强弱
+};
+
 class Sokoban {
 public:
     // --- 生命周期与外部输入 ---
@@ -59,6 +80,9 @@ public:
     bool solve_macro_candidate();
     // 返回最近一次成功求解得到的玩家路径，包含行走和推动过程
     const StaticArray<point, MAX_PATH_LENGTH>& get_result_path() const { return final_path; }
+    // 返回最近一次求解的搜索统计，用于分析阈值、剪枝和扩展规模
+    const SokobanProfile& get_profile() const { return profile; }
+    bool profile_enabled() const;
 
 private:
     // 每个搜索节点最多保留的普通一格推动作数量；限制栈空间和排序开销
@@ -182,9 +206,9 @@ private:
         uint32_t node_budget);
     // 用快速首解作为上界，尝试在小预算内找真实步数更短的解
     bool try_strict_cost_repair(const StaticArray<point, MAX_PATH_LENGTH>& candidate_path);
-    // 对单条候选路径做完整收尾，写入 final_path 并返回面板总代价
+    // 对单条候选路径做完整收尾（严格步数修复 + 转弯后处理），写入 final_path 并返回其面板总代价
     int finalize_path_candidate(const StaticArray<point, MAX_PATH_LENGTH>& candidate);
-    // 在宏层候选与加权 IDA* 首解间各自收尾后择优
+    // 在宏层候选与加权 IDA* 首解间各自收尾后择优；ida_candidate 为空表示 IDA* 未出解
     void select_cheaper_finalized(
         const StaticArray<point, MAX_PATH_LENGTH>& macro_candidate,
         const StaticArray<point, MAX_PATH_LENGTH>* ida_candidate);
@@ -395,13 +419,13 @@ private:
     uint8_t b_macro_cost[MAX_BOMBS][MAP_MAX_HEIGHT][MAP_MAX_WIDTH][4];   // 炸弹宏动作乐观路径下界，255 表示不可达
     MacroCostCacheEntry macro_cost_cache[MACRO_COST_CACHE_SIZE] = {};
     uint8_t solid_mask[1 << MAX_BOMBS][MAP_MAX_HEIGHT][MAP_MAX_WIDTH] = {};
-    uint16_t current_threshold_iteration = 0;                           // 当前 IDA* 阈值轮次，供硬图后段策略启用
+    uint16_t current_threshold_iteration = 0;                            // 当前 IDA* 阈值轮次，供硬图后段策略启用
     bool strict_cost_search = false;                                     // 当前是否处于真实步数修复搜索
     bool force_box_target_cost_lb = false;                               // 当前搜索是否强制使用单箱总代价下界
     uint32_t search_node_budget = 0;                                     // 本轮搜索节点预算，0 表示不限制
     uint32_t search_node_count = 0;                                      // 本轮已展开节点数
     bool search_aborted = false;                                         // 节点预算耗尽时中止本轮搜索
-    mutable MixedMacroTTEntry mixed_macro_tt[MIXED_MACRO_TT_SIZE] = {};   // 混合宏层跨分支去重
+    mutable MixedMacroTTEntry mixed_macro_tt[MIXED_MACRO_TT_SIZE] = {};  // 混合宏层跨分支去重
 
     // --- Zobrist 随机表与路径环路检测 ---
     uint32_t ZOBRIST_SPECIFIC_BOX[MAX_BOXES][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];   // 带语义编号的箱子哈希
@@ -421,6 +445,7 @@ private:
 
     int16_t b_dist[MAX_BOMBS][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];           // bomb_id -> cell 的反向推炸弹距离，-1 表示不可达
     uint8_t wall_clear_mask[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];             // 每个墙格会被哪些炸弹任务清除的 bitmask
+    SokobanProfile profile;                                             // 最近一次 solve 的性能统计
 };
 
 extern TTEntry TT[TT_SIZE]; // 全局置换表，求解开始时清空

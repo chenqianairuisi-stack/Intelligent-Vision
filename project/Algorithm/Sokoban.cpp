@@ -1,3 +1,6 @@
+﻿/// \file sokoban_planner.cpp
+/// \brief C++ Sokoban 预计算、宏动作混合候选搜索和路径优化实现
+
 #include "Sokoban.h"
 #include <cmath>
 #include <cstdint>
@@ -10,6 +13,11 @@
 
 namespace SokobanConfig {
     // 搜索功能开关
+#if defined(SOKOBAN_ENABLE_PROFILE)
+    inline constexpr bool ENABLE_PROFILE = true;        // 诊断构建记录 expanded/generated/TT 命中等 profile 数据
+#else
+    inline constexpr bool ENABLE_PROFILE = false;       // 正式构建关闭高频统计
+#endif
     inline constexpr bool ENABLE_PATH_POSTOPT = true;   // 是否在成功后优化纯行走段转弯
     
     // IDA* 阈值与启发式权重
@@ -73,8 +81,8 @@ namespace SokobanConfig {
 
 DTCM_DATA Sokoban solver;
 DTCM_DATA TTEntry TT[TT_SIZE];  
-OCRAM_BSS static uint8_t RELAXED_PUSH_STAND_DIST[MAP_CELL_COUNT][MAP_CELL_COUNT];
-OCRAM_BSS static uint16_t DYNAMIC_BOX_EVAL_SEEN[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+static uint8_t RELAXED_PUSH_STAND_DIST[MAP_CELL_COUNT][MAP_CELL_COUNT];
+static uint16_t DYNAMIC_BOX_EVAL_SEEN[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
 static uint16_t dynamic_box_eval_gen = 0;
 
 namespace {
@@ -100,7 +108,9 @@ namespace {
         return steps;
     }
 
-    // 与可视化面板总代价一致，仅用于已完成候选之间择优
+    // 与可视化面板“总代价”一致的路径代价：步数 + 拐点*4（拐点即行走/推动方向的 90° 变化）。
+    // 仅用于在多条“已完成且合法”的候选路径之间择优，不参与搜索节点扩展或启发式估计，
+    // 因此不涉及可采纳性问题。DISPLAY_TURN_COST 与面板权重保持一致。
     inline constexpr int DISPLAY_TURN_COST = 4;
     int path_display_cost(const StaticArray<point, MAX_PATH_LENGTH>& path) {
         int steps = 0;
@@ -173,6 +183,10 @@ static uint32_t xorshift32() {
     return xor_state;
 }
 
+// 热路径计数统一走宏；ENABLE_PROFILE=false 时由 if constexpr 编译掉。
+#define SOKOBAN_PROFILE_INC(field) do { if constexpr (SokobanConfig::ENABLE_PROFILE) { ++profile.field; } } while (0)
+#define SOKOBAN_PROFILE_ADD(field, value) do { if constexpr (SokobanConfig::ENABLE_PROFILE) { profile.field += (value); } } while (0)
+#define SOKOBAN_PROFILE_MAX(field, value) do { if constexpr (SokobanConfig::ENABLE_PROFILE) { if ((value) > profile.field) profile.field = (value); } } while (0)
 
 
 // ============================================================================
@@ -194,6 +208,9 @@ bool Sokoban::solve_macro_candidate() {
     std::memset(macro_cost_cache, 0, sizeof(macro_cost_cache));
     std::memset(mixed_macro_tt, 0xFF, sizeof(mixed_macro_tt));
     current_threshold_iteration = 0;
+    if constexpr (SokobanConfig::ENABLE_PROFILE) {
+        profile = SokobanProfile{};
+    }
 
     if (try_small_box_macro_solution()) return true;
 
@@ -374,6 +391,11 @@ bool Sokoban::bind_semantics() {
     return true;
 }
 
+bool Sokoban::profile_enabled() const {
+    return SokobanConfig::ENABLE_PROFILE;
+}
+
+
 // ============================================================================
 // 模块 2：IDA* 主流程与搜索热路径
 // ============================================================================
@@ -396,6 +418,9 @@ bool Sokoban::solve_internal() {
     std::memset(macro_cost_cache, 0, sizeof(macro_cost_cache));
     std::memset(mixed_macro_tt, 0xFF, sizeof(mixed_macro_tt));
     current_threshold_iteration = 0;
+    if constexpr (SokobanConfig::ENABLE_PROFILE) {
+        profile = SokobanProfile{};
+    }
 
     if (try_small_box_macro_solution()) {
         return true;
@@ -403,7 +428,9 @@ bool Sokoban::solve_internal() {
 
     StaticArray<point, MAX_PATH_LENGTH> macro_candidate;
     if (try_bomb_then_small_box_macro_solution(macro_candidate)) {
-        // 宏层已枚举炸弹顺序与少箱完成顺序，和快速 IDA* 各自收尾后再择优
+        // macro_candidate 是“炸弹全序枚举 + 少箱最优顺序”的最短候选，代价已被穷举最小化。
+        // 加权 IDA* 只是快速首解（阈值被放大），可能反而更差；两者各自收尾后取更优，
+        // 防止用更差的首解覆盖已最优的推箱顺序而引入无意义的中途推箱。
         StaticArray<point, MAX_PATH_LENGTH> ida_path;
         bool have_ida = run_ida_search(false, MAX_PATH_LENGTH, ida_path, SMALL_BOX_MACRO_IDA_NODE_BUDGET);
         select_cheaper_finalized(macro_candidate, have_ida ? &ida_path : nullptr);
@@ -483,6 +510,10 @@ bool Sokoban::run_ida_search(
     }
     while (threshold <= effective_max_threshold) {
         ++current_threshold_iteration;
+        SOKOBAN_PROFILE_INC(threshold_iterations);
+        if constexpr (SokobanConfig::ENABLE_PROFILE) {
+            profile.final_threshold = static_cast<uint16_t>(threshold);
+        }
         int res = ida_star_search(initial_state, 0, 0, threshold, rev_path, -1);
         
         if (res == -1) {                                      
@@ -535,6 +566,10 @@ bool Sokoban::run_bounded_strict_search(
     // 这比从 h 下界逐轮证明不可行更适合 MCU 上的小预算搜索
     while (threshold > 0) {
         ++current_threshold_iteration;
+        SOKOBAN_PROFILE_INC(threshold_iterations);
+        if constexpr (SokobanConfig::ENABLE_PROFILE) {
+            profile.final_threshold = static_cast<uint16_t>(threshold);
+        }
 
         rev_path.clear();
         int res = ida_star_search(initial_state, 0, 0, threshold, rev_path, -1);
@@ -592,7 +627,8 @@ bool Sokoban::try_strict_cost_repair(const StaticArray<point, MAX_PATH_LENGTH>& 
     return false;
 }
 
-// 对候选路径执行完整收尾后，用面板总代价返回比较值
+// 把一条候选路径做完整收尾：严格步数修复 + 行走转弯后处理，写入 final_path 并返回其面板总代价。
+// 用于在多条已完成候选之间按“收尾后的真实代价”择优，避免用后处理前的粗略代价误判。
 int Sokoban::finalize_path_candidate(const StaticArray<point, MAX_PATH_LENGTH>& candidate) {
     final_path = candidate;
     try_strict_cost_repair(candidate);
@@ -602,7 +638,9 @@ int Sokoban::finalize_path_candidate(const StaticArray<point, MAX_PATH_LENGTH>& 
     return path_display_cost(final_path);
 }
 
-// 宏层候选与 IDA* 候选都收尾后再比较，避免用后处理前的粗略长度误判
+// 在“宏层候选”和“加权 IDA* 首解”之间择优：两者都各自收尾后比较总代价，取更优者写入 final_path。
+// 由于取二者收尾代价的最小值，结果不会劣于“总是采用 IDA* 首解”的旧逻辑（后者恒等于收尾后的 IDA*）。
+// ida_candidate == nullptr 表示本轮 IDA* 未出解，直接保留收尾后的宏层候选。
 void Sokoban::select_cheaper_finalized(
     const StaticArray<point, MAX_PATH_LENGTH>& macro_candidate,
     const StaticArray<point, MAX_PATH_LENGTH>* ida_candidate) {
@@ -611,6 +649,7 @@ void Sokoban::select_cheaper_finalized(
 
     StaticArray<point, MAX_PATH_LENGTH> macro_final = final_path;
     int ida_cost = finalize_path_candidate(*ida_candidate);
+    // finalize_path_candidate 已把 final_path 设为收尾后的 IDA* 候选；仅当宏层严格更优时才回退。
     if (macro_cost < ida_cost) {
         final_path = macro_final;
     }
@@ -635,6 +674,7 @@ int Sokoban::ida_star_search(const GameState& state, int g, int depth, int thres
         return (g <= threshold) ? -1 : g;
     }
     if (unlikely(depth >= MAX_PATH_LENGTH)) return 9999; // 保护 path_hashes 和深度相关工作数组的索引。
+    SOKOBAN_PROFILE_MAX(max_depth, static_cast<uint16_t>(depth));
 
     if (!tt_already_clear) {
         int tt_probe = probe_transposition(state.hash, g, threshold);
@@ -643,6 +683,7 @@ int Sokoban::ida_star_search(const GameState& state, int g, int depth, int thres
 
     int h = (known_h >= 0) ? known_h : get_heuristic(state);
     if (unlikely(h >= 9999)) {                
+        SOKOBAN_PROFILE_INC(heuristic_dead_prunes);
         store_transposition(state.hash, g, g + 9999);
         return 9999;
     }
@@ -696,6 +737,7 @@ int Sokoban::ida_star_search(const GameState& state, int g, int depth, int thres
     };
     int f = g + (h * W_num) / SokobanConfig::HEURISTIC_WEIGHT_DEN;
     if (f > threshold) {
+        SOKOBAN_PROFILE_INC(threshold_prunes);
         return f;
     }
 
@@ -749,17 +791,19 @@ int Sokoban::ida_star_search(const GameState& state, int g, int depth, int thres
     uint32_t cycle_hash = strict_cost_search ? state.hash : canon_hash;
     for (int i = 0; i < depth; ++i) {
         if (path_hashes[i] == cycle_hash) {
+            SOKOBAN_PROFILE_INC(path_cycle_prunes);
             return 9999; // 剪掉当前路径上的环路。
         }
     }
     path_hashes[depth] = cycle_hash;
+    SOKOBAN_PROFILE_INC(expanded_nodes);
     ++search_node_count;
     if (search_node_budget != 0 && search_node_count > search_node_budget) {
         search_aborted = true;
         return 9999;
     }
 
-    // 每层约几百字节，32KB 栈足够承受当前 40~50 层的典型深度。
+    // 每层约几百字节，32KB 栈足够承受当前 profile 中 40~50 层的典型深度。
     // 保持局部数组还能避免长期占用宝贵的 DTCM 全局空间。
     TinyMove moves[MAX_NODE_MOVES];
     int num_moves = generate_moves(state, occupancy, active_bombs, moves);
@@ -767,6 +811,7 @@ int Sokoban::ida_star_search(const GameState& state, int g, int depth, int thres
     int num_macros = strict_cost_search
                          ? 0
                          : generate_bomb_macros(state, occupancy, h, active_entities, g, threshold, macro_moves);
+    SOKOBAN_PROFILE_ADD(generated_moves, static_cast<uint32_t>(num_moves + num_macros));
 
     int min_next_threshold = 9999;
     auto precheck_child = [&](const GameState& child, int child_g, int& out_h, int& out_active_bombs) {
@@ -779,6 +824,7 @@ int Sokoban::ida_star_search(const GameState& state, int g, int depth, int thres
 
         out_h = get_heuristic(child);
         if (unlikely(out_h >= 9999)) {
+            SOKOBAN_PROFILE_INC(heuristic_dead_prunes);
             store_transposition(child.hash, child_g, child_g + 9999);
             return 9999;
         }
@@ -790,6 +836,7 @@ int Sokoban::ida_star_search(const GameState& state, int g, int depth, int thres
         int child_f = child_g +
                       (out_h * child_weight) / SokobanConfig::HEURISTIC_WEIGHT_DEN;
         if (child_f > threshold) {
+            SOKOBAN_PROFILE_INC(threshold_prunes);
             return child_f;
         }
         return 0;
@@ -1599,9 +1646,11 @@ inline int Sokoban::probe_transposition(uint32_t hash, int g, int threshold) {
     uint16_t sig = static_cast<uint16_t>(hash >> 16);
 
     if (TT[tt_idx1].sig == sig && TT[tt_idx1].value > remaining_threshold) {
+        SOKOBAN_PROFILE_INC(tt_hits);
         return g + TT[tt_idx1].value;
     }
     if (TT[tt_idx2].sig == sig && TT[tt_idx2].value > remaining_threshold) {
+        SOKOBAN_PROFILE_INC(tt_hits);
         return g + TT[tt_idx2].value;
     }
     return 0;
@@ -1778,6 +1827,7 @@ __attribute__((always_inline)) inline int Sokoban::generate_moves(
             if (occupancy.cell[push_to.y][push_to.x] != NodeOccupancy::EMPTY) continue;
 
             if (nearest_active_target_distance(state, state.box_semantics[i], push_to) == -1) {
+                SOKOBAN_PROFILE_INC(static_deadlock_prunes);
                 continue;
             }
 
@@ -1791,6 +1841,7 @@ __attribute__((always_inline)) inline int Sokoban::generate_moves(
                 bool horizontal_lock = is_permanent_wall(push_to + MOVE[1]) || is_permanent_wall(push_to + MOVE[3]);
                 bool vertical_lock = is_permanent_wall(push_to + MOVE[0]) || is_permanent_wall(push_to + MOVE[2]);
                 if (horizontal_lock && vertical_lock) {
+                    SOKOBAN_PROFILE_INC(static_deadlock_prunes);
                     continue;
                 }
 
@@ -1838,6 +1889,7 @@ __attribute__((always_inline)) inline int Sokoban::generate_moves(
                     if (is_2x2_deadlock) break;
                 }
                 if (is_2x2_deadlock) {
+                    SOKOBAN_PROFILE_INC(block_2x2_prunes);
                     continue;
                 }
 
@@ -1883,6 +1935,7 @@ __attribute__((always_inline)) inline int Sokoban::generate_moves(
             if (!triggers_explosion && occupancy.cell[push_to.y][push_to.x] != NodeOccupancy::EMPTY) continue;
 
             if (has_bomb_task && !triggers_explosion && b_dist[b_idx][push_to.y][push_to.x] == -1) {
+                SOKOBAN_PROFILE_INC(static_deadlock_prunes);
                 continue;
             }
             if (!has_bomb_task && !no_task_bomb_push_relevant(pos, push_from, push_to)) continue;
@@ -2787,7 +2840,8 @@ bool Sokoban::try_small_box_macro_solution() {
     StaticArray<point, MAX_PATH_LENGTH> macro_path;
     if (!try_small_box_macro_solution_from_state(initial_state, macro_path)) return false;
 
-    // 少箱宏层已枚举完成顺序与目标分配，和快速 IDA* 各自收尾后再择优
+    // 少箱宏层的 macro_path 已在“完成顺序 × 目标分配”上穷举择优，是代价最小候选。
+    // 加权 IDA* 首解可能更差；两者各自收尾后取更优，避免用更差的首解覆盖已最优的推箱顺序。
     StaticArray<point, MAX_PATH_LENGTH> ida_path;
     bool have_ida = run_ida_search(false, MAX_PATH_LENGTH, ida_path, SMALL_BOX_MACRO_IDA_NODE_BUDGET);
     select_cheaper_finalized(macro_path, have_ida ? &ida_path : nullptr);
@@ -3892,7 +3946,7 @@ bool Sokoban::append_optimized_walk_segment(
         bool used;
     };
 
-    OCRAM_BSS static Node nodes[MAP_MAX_HEIGHT][MAP_MAX_WIDTH][4];
+    static Node nodes[MAP_MAX_HEIGHT][MAP_MAX_WIDTH][4];
     for (int y = 0; y < MAP_MAX_HEIGHT; ++y) {
         for (int x = 0; x < MAP_MAX_WIDTH; ++x) {
             for (int d = 0; d < 4; ++d) {

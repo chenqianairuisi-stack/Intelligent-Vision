@@ -1,3 +1,6 @@
+/// \file planning_common.cpp
+/// \brief 规划层通用地图查询、路径搜索和动作效果展开实现
+
 #include "PlanningCommon.h"
 #include <algorithm>
 #include <cmath>
@@ -15,7 +18,7 @@ namespace MotionCost {
     // 路径方向发生变化时的停车和再启动惩罚，麦轮拐点停顿明显时应显著大于 GRID_MOVE
     inline constexpr uint16_t CORNER_STOP = 3;
     // 到达观测位后为了对准目标朝向产生的额外代价，不参与普通路径拐点统计
-    inline constexpr uint16_t OBSERVE_YAW = 4;
+    inline constexpr uint16_t OBSERVE_YAW = 6;
     // uint16_t 对外接口的饱和值，和旧 BFS 不可达返回值保持一致
     inline constexpr uint16_t INF = 65535;
 }
@@ -56,10 +59,10 @@ struct SimpleBfsWorkspace {
     uint16_t current_gen = 0;                        // 当前 BFS 代数
 };
 
-// 时间搜索工作区放 OCRAM，避免挤占 DTCM
+// 大型时间搜索工作区放入 OCRAM，避免挤占 DTCM
 OCRAM_BSS static TimeSearchWorkspace time_ws;
 
-// 普通 BFS 工作区放 OCRAM，消除热点函数中的局部大数组
+// 普通 BFS 工作区放入 OCRAM
 OCRAM_BSS static SimpleBfsWorkspace simple_bfs_ws;
 
 // 将 32 位内部代价钳制到对外 uint16_t 代价范围
@@ -133,11 +136,14 @@ static void init_time_map(uint16_t out_cost[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]) {
 /// \param start 起点
 /// \param out_cost 输出每个格子的最小时间代价
 /// \param parent 可选输出每格每方向的父节点，用于回溯路径
+/// \param out_final_dir 可选输出到达每个格子的最短路径末段方向
 /// \return 搜索成功完成时返回 true，堆容量不足或起点非法时返回 false
 static bool run_grid_time_search(const SokobanLevel& lvl,
                                 point start,
                                 uint16_t out_cost[MAP_MAX_HEIGHT][MAP_MAX_WIDTH],
-                                TimeParent parent[MAP_MAX_HEIGHT][MAP_MAX_WIDTH][4]) {
+                                TimeParent parent[MAP_MAX_HEIGHT][MAP_MAX_WIDTH][4],
+                                int initial_dir,
+                                uint8_t out_final_dir[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]) {
     TimeSearchWorkspace& ws = time_ws;
     build_blocked_map(lvl, ws.blocked);
     int heap_size = 0;
@@ -182,6 +188,10 @@ static bool run_grid_time_search(const SokobanLevel& lvl,
     };
 
     init_time_map(out_cost);
+    if (out_final_dir) {
+        std::memset(out_final_dir, 255,
+                    MAP_MAX_HEIGHT * MAP_MAX_WIDTH * sizeof(out_final_dir[0][0]));
+    }
     for (int y = 0; y < MAP_MAX_HEIGHT; ++y) {
         for (int x = 0; x < MAP_MAX_WIDTH; ++x) {
             for (int d = 0; d < 4; ++d) {
@@ -198,10 +208,14 @@ static bool run_grid_time_search(const SokobanLevel& lvl,
     for (int d = 0; d < 4; ++d) {
         point np = start + MOVE[d];
         if (!grid_time_passable(ws.blocked, np)) continue;
-        ws.dist[np.y][np.x][d] = MotionCost::GRID_MOVE;
-        out_cost[np.y][np.x] = MotionCost::GRID_MOVE;
+        uint32_t first_cost = MotionCost::GRID_MOVE;
+        if (initial_dir >= 0 && initial_dir < 4 && d != initial_dir) {
+            first_cost += MotionCost::CORNER_STOP;
+        }
+        ws.dist[np.y][np.x][d] = first_cost;
+        out_cost[np.y][np.x] = clamp_time_cost(first_cost);
         if (parent) parent[np.y][np.x][d] = {start.x, start.y, 255};
-        heap_push({MotionCost::GRID_MOVE, np.x, np.y, static_cast<uint8_t>(d)});
+        heap_push({first_cost, np.x, np.y, static_cast<uint8_t>(d)});
     }
 
     while (heap_size > 0) {
@@ -230,7 +244,33 @@ static bool run_grid_time_search(const SokobanLevel& lvl,
 
     if (heap_overflow) {
         init_time_map(out_cost);
+        if (out_final_dir) {
+            std::memset(out_final_dir, 255,
+                        MAP_MAX_HEIGHT * MAP_MAX_WIDTH * sizeof(out_final_dir[0][0]));
+        }
         return false;
+    }
+
+    if (out_final_dir) {
+        if (in_bounds(start)) out_final_dir[start.y][start.x] =
+            initial_dir >= 0 && initial_dir < 4 ? static_cast<uint8_t>(initial_dir) : 255;
+        for (int y = 0; y < MAP_MAX_HEIGHT; ++y) {
+            for (int x = 0; x < MAP_MAX_WIDTH; ++x) {
+                uint32_t best = 0xFFFFFFFFU;
+                uint8_t best_dir = 255;
+                for (int d = 0; d < 4; ++d) {
+                    if (ws.dist[y][x][d] < best) {
+                        best = ws.dist[y][x][d];
+                        best_dir = static_cast<uint8_t>(d);
+                    }
+                }
+                out_final_dir[y][x] = best_dir;
+            }
+        }
+        if (in_bounds(start)) {
+            out_final_dir[start.y][start.x] =
+                initial_dir >= 0 && initial_dir < 4 ? static_cast<uint8_t>(initial_dir) : 255;
+        }
     }
     return true;
 }
@@ -261,8 +301,8 @@ struct BombPathWorkspace {
     uint8_t micro_gen;                             // 微层 BFS 代数
 };
 
-// 推物体工作区保留在 DTCM，提高宏微双层搜索访问速度
-DTCM_DATA static BombPathWorkspace b_ws;
+// 推物体工作区包含大型节点队列，放入 OCRAM 避免挤占 DTCM
+OCRAM_BSS static BombPathWorkspace b_ws;
 
 // ============================================================================
 // 地图与实体查询
@@ -308,6 +348,180 @@ bool has_entity(const SokobanLevel& lvl, int x, int y, int ignored_bomb) {
         if (lvl.targets[i] == p) return true;
     }
     return has_bomb(lvl, p, ignored_bomb);
+}
+
+// 计算指定车位与朝向在当前地图上的真实观测覆盖。
+// 箱子和目标点使用不同的候选几何：箱子只允许正前方两种距离，
+// 目标点允许七种无遮挡几何，并限制一次最多返回三个目标点。
+bool evaluate_observe_pose(const SokobanLevel& lvl,
+                           point view_pos,
+                           float target_yaw,
+                           uint32_t& out_mask,
+                           uint16_t& out_penalty) {
+    out_mask = 0u;
+    out_penalty = MotionCost::INF;
+    if (!in_bounds(view_pos) || lvl.map[view_pos.y][view_pos.x] == 1 ||
+        has_box(lvl, view_pos) || has_bomb(lvl, view_pos)) {
+        return false;
+    }
+    if (!std::isfinite(target_yaw)) return false;
+
+    float normalized_yaw = target_yaw;
+    while (normalized_yaw < 0.0f) normalized_yaw += 360.0f;
+    while (normalized_yaw >= 360.0f) normalized_yaw -= 360.0f;
+    const int yaw_index = static_cast<int>((normalized_yaw + 45.0f) / 90.0f) & 3;
+    const point forward[4] = {{1, 0}, {0, 1}, {-1, 0}, {0, -1}};
+    const point f = forward[yaw_index];
+    const point right = {static_cast<int8_t>(-f.y), f.x};
+    const point left = {f.y, static_cast<int8_t>(-f.x)};
+
+    struct ViewGrid {
+        point pos;
+        uint16_t penalty;
+        bool enabled;
+        bool is_box_view;
+    };
+
+    // 箱子候选与目标点候选刻意分开。箱子只保留正前方 1~2 格直视位；
+    // 目标点保留正前方、前两格斜角和前三格斜角几何。
+    const ViewGrid box_candidates[2] = {
+        {view_pos + f, 0u, ObservationConfig::ENABLE_FACE_TO_FACE, true},
+        {view_pos + f + f, 0u, ObservationConfig::ENABLE_OPTIMAL_DIST, true},
+    };
+    const ViewGrid target_candidates[7] = {
+        {view_pos + f, 0u, ObservationConfig::ENABLE_FACE_TO_FACE, false},
+        {view_pos + f + f, ObservationConfig::TARGET_OPTIMAL_PENALTY, ObservationConfig::ENABLE_OPTIMAL_DIST, false},
+        {view_pos + f + f + left, ObservationConfig::TARGET_DIAGONAL_PENALTY, ObservationConfig::ENABLE_FAR_DIAGONAL, false},
+        {view_pos + f + f + right, ObservationConfig::TARGET_DIAGONAL_PENALTY, ObservationConfig::ENABLE_FAR_DIAGONAL, false},
+        {view_pos + f + f + f, ObservationConfig::TARGET_FAR_PENALTY, ObservationConfig::ENABLE_TARGET_FAR_FACE_TO_FACE, false},
+        {view_pos + f + f + f + left, ObservationConfig::TARGET_FAR_PENALTY + ObservationConfig::TARGET_DIAGONAL_PENALTY, ObservationConfig::ENABLE_FAR_DIAGONAL, false},
+        {view_pos + f + f + f + right, ObservationConfig::TARGET_FAR_PENALTY + ObservationConfig::TARGET_DIAGONAL_PENALTY, ObservationConfig::ENABLE_FAR_DIAGONAL, false},
+    };
+
+    // 目标点与箱子一样属于实体；只有观测射线的中间格会形成遮挡，
+    // 候选端点本身由后续实体查询处理，不能把被观测目标误判成自身遮挡。
+    auto blocks_los = [&](point p) {
+        return !in_bounds(p) || lvl.map[p.y][p.x] == 1 || has_entity(lvl, p.x, p.y);
+    };
+    auto candidate_blocked = [&](const ViewGrid& candidate, int index) {
+        const point front = view_pos + f;
+        if (candidate.is_box_view) {
+            if (index <= 1) {
+                // index + 1 是直视距离；只检查射线中间格，候选端点由实体查询处理。
+                point ray = front;
+                for (int step = 1; step <= index; ++step) {
+                    if (blocks_los(ray)) return true;
+                    ray = ray + f;
+                }
+                return false;
+            }
+        }
+        if (index == 1) return blocks_los(front);
+        if (index == 2) {
+            // 前两格斜角只检查前方两层的左侧通道；同层正中目标不在这条视线上。
+            return blocks_los(front) || blocks_los(front + left);
+        }
+        if (index == 3) {
+            return blocks_los(front) || blocks_los(front + right);
+        }
+        // 隔三格还要检查前两层对应射线格；候选端点本身不算自身遮挡。
+        if (index == 4) return blocks_los(front) || blocks_los(front + f);
+        if (index == 5) {
+            return blocks_los(front) || blocks_los(front + left) || blocks_los(front + f) ||
+                   blocks_los(front + f + left);
+        }
+        if (index == 6) {
+            return blocks_los(front) || blocks_los(front + right) || blocks_los(front + f) ||
+                   blocks_los(front + f + right);
+        }
+        return false;
+    };
+    auto box_id_at = [&](point p) {
+        for (int i = 0; i < lvl.box_count; ++i) {
+            if (lvl.boxes[i] == p) return i;
+        }
+        return -1;
+    };
+    auto target_id_at = [&](point p) {
+        // 箱子压在目标点上时只提交箱子观测，目标点待箱子移开后再确认。
+        if (has_box(lvl, p)) return -1;
+        for (int i = 0; i < lvl.target_count; ++i) {
+            if (lvl.targets[i] == p) return i;
+        }
+        return -1;
+    };
+
+    uint16_t max_penalty = 0u;
+    uint8_t entity_count = 0u;
+    uint8_t target_count = 0u;
+    for (int i = 0; i < 2; ++i) {
+        const ViewGrid& candidate = box_candidates[i];
+        if (!candidate.enabled || candidate_blocked(candidate, i)) continue;
+        const int box_id = box_id_at(candidate.pos);
+        if (box_id < 0) continue;
+
+        // 正前方的遮挡关系已经保证同一条视线至多出现一个箱子；
+        // 这里再次显式守卫，避免以后扩展候选几何时破坏“一次一个箱子”。
+        if ((out_mask & ((uint32_t{1u} << lvl.box_count) - 1u)) != 0u) continue;
+        out_mask |= uint32_t{1u} << box_id;
+        ++entity_count;
+    }
+
+    struct TargetHit {
+        int target_id;
+        uint16_t penalty;
+        int candidate_index;
+    };
+    TargetHit target_hits[7] = {};
+    int target_hit_count = 0;
+    for (int i = 0; i < 7; ++i) {
+        const ViewGrid& candidate = target_candidates[i];
+        if (!candidate.enabled || candidate_blocked(candidate, i)) continue;
+        const int target_id = target_id_at(candidate.pos);
+        if (target_id < 0) continue;
+
+        bool duplicate = false;
+        for (int j = 0; j < target_hit_count; ++j) {
+            if (target_hits[j].target_id == target_id) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate && target_hit_count < 7) {
+            target_hits[target_hit_count++] = {target_id, candidate.penalty, i};
+        }
+    }
+
+    // 先取观测几何代价较低的目标点，最多保留三个；
+    // 路径和转向代价仍由上层巡图搜索决定，不用箱子距离做偏置。
+    for (int i = 0; i < target_hit_count - 1; ++i) {
+        for (int j = 0; j < target_hit_count - 1 - i; ++j) {
+            const TargetHit& a = target_hits[j];
+            const TargetHit& b = target_hits[j + 1];
+            if (a.penalty > b.penalty ||
+                (a.penalty == b.penalty && a.candidate_index > b.candidate_index)) {
+                const TargetHit temp = target_hits[j];
+                target_hits[j] = target_hits[j + 1];
+                target_hits[j + 1] = temp;
+            }
+        }
+    }
+    const int selected_targets = std::min(
+        target_hit_count,
+        static_cast<int>(ObservationConfig::MAX_TARGETS_PER_OBSERVATION));
+    for (int i = 0; i < selected_targets; ++i) {
+        const int entity_id = lvl.box_count + target_hits[i].target_id;
+        if (entity_id >= MAX_ENTITIES) continue;
+        out_mask |= uint32_t{1u} << entity_id;
+        max_penalty = std::max(max_penalty, target_hits[i].penalty);
+        ++entity_count;
+        ++target_count;
+    }
+
+    if (entity_count == 0u) return false;
+    // 几何罚分按一次观测的最差目标计算，避免覆盖越多反而累计越高
+    out_penalty = target_count == 0u ? 0u : max_penalty;
+    return true;
 }
 
 // 判断格子是否为墙体或动态障碍，可临时忽略一个物体
@@ -579,16 +793,19 @@ bool get_grid_path(const SokobanLevel& lvl, point start, point end, StaticArray<
 /// \brief 统计一条已生成路径的执行时间
 /// \param start 路径起点
 /// \param path 不包含起点但包含终点的路径
+/// \param initial_dir 进入起点前的移动方向，负值表示没有历史方向
 /// \return 钳制到 uint16_t 的时间代价
 ///
 /// \details
 /// 每个格子计 GRID_MOVE，方向变化额外计 CORNER_STOP
 /// path 与 get_grid_path 和推箱路径展开的输出格式保持一致
-uint16_t path_time_cost(point start, const StaticArray<point, MAX_PATH_LENGTH>& path) {
+uint16_t path_time_cost(point start,
+                        const StaticArray<point, MAX_PATH_LENGTH>& path,
+                        int initial_dir) {
     if (path.empty()) return 0;
 
     uint32_t cost = 0;
-    int prev_dir = -1;
+    int prev_dir = initial_dir;
     point prev = start;
 
     for (int i = 0; i < path.size(); ++i) {
@@ -614,9 +831,18 @@ uint16_t path_time_cost(point start, const StaticArray<point, MAX_PATH_LENGTH>& 
 /// \param lvl 当前地图状态
 /// \param start 起点
 /// \param out_cost 输出代价图，不可达格子填 MotionCost::INF
-void build_grid_time_map(const SokobanLevel& lvl, point start, uint16_t out_cost[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]) {
-    if (!run_grid_time_search(lvl, start, out_cost, nullptr)) {
+void build_grid_time_map(const SokobanLevel& lvl,
+                         point start,
+                         uint16_t out_cost[MAP_MAX_HEIGHT][MAP_MAX_WIDTH],
+                         int initial_dir,
+                         uint8_t out_final_dir[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]) {
+    if (!run_grid_time_search(
+            lvl, start, out_cost, nullptr, initial_dir, out_final_dir)) {
         init_time_map(out_cost);
+        if (out_final_dir) {
+            std::memset(out_final_dir, 255,
+                        MAP_MAX_HEIGHT * MAP_MAX_WIDTH * sizeof(out_final_dir[0][0]));
+        }
     }
 }
 
@@ -625,10 +851,13 @@ void build_grid_time_map(const SokobanLevel& lvl, point start, uint16_t out_cost
 /// \param start 起点
 /// \param end 终点
 /// \return 可达时返回时间代价，不可达时返回 MotionCost::INF
-uint16_t shortest_grid_time_cost(const SokobanLevel& lvl, point start, point end) {
+uint16_t shortest_grid_time_cost(const SokobanLevel& lvl,
+                                 point start,
+                                 point end,
+                                 int initial_dir) {
     if (start == end) return 0;
     uint16_t cost_map[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
-    build_grid_time_map(lvl, start, cost_map);
+    build_grid_time_map(lvl, start, cost_map, initial_dir);
     if (!in_bounds(end)) return MotionCost::INF;
     return cost_map[end.y][end.x];
 }
@@ -639,14 +868,18 @@ uint16_t shortest_grid_time_cost(const SokobanLevel& lvl, point start, point end
 /// \param end 终点
 /// \param out_path 输出路径，不包含起点，包含终点
 /// \return 成功找到路径时返回 true
-bool get_grid_time_path(const SokobanLevel& lvl, point start, point end, StaticArray<point, MAX_PATH_LENGTH>& out_path) {
+bool get_grid_time_path(const SokobanLevel& lvl,
+                        point start,
+                        point end,
+                        StaticArray<point, MAX_PATH_LENGTH>& out_path,
+                        int initial_dir) {
     out_path.clear();
     if (!in_bounds(start) || !in_bounds(end)) return false;
     if (start == end) return true;
 
     uint16_t cost_map[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
-    static TimeParent parent[MAP_MAX_HEIGHT][MAP_MAX_WIDTH][4];
-    if (!run_grid_time_search(lvl, start, cost_map, parent)) return false;
+    OCRAM_BSS static TimeParent parent[MAP_MAX_HEIGHT][MAP_MAX_WIDTH][4];
+    if (!run_grid_time_search(lvl, start, cost_map, parent, initial_dir, nullptr)) return false;
     if (cost_map[end.y][end.x] == MotionCost::INF) return false;
 
     int best_dir = -1;
@@ -673,7 +906,7 @@ bool get_grid_time_path(const SokobanLevel& lvl, point start, point end, StaticA
         if (!ok) continue;
 
         std::reverse(probe.begin(), probe.end());
-        uint32_t c = path_time_cost(start, probe);
+        uint32_t c = path_time_cost(start, probe, initial_dir);
         if (c < best) {
             best = c;
             best_dir = d;
@@ -1089,8 +1322,7 @@ static bool find_bomb_macro_path(
     point target,
     StaticArray<BombMacroNode, 256>& out_macro_path,
     uint16_t& out_cost,
-    point& out_final_player)
-{
+    point& out_final_player) {
     out_macro_path.clear();
     out_cost = 0;
     out_final_player = player_start;

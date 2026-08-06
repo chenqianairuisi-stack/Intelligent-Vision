@@ -215,6 +215,160 @@ struct StaticArray {
 };
 
 
+// =================================================================
+// 规划模块公共任务与宏动作
+// =================================================================
+
+struct BoxPushTask {
+    point box_start;
+    point box_target;
+};
+
+struct BombIntent {
+    point bomb_start;
+    point target_wall;
+    bool is_essential = false;
+    int net_profit = 0;
+};
+
+struct BombTask {
+    point bomb_start;
+    point target_wall;
+    bool is_essential = false;
+    int net_profit = 0;
+    StaticArray<BoxPushTask, 8> box_pushes;
+};
+
+struct BoxPushAction {
+    point box_start;
+    point box_target;
+    uint8_t box_id = 255u;
+};
+
+struct BombPushAction {
+    point bomb_start;
+    point bomb_target;
+    point blast_wall;
+    bool detonates = true;
+    bool is_essential = false;
+    int net_profit = 0;
+};
+
+struct ViewPose {
+    point pos;
+    float target_yaw = 0.0f;
+    uint32_t mask[SystemConfig::MAX_BOMBS + 1] = {};
+    uint16_t penalty[SystemConfig::MAX_BOMBS + 1] = {};
+};
+
+enum class MacroActionKind : uint8_t {
+    OBSERVE = 0u,
+    PUSH_BOX,
+    PUSH_BOMB,
+};
+
+struct ObserveAction {
+    ViewPose view;
+    uint32_t active_mask = 0u;
+};
+
+struct MacroAction {
+    MacroActionKind kind = MacroActionKind::OBSERVE;
+    union {
+        ObserveAction observe;
+        BoxPushAction box_push;
+        BombPushAction bomb_push;
+    };
+    uint16_t real_cost = 0u;
+
+    MacroAction() : kind(MacroActionKind::OBSERVE), observe{}, real_cost(0u) {}
+};
+
+inline BombIntent make_bomb_intent(const BombTask& task) {
+    return {task.bomb_start, task.target_wall, task.is_essential, task.net_profit};
+}
+
+inline BombTask make_bomb_task(const BombIntent& intent) {
+    BombTask task;
+    task.bomb_start = intent.bomb_start;
+    task.target_wall = intent.target_wall;
+    task.is_essential = intent.is_essential;
+    task.net_profit = intent.net_profit;
+    task.box_pushes.clear();
+    return task;
+}
+
+inline BoxPushTask make_box_push_task(const BoxPushAction& action) {
+    return {action.box_start, action.box_target};
+}
+
+inline BoxPushAction make_box_push_action(const BoxPushTask& task,
+                                          uint8_t box_id = 255u) {
+    return {task.box_start, task.box_target, box_id};
+}
+
+inline BombPushAction make_terminal_bomb_push_action(const BombTask& task) {
+    return {task.bomb_start, task.target_wall, task.target_wall,
+            true, task.is_essential, task.net_profit};
+}
+
+inline BombTask make_bomb_task(const BombPushAction& action) {
+    BombTask task;
+    task.bomb_start = action.bomb_start;
+    task.target_wall = action.detonates ? action.blast_wall : action.bomb_target;
+    task.is_essential = action.is_essential;
+    task.net_profit = action.net_profit;
+    task.box_pushes.clear();
+    return task;
+}
+
+inline MacroAction make_observe_macro_action(const ViewPose& view,
+                                             uint32_t active_mask,
+                                             uint16_t real_cost = 0u) {
+    MacroAction action{};
+    action.kind = MacroActionKind::OBSERVE;
+    action.observe = {view, active_mask};
+    action.real_cost = real_cost;
+    return action;
+}
+
+inline MacroAction make_box_push_macro_action(const BoxPushTask& task,
+                                              uint8_t box_id,
+                                              uint16_t real_cost = 0u) {
+    MacroAction action{};
+    action.kind = MacroActionKind::PUSH_BOX;
+    action.box_push = make_box_push_action(task, box_id);
+    action.real_cost = real_cost;
+    return action;
+}
+
+inline MacroAction make_bomb_push_macro_action(const BombTask& task,
+                                               uint16_t real_cost = 0u) {
+    MacroAction action{};
+    action.kind = MacroActionKind::PUSH_BOMB;
+    action.bomb_push = make_terminal_bomb_push_action(task);
+    action.real_cost = real_cost;
+    return action;
+}
+
+inline MacroAction make_bomb_push_macro_action(const BombPushAction& bomb_push,
+                                               uint16_t real_cost = 0u) {
+    MacroAction action{};
+    action.kind = MacroActionKind::PUSH_BOMB;
+    action.bomb_push = bomb_push;
+    action.real_cost = real_cost;
+    return action;
+}
+
+inline BoxPushTask macro_box_task(const MacroAction& action) {
+    return make_box_push_task(action.box_push);
+}
+
+inline BombTask macro_bomb_task(const MacroAction& action) {
+    return make_bomb_task(action.bomb_push);
+}
+
+
 #ifndef PI
 #define PI 3.1415926535898f
 #endif

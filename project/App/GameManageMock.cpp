@@ -1,6 +1,7 @@
 #include "GameManage.h"
 #include "tuning_config.h"
 #include "Tracker.h"
+#include "Vision.h"
 #include <cmath>
 #include <cstring>
 
@@ -817,26 +818,24 @@ __attribute__((section(".ramfunc"))) void MockGameManager::update() {
                 auto& task = task_queue[current_task_idx];
                 
                 if (task.type == TaskType::WAIT_ART2_CAPTURE) {
-                    uint8_t entity_id = task.param.capture.entity_id;
-                    vision_data.semantic_labels[entity_id] = mock_truth_labels[entity_id];
+                    const uint32_t requested_mask = task.param.capture.active_mask;
+                    for (uint8_t entity_id = 0; entity_id < SystemConfig::MAX_ENTITIES; ++entity_id) {
+                        if (requested_mask & (uint32_t{1u} << entity_id)) {
+                            vision_data.semantic_labels[entity_id] = mock_truth_labels[entity_id];
+                        }
+                    }
                     
                     logical_level.player_start = current_macro_action.observe.view.pos;
                     macro_planner.sync_semantics(vision_data.semantic_labels);
-                    uint32_t entity_bit = (1UL << entity_id);
-                    observed_mask |= entity_bit;
-                    macro_planner.apply_observation(logical_level, entity_bit);
+                    observed_mask |= requested_mask;
+                    current_observe_yaw = current_macro_action.observe.view.target_yaw;
+                    macro_planner.apply_observation(logical_level, requested_mask);
 
-                    vision_data.capture_ack_received = false;
+                    Subsystem::Vision::finish_capture_ART2();
+                    art2_capture_request_sent = false;
                     current_task_idx++;
 
                     if (current_task_idx >= task_queue.size()) {
-                        if (current_macro_action.kind == MacroActionKind::OBSERVE) {
-                            uint32_t mask = observe_mask_of(current_macro_action);
-                            observed_mask |= mask;
-                            current_observe_yaw = current_macro_action.observe.view.target_yaw;
-                            macro_planner.sync_semantics(vision_data.semantic_labels);
-                            macro_planner.apply_observation(logical_level, mask);
-                        }
                         game.phase = GamePhase::EXEC_ACTION_DISPATCH;
                     }
                     break;

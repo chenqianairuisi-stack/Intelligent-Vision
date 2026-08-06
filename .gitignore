@@ -47,3 +47,11 @@ JLinkLog.txt
 project/mdk/.vscode/keil-assistant.log
 project/mdk/.vscode/uv4.log
 project/mdk/.vscode/uv4.log.lock
+
+# 桌面仿真运行产物
+simulation/solver.exe
+simulation/map_input.txt
+simulation/path_output.txt
+simulation/visualizer/map_input.txt
+simulation/visualizer/path_output.txt
+simulation/.codex_tmp/

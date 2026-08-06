@@ -27,8 +27,7 @@ struct alignas(4) RobotTask {
         BoxPushAction box_push;    // LOAD_PATH_BOX / UPDATE_BOX_LOGIC
         float target_yaw;          // ALIGN_YAW
         struct {
-            uint8_t entity_id;
-            bool is_box;
+            uint32_t active_mask;
         } capture;                 // WAIT_ART2_CAPTURE
     } param;
 
@@ -59,9 +58,9 @@ struct alignas(4) RobotTask {
         t.type = TaskType::ALIGN_YAW; t.param.target_yaw = yaw; 
         return t; 
     }
-    static RobotTask make_capture(uint8_t id, bool box) { 
+    static RobotTask make_capture(uint32_t active_mask) {
         RobotTask t{}; 
-        t.type = TaskType::WAIT_ART2_CAPTURE; t.param.capture.entity_id = id; t.param.capture.is_box = box; 
+        t.type = TaskType::WAIT_ART2_CAPTURE; t.param.capture.active_mask = active_mask;
         return t; 
     }
     static RobotTask make_apply_bomb_result(const BombPushAction& bomb_push) {
