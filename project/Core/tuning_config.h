@@ -19,7 +19,7 @@ namespace LinearTerminalConfig {
 inline constexpr float CRUISE_SPEED_CM_S = 100.0f;
 inline constexpr float SHORT_MIN_SPEED_CM_S = 15.0f;
 inline constexpr float SHORT_SLOWDOWN_DIST_CM = 12.0f;
-inline constexpr float LONG_MIN_SPEED_CM_S = 25.0f;
+inline constexpr float LONG_MIN_SPEED_CM_S = 20.0f;
 inline constexpr float LONG_SLOWDOWN_DIST_CM = 35.0f;
 inline constexpr float STOP_DIST_CM = 0.8f;
 inline constexpr float LONG_SEGMENT_THRESHOLD_CM = 60.0f;
@@ -98,8 +98,10 @@ struct TuningConfig {
 
     struct {
         float encoder_latency_gain;   // 编码器位移延迟补偿倍率
-        float vision_latency_ms;      // 视觉延迟估计失效时的回退值 ms
-        float enable_estimation;      // 在线估计开关，0 关闭，1 开启
+        float vision_latency_ms;      // 视觉管线固定延时 ms：补偿唯一采用的 L
+                                      // 2026-08-07 起拐点在线估计不再参与补偿，本键就是最终值
+        float enable_estimation;      // 拐点延时测量开关，0 关闭，1 开启
+                                      // 只影响遥测 mode 3 的 est_raw/est_filt，不进补偿链路
         float turn_thresh_deg;        // 拐点触发转角阈值 deg
         float enc_v_min;              // 编码器速度门 cm/20ms
         float vis_v_min;              // 视觉速度门 cm/frame
@@ -109,6 +111,8 @@ struct TuningConfig {
         float dtheta_tol_deg;         // 编码器与视觉转角匹配容差 deg
         float lowpass_alpha;          // 延迟估计低通系数
         float l_stale_ms;             // 延迟估计过期时间 ms
+        // turn_thresh_deg 到 l_stale_ms 这一组同样只作用于上面的测量通路
+        // 结构体尾部字段不删不移，避免改变偏移让已保存的 flash 配置整体失效
     } latency;
 
     struct {
@@ -185,7 +189,7 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
         2.0f,    // tracker.corner_switch_window
         0.7f,    // tracker.corner_line_tolerance
         100.0f,  // tracker.vision_request_interval_ms
-        10.0f,   // tracker.vision_reject_dist：横向误差接受范围，避免偏差超过 1cm 后反而完全不修
+        5.0f,   // tracker.vision_reject_dist：横向误差接受范围，避免偏差超过 1cm 后反而完全不修
         0.010f,  // tracker.ang_tolerance
         5.0f,    // tracker.corner_pause_speed
     },
@@ -234,11 +238,17 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
     {
         1.0f,     // vision_long.enable：默认开启，中远段缓慢修正纵向里程，末端冻结逻辑保持不变
         3.0f,     // vision_long.freeze_floor_cm
-        1.0f,     // vision_long.latency_window_gain
+        0.5f,     // vision_long.latency_window_gain
         1.0f,     // vision_long.max_step_cm
         1.0f,     // vision_long.push_max_step_cm
-        10.0f,    // vision_long.reject_dist_cm：与 15cm 硬重置阈值衔接，不留拒绝修正空档
+        // reject_dist_cm 是"粗差闸"（超过即整帧丢弃），不是限速——限速是 max_step_cm。
+        // 曾设 2.0：纵向误差一旦越过 2cm 就完全不修，与 15cm 硬重置之间留下 13cm 死区，
+        // 误差越大越不修。长段累积必然越过 2cm → 修正开关式关闭 → 剩余段纯靠已跑偏的编码器
+        // → 多跑；短段撑不到 2cm 所以一直准。取 12 与硬重置衔接，不留空档。
+        12.0f,    // vision_long.reject_dist_cm
         1.0f,     // vision_long.scale_learn_enable
+        // 比例是全局持久状态、乘在每个编码器增量上，误差正比于段长。alpha 越大波动越快、
+        // run-to-run 差异越大（"偶尔多跑"的来源）。保守取 0.10。
         0.10f,    // vision_long.scale_learn_alpha
         10.0f,    // vision_long.scale_sample_min_cm
         0.85f,    // vision_long.scale_min

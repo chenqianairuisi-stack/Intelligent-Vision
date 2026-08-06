@@ -20,7 +20,16 @@ constexpr float INV_360 = 1.0f / 360.0f;
 constexpr float INV_GRID_SIZE_CM = 1.0f / SystemConfig::GRID_SIZE_CM;
 
 namespace {
-    constexpr Point2D RETURN_HOME_TARGET = {SystemConfig::ENTRY_X, SystemConfig::ENTRY_Y};
+    constexpr point RETURN_HOME_GRID = {
+        static_cast<int8_t>((SystemConfig::ENTRY_X - SystemConfig::MAP_OFFSET_X) /
+                            SystemConfig::GRID_SIZE_CM),
+        static_cast<int8_t>((SystemConfig::ENTRY_Y - SystemConfig::MAP_OFFSET_Y) /
+                            SystemConfig::GRID_SIZE_CM)
+    };
+    constexpr point RETURN_EXIT_GRID = {
+        static_cast<int8_t>(SystemConfig::PLAN_START_X),
+        static_cast<int8_t>(SystemConfig::PLAN_START_Y)
+    };
     constexpr float RETURN_HOME_YAW = SystemConfig::ENTRY_YAW;
 
     // 三关模式轮次表：round 0 纯推箱，round 1/2 识别（巡图+推箱）。
@@ -28,26 +37,14 @@ namespace {
     constexpr bool ROUND_ADVANCED_SEQ[] = {false, true, true};
     constexpr uint8_t MAX_ROUND_COUNT =
         static_cast<uint8_t>(sizeof(ROUND_ADVANCED_SEQ) / sizeof(ROUND_ADVANCED_SEQ[0]));
-    // 返航到家判定半径：放宽到比小车停车散布更大一圈，避免在过严的点位上反复蹭/挪
-    constexpr float RETURN_HOME_REACH_RADIUS_CM = 1.5f;
     constexpr float RETURN_FINAL_YAW_TOLERANCE_DEG = 2.0f;
+    constexpr float RETURN_EXIT_ODOM_REACH_RADIUS_CM = 3.0f;
+    constexpr float RETURN_EXIT_VISUAL_REACH_RADIUS_CM = 2.0f;
     constexpr uint32_t RETURN_POSE_RECENT_MS = 300U;
     constexpr uint32_t RETURN_POSE_REQUEST_INTERVAL_MS = 150U;
 
     DTCM_DATA uint32_t s_return_pose_request_tick_ms = 0U;
-    DTCM_DATA uint32_t s_return_pose_start_seq = 0U;
-    DTCM_DATA bool s_return_tracking_started = false;
-
-    // 发车前 home 起点重定位（仅 round>=1）：round1/2 是靠纯编码器返航回来的、home 基准已漂。
-    // 故重进 INIT_CALIBRATE 后先**停在 home 别急着发车**，等一段固定时长让车/视觉完全稳，
-    // 再吃一帧稳定视觉把里程计 x/y 校准到真实起点，定好了再发车去 OUT_TARGET。
-    // 稳定闸比返航松：车此刻静止停在 home，视觉本就不动，几帧一致即可信（返航 10 帧太慢）。
-    constexpr uint8_t HOME_RELOCATE_STABLE_REQUIRED_FRAMES = 3U;  // 发车前吃视觉所需稳定帧（<返航的10）
-    constexpr uint32_t HOME_RELOCATE_SETTLE_MS = 800U;           // 到 home 后额外停这么久让车/视觉稳定再吃
-    DTCM_DATA uint32_t s_home_relocate_request_tick_ms = 0U;
-    DTCM_DATA uint32_t s_home_relocate_start_seq = 0U;
-    DTCM_DATA uint32_t s_home_relocate_settle_start_ms = 0U;
-    DTCM_DATA bool s_home_relocate_armed = false;
+    DTCM_DATA bool s_return_final_align_started = false;
 
     // 炸弹按需等待爆炸：记录"这次爆炸真正会清开的墙格集合"，下一条路径若踩到其中任一格才等爆炸。
     // 存被清开的墙格(而非 blast_wall 单点)有两个原因：
@@ -137,12 +134,10 @@ namespace {
         }
     }
 
-    [[gnu::always_inline]] inline bool get_recent_return_vision_pose(uint32_t now,
-                                                                     uint32_t start_seq,
+    [[gnu::always_inline]] inline bool get_recent_stable_vision_pose(uint32_t now,
                                                                      Pose2D& out_pose) {
         const auto& vision = App::g_state.vision;
         if (vision.art1_pose_seq == 0U ||
-            vision.art1_pose_seq == start_seq ||
             vision.art1_pose_stable_count < App::ART1_POSE_STABLE_REQUIRED_FRAMES ||
             now - vision.art1_pose_tick_ms > RETURN_POSE_RECENT_MS) {
             return false;
@@ -152,56 +147,26 @@ namespace {
         return std::isfinite(out_pose.x) && std::isfinite(out_pose.y);
     }
 
-    [[gnu::always_inline]] inline void start_return_home_tracking() {
-        Algorithm::Tracker::track_point(
-            {RETURN_HOME_TARGET.x, RETURN_HOME_TARGET.y, RETURN_HOME_YAW});
+    [[gnu::always_inline]] inline bool vision_reached_return_exit(uint32_t now) {
+        Pose2D vision_pose;
+        if (!get_recent_stable_vision_pose(now, vision_pose)) {
+            return false;
+        }
+        float dx = vision_pose.x - SystemConfig::OUT_TARGET_X;
+        float dy = vision_pose.y - SystemConfig::OUT_TARGET_Y;
+        return dx * dx + dy * dy <=
+               RETURN_EXIT_VISUAL_REACH_RADIUS_CM * RETURN_EXIT_VISUAL_REACH_RADIUS_CM;
     }
 
-    // 发车前 home 起点重定位：在 home 停稳后调用，非阻塞、阻塞发车直到定好。
-    // 首拍 arm（快照 seq、发首帧请求、记 settle 起始时刻）；先停等 HOME_RELOCATE_SETTLE_MS 让车/视觉稳，
-    // 期间只请求不吃；等够后再等一帧稳定近帧，拿到就 set_position 校准里程计 x/y（yaw 仍用陀螺）
-    // 并返回 true；否则 false（继续停在 home 等）。成功后清 arm，供下一轮重新 arm。
-    [[gnu::always_inline]] inline bool relocate_at_home() {
-        uint32_t now = Core::Scheduler::get_sys_tick_ms();
-
-        if (!s_home_relocate_armed) {
-            s_home_relocate_start_seq = App::g_state.vision.art1_pose_seq;  // 请求前基准 seq
-            s_home_relocate_request_tick_ms = 0U;                          // 强制首帧立即请求
-            s_home_relocate_settle_start_ms = now;                          // settle 计时起点
-            s_home_relocate_armed = true;
+    [[gnu::always_inline]] inline void start_return_route(bool continue_to_next_round) {
+        StaticArray<point, SystemConfig::MAX_PATH_LENGTH> route;
+        route.push_back(RETURN_HOME_GRID);
+        if (continue_to_next_round) {
+            // home 是普通中间航点，Tracker 会保留速度并直接切向下一关出库点
+            route.push_back(RETURN_EXIT_GRID);
         }
-
-        // 限流请求（settle 期间也请求，累积稳定帧计数，等够时刻立即有新鲜帧可吃）
-        if (s_home_relocate_request_tick_ms == 0U ||
-            now - s_home_relocate_request_tick_ms >= RETURN_POSE_REQUEST_INTERVAL_MS) {
-            s_home_relocate_request_tick_ms = now;
-            Subsystem::Vision::schedule_pose_request_ART1();
-        }
-
-        // 固定停等：到 home 后额外停 HOME_RELOCATE_SETTLE_MS 让车/视觉完全稳下来再吃
-        if (now - s_home_relocate_settle_start_ms < HOME_RELOCATE_SETTLE_MS) {
-            return false;
-        }
-
-        // 松稳定闸：车静止停在 home，几帧一致即可信（返航用 10 帧太慢，这里用 3）
-        const auto& vision = App::g_state.vision;
-        if (vision.art1_pose_seq == 0U ||
-            vision.art1_pose_seq == s_home_relocate_start_seq ||
-            vision.art1_pose_stable_count < HOME_RELOCATE_STABLE_REQUIRED_FRAMES ||
-            now - vision.art1_pose_tick_ms > RETURN_POSE_RECENT_MS) {
-            return false;  // 稳定近帧还没到，下一拍继续等
-        }
-
-        const Pose2D& vision_pose = vision.art1_pose_buffer[vision.art1_pose_publish_idx];
-        if (!std::isfinite(vision_pose.x) || !std::isfinite(vision_pose.y)) {
-            return false;
-        }
-
-        // 只重置 x/y，yaw 保留陀螺仪估计（视觉 yaw 不可信，全工程约定）
-        Subsystem::PoseEstimator::set_position(
-            vision_pose.x, vision_pose.y, App::g_state.physical.pose.yaw);
-        s_home_relocate_armed = false;  // 本轮定好，解除 arm
-        return true;
+        Algorithm::Tracker::load_path_with_vision_assist(route);
+        App::g_state.control.current_target.yaw = RETURN_HOME_YAW;
     }
 }
 
@@ -289,8 +254,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
         // ---- 阶段一：启动出库与建图 ----
         // =============================================================================
         case GamePhase::INIT_CALIBRATE: {
-            // 一次性复位（仅本 phase 首拍执行；round>=1 下面要在此停等重定位、会多拍停留，
-            // 不能每拍重置视觉标志否则清掉正在累积的稳定帧）。
+            // 一次性复位，连续关卡之间会走返航直通路径而不再进入本阶段
             if (phase_entered) {
                 vision_data.art1_map_ready = false;
                 vision_data.art1_pose_updated = false;
@@ -298,7 +262,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 vision_data.art1_pose_seq = 0U;
                 vision_data.art1_pose_tick_ms = 0U;
                 vision_data.art1_pose_stable_count = 0U;
-                // 首轮从真实初始点发车，后续轮次停在入库 home 点等待视觉重定位
+                // 正常只在首轮进入，保留 round 分支供调试时从中间轮次手动重启
                 const float start_x = (game.round_idx == 0) ? INITIAL_X : ENTRY_X;
                 const float start_y = (game.round_idx == 0) ? INITIAL_Y : ENTRY_Y;
                 Subsystem::PoseEstimator::set_position(start_x, start_y, ENTRY_YAW);
@@ -308,27 +272,16 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 s_pending_blast_cells.clear();
                 s_explosion_wait_active = false;
                 Algorithm::Tracker::set_vision_correction_suppressed(false);
-
-                // 复位发车前重定位 arm 标志，防止上一轮异常中断后卡在 armed 半途
-                s_home_relocate_armed = false;
             }
 
-            // 第 2、3 次发车（round>=1）：靠纯编码器返航回来、home 基准已漂——发车前先停在 home
-            // 停等一段固定时长 + 吃一帧稳定视觉把里程计校准到真实起点，定好了再发车。
-            // round 0 从真实初始点起步，里程计准，无需重定位、直接发车。
-            if (game.round_idx >= 1 && !relocate_at_home()) {
-                break;  // 还在停等/稳定帧没到，原地停在 home 等下一拍
-            }
-
-            // 定位已就绪（或 round0 无需定位）：发车去观测建图点
+            // 首轮正常发车去观测建图点
             Algorithm::Tracker::track_point({OUT_TARGET_X, OUT_TARGET_Y, ENTRY_YAW});
             game.phase = GamePhase::EXIT_START_ZONE;
             break;
         }
 
         case GamePhase::EXIT_START_ZONE: {
-            // 到位后请求视觉模块 ART1 返回地图数据，进入等待状态。
-            // （起点重定位已在 INIT_CALIBRATE 发车前完成，此处不再吃视觉。）
+            // 到位后请求视觉模块 ART1 返回地图数据，进入等待状态
             if (Algorithm::Tracker::check_arrival({OUT_TARGET_X, OUT_TARGET_Y}, tune.tracker.reach_radius_min) &&
                 App::g_state.physical.is_stopped) {
                 Subsystem::Vision::request_map_ART1();   // 请求 ART1 地图
@@ -686,10 +639,13 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
         // ---- 阶段四：返回起点 ----
         // =============================================================================
         case GamePhase::PLAN_RETURN_HOME: {
-            const auto& vision = App::g_state.vision;
             s_return_pose_request_tick_ms = 0U;
-            s_return_pose_start_seq = vision.art1_pose_seq;
-            s_return_tracking_started = false;
+            s_return_final_align_started = false;
+            // 爆炸屏蔽只作用于关卡内等待窗口，返航必须恢复动态视觉纠偏
+            Algorithm::Tracker::set_vision_correction_suppressed(false);
+            // 返航立即启动，ART1 只提供运动中纠偏，不能成为发车前的无限阻塞条件
+            bool has_next_round = game.round_idx + 1 < game.round_count;
+            start_return_route(has_next_round);
             request_return_pose_sample(Core::Scheduler::get_sys_tick_ms());
             game.phase = GamePhase::EXEC_RETURN_HOME;
             break;
@@ -697,42 +653,58 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
 
         case GamePhase::EXEC_RETURN_HOME: {
             uint32_t now = Core::Scheduler::get_sys_tick_ms();
+            bool has_next_round = game.round_idx + 1 < game.round_count;
+            if (has_next_round) {
+                // home 保持普通连续航点，切到第二航段后才允许判断观测区
+                bool exit_leg_started = App::g_state.planning.current_wp_idx >= 1U;
+                bool odom_at_exit = Algorithm::Tracker::check_arrival(
+                    {OUT_TARGET_X, OUT_TARGET_Y}, RETURN_EXIT_ODOM_REACH_RADIUS_CM);
+                bool route_finished_at_exit = ctrl.tracker_state == TrackerState::FINISHED;
 
-            if (!s_return_tracking_started) {
+                // 持续补请求以免 AUTO 路径结束后不再拉取位姿
                 request_return_pose_sample(now);
-
-                Pose2D vision_pose;
-                if (!get_recent_return_vision_pose(now, s_return_pose_start_seq, vision_pose)) {
+                if (!exit_leg_started ||
+                    (!odom_at_exit && !route_finished_at_exit) ||
+                    !vision_reached_return_exit(now)) {
                     break;
                 }
 
-                Subsystem::PoseEstimator::set_position(vision_pose.x, vision_pose.y, pos.yaw);
-                // 返航只在出发瞬间用一次视觉坐标校准里程计，之后全程靠编码器回出发点，
-                // 不再让持续推流的视觉帧介入控制（避免临近终点被视觉反复拉扯/抖动）。
-                // 回程误差交给"下一轮发车前在 home 停着等视觉定位好再发车"兜（见 INIT_CALIBRATE 起点重定位）。
-                Algorithm::Tracker::set_vision_correction_suppressed(true);
-                start_return_home_tracking();
-                s_return_tracking_started = true;
+                // 编码器和视觉都确认到达后请求地图，不要求停车
+                Algorithm::Tracker::track_point({OUT_TARGET_X, OUT_TARGET_Y, RETURN_HOME_YAW});
+                game.round_idx++;
+                game.is_advanced_stage = ROUND_ADVANCED_SEQ[game.round_idx];
+                vision_data.art1_map_ready = false;
+                vision_data.art1_pose_updated = false;
+                vision_data.art1_pose_request_pending = false;
+                s_pending_blast_cells.clear();
+                s_explosion_wait_active = false;
+                Algorithm::Tracker::set_vision_correction_suppressed(false);
+                if (game.is_debug_mode) {
+                    load_mock_map(game.selected_map_id);
+                } else {
+                    Subsystem::Vision::request_map_ART1();
+                }
+                game.phase = GamePhase::WAIT_FOR_VISION;
+                break;
+            }
+
+            if (!s_return_final_align_started) {
+                if (ctrl.tracker_state != TrackerState::FINISHED) {
+                    break;
+                }
+                // AUTO 路径完成时会保持当前航向，这里只在最终端点原地收齐入口角
+                Algorithm::Tracker::track_point({pos.x, pos.y, RETURN_HOME_YAW});
+                s_return_final_align_started = true;
                 break;
             }
 
             bool yaw_aligned =
                 yaw_error_abs_deg(RETURN_HOME_YAW, pos.yaw) <= RETURN_FINAL_YAW_TOLERANCE_DEG;
-            bool odom_at_home = Algorithm::Tracker::check_arrival(
-                RETURN_HOME_TARGET, RETURN_HOME_REACH_RADIUS_CM);
-
-            if (odom_at_home && App::g_state.physical.is_stopped && yaw_aligned) {
-                // 本轮已返航到家并停稳。若还有下一轮，推进轮次、切换赛段，重新进入
-                // INIT_CALIBRATE——它会重新 arm 地图接收闸、把里程计原点设回 home、重发去观测点
-                // 指令、清炸弹等待并解除视觉抑制，等价于一次完整的单轮复位（重新申请地图）。
-                if (game.round_idx + 1 < game.round_count) {
-                    game.round_idx++;
-                    game.is_advanced_stage = ROUND_ADVANCED_SEQ[game.round_idx];  // 下轮赛段：先设好再重进 INIT
-                    game.phase = GamePhase::INIT_CALIBRATE;   // 重新发车
-                } else {
-                    game.phase = GamePhase::FINISHED;         // 本次设定轮数完成，永久停止
-                }
+            if (!App::g_state.physical.is_stopped || !yaw_aligned) {
+                break;
             }
+
+            game.phase = GamePhase::FINISHED;
             break;
         }
 

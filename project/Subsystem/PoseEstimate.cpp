@@ -202,7 +202,24 @@ namespace {
     //       T_vis 才转向，L ≈ T_vis − T_enc。直接测物理延时再做 tick 查表补偿。
     // 并发：编码器拐点在 20ms PIT 中断里入 FIFO；视觉拐点在主循环里配对并写 L。
     //       FIFO 消费者(主循环)用 PRIMASK 临界区屏蔽中断，生产者(中断)无需加锁。
+    //
+    // 2026-08-07 起本估计器降级为纯测量仪：结果只写 s_vision_latency_debug
+    // （波形 mode 3 的 est_raw/est_filt 照常可看，用来标定固定 L），不再参与
+    // 位姿补偿，见 VISION_LATENCY_ONLINE_ESTIMATE 与 current_L()。
+    // LE 键从此只控制"是否继续测量"，不影响控制链路。
     // =========================================================================
+
+    // 拐点估计出的 L 是否参与位姿补偿。false = 只做遥测测量，补偿一律用固定
+    // tune.latency.vision_latency_ms（默认 380ms）
+    //
+    // 2026-08-07 关闭原因：管线延时（曝光 + ART1 处理 + 串口）物理上是常数，
+    // 在线估计只是在追一个常数，方差却直接进落点。冲刺段尤其致命——外推距离
+    // 是 v*L，v=150 时 L 偏 50ms 就是 7.5cm。更糟的是 L 只在拐点更新，长直线
+    // 段内无拐点，跑够 l_stale_ms 就整体跳回 380ms，落点误差因此呈双峰
+    // （实测 2~4cm 与 10cm 两簇）。改常数后误差退化为确定的 v*ΔL，可一次标掉。
+    // 改回 true 即恢复在线估计。
+    constexpr bool VISION_LATENCY_ONLINE_ESTIMATE = false;
+
     constexpr uint8_t L_MEDIAN_WIN   = 5;     // L 中值窗口
     constexpr uint8_t PENDING_FIFO_CAP = 3;   // 待配对编码器拐点容量
     constexpr float   INFLECT_SLEW_ALPHA = 0.15f; // ref 航向跟踪渐变曲率的慢速系数
@@ -311,13 +328,15 @@ namespace {
         return tmp[n / 2];
     }
 
-    // 当前补偿采用的延时（回退梯）：锁定且未过期用滤波 L，否则用调参默认值
+    // 当前补偿采用的延时：固定取 tune.latency.vision_latency_ms
+    // VISION_LATENCY_ONLINE_ESTIMATE 为 false 时下面的在线分支整段被编译器折掉，
+    // 因此 flash 里存着的 LE=1 也不会让估计值重新进入补偿链路（不需要 storage 迁移）
     float current_L() {
         float fallback = tune.latency.vision_latency_ms;
         if (!std::isfinite(fallback)) {
             fallback = DEFAULT_VISION_LATENCY_MS;
         }
-        if (tune.latency.enable_estimation && s_L_locked) {
+        if (VISION_LATENCY_ONLINE_ESTIMATE && tune.latency.enable_estimation && s_L_locked) {
             uint32_t now = Core::Scheduler::get_sys_tick_ms();
             if ((uint32_t)(now - s_L_last_update_tick) <= (uint32_t)tune.latency.l_stale_ms) {
                 s_vision_latency_debug.used_l_ms = s_L_filt;
