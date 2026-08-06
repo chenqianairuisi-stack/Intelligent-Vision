@@ -121,7 +121,7 @@ namespace {
         // 同步给底盘 Stanley 贴线用：段起点随切段一起更新
         App::g_state.control.segment_start = segment_start;
 
-        // 纵向重同步：切段时把编码器纯积分位姿 XY 贴齐当前融合位姿，消除横向纠偏累积的纵向漂移。
+        // 纵向重同步：切段时把控制里程位姿 XY 贴齐当前融合位姿，消除横向纠偏累积的纵向漂移。
         // set_encoder_pose_xy 只平移历史整体（不清历史），保留延时匹配所需的帧间差值。
         const auto& fused = App::g_state.physical.pose;
         Subsystem::PoseEstimator::set_encoder_pose_xy(fused.x, fused.y);
@@ -598,7 +598,8 @@ __attribute__((section(".ramfunc"))) void update_vision_assist(const Point2D& ta
         segment_start,
         target,
         plan.vision_last_correction_seq,
-        true
+        true,
+        is_push_extra_waypoint(plan.current_wp_idx)
     );
 }
 
@@ -677,7 +678,8 @@ __attribute__((section(".ramfunc"))) void vision_correction_tick() {
         plan.vision_segment_start,
         {ctrl.current_target.x, ctrl.current_target.y},
         plan.vision_last_correction_seq,
-        true
+        true,
+        is_push_extra_waypoint(plan.current_wp_idx)
     );
 }
 

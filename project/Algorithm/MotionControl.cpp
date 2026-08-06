@@ -88,13 +88,13 @@ constexpr float PATH_TRACK_GAIN_S = 3.5f;
 constexpr float PATH_TRACK_MAX_RATIO = 0.45f;
 constexpr float PATH_CORNER_APPROACH_CM = 28.0f;
 
-constexpr float LONG_PATH_LOOKAHEAD_MAX_CM = 22.0f;
+constexpr float LONG_PATH_LOOKAHEAD_MAX_CM = 35.0f;
 constexpr float LONG_PATH_LATERAL_LOOKAHEAD_K = 0.35f;
 constexpr float LONG_PATH_LATERAL_SLOW_START_CM = 5.0f;
 constexpr float LONG_PATH_LATERAL_SLOW_FULL_CM = 16.0f;
-constexpr float LONG_PATH_LATERAL_MIN_SPEED_SCALE = 0.65f;
-constexpr float LONG_PATH_TRACK_GAIN_S = 1.8f;
-constexpr float LONG_PATH_TRACK_MAX_RATIO = 0.22f;
+constexpr float LONG_PATH_LATERAL_MIN_SPEED_SCALE = 0.75f;
+constexpr float LONG_PATH_TRACK_GAIN_S = 2.5f;
+constexpr float LONG_PATH_TRACK_MAX_RATIO = 0.35f;
 }
 
 /// \brief 根据当前位置误差生成平滑的全局平移速度
@@ -114,7 +114,19 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
 
     float max_speed = tune.dynamics.max_vel;
     float max_acc = tune.dynamics.max_acc;
+    // 刹车能力与 max_acc 解耦：brake_limit×max_acc 是"想要多强"，brake_acc_ceiling 是地面
+    // "给得起多强"（轮胎附着力，物理量，与规划参数无关），取两者较小值。
+    // 不解耦时调高 max_acc 会让规划自动认为刹车也变强 → auto_terminal_window 按虚高的
+    // brake_acc 反推出过短的减速窗口 → 车以过高速度进窗口 → 刹车段打滑（编码器虚减）→ 冲过头。
+    // 实测：max_acc=200 一律欠到（只有加速打滑），max_acc=800 转为有时过冲（刹车打滑压过加速打滑）。
+    // 默认 ceiling=390，与当前 600×0.65 一致；以后调高 max_acc 也不会虚构更强的刹车能力。
     float brake_acc = max_acc * tune.dynamics.brake_limit;
+    {
+        float cap = tune.dynamics.brake_acc_ceiling;
+        if (std::isfinite(cap) && cap > 1.0f && cap < brake_acc) {
+            brake_acc = cap;
+        }
+    }
     float target_end_speed = std::clamp(end_speed, 0.0f, max_speed);
     bool long_segment = std::isfinite(seg_len_cm) &&
                         seg_len_cm >= LinearTerminalConfig::LONG_SEGMENT_THRESHOLD_CM;

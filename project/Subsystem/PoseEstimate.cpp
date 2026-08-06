@@ -60,14 +60,41 @@ namespace {
     struct OdomPoseSample {
         uint32_t tick_ms = 0;
         Pose2D pose = {0.0f, 0.0f, SystemConfig::ENTRY_YAW};
+        Pose2D raw_pose = {0.0f, 0.0f, SystemConfig::ENTRY_YAW};
         bool valid = false;
     };
 
-    // 编码器纯积分轨迹，只用于把延时视觉坐标外推到当前时刻，不受视觉修正本身影响
+    // 编码器积分轨迹，用于把延时视觉坐标外推到当前时刻。
+    // 横向视觉修正不写这里（保持切向判定的横向容差零延迟、不被视觉污染）；
+    // 纵向视觉修正会整体平移它（含 s_odom_history），因为到达/越线/切段判定都读
+    // s_encoder_pose，纵向修正不写进来就无人消费。平移保持帧间差值不变，延时匹配照常。
     DTCM_DATA Pose2D s_encoder_pose = {0.0f, 0.0f, SystemConfig::ENTRY_YAW};
+    // 原始轨迹只积累 KX/KY 标定后的编码器增量，不接受视觉平移和在线里程比例
+    // 学习时只比较原始轨迹与同采集时刻视觉，避免把已经修过的量再次拿来学习
+    DTCM_DATA Pose2D s_raw_encoder_pose = {0.0f, 0.0f, SystemConfig::ENTRY_YAW};
     DTCM_DATA OdomPoseSample s_odom_history[ODOM_HISTORY_SIZE];
     DTCM_DATA uint16_t s_odom_history_idx = 0;
     DTCM_DATA VisionLatencyDebug s_vision_latency_debug = {};
+    DTCM_DATA MileageScaleDebug s_mileage_scale_debug = {};
+
+    struct MileageScaleAxisLearner {
+        float candidate = 1.0f;
+        uint8_t consistent_count = 0;
+    };
+
+    struct MileageScaleAnchor {
+        Pose2D vision_pose = {};
+        Pose2D raw_odom_pose = {};
+        float along_x = 0.0f;
+        float along_y = 0.0f;
+        uint8_t axis = 0;
+        bool valid = false;
+    };
+
+    DTCM_DATA volatile float s_mileage_scale_x = 1.0f;
+    DTCM_DATA volatile float s_mileage_scale_y = 1.0f;
+    DTCM_DATA MileageScaleAxisLearner s_mileage_axis[2];
+    DTCM_DATA MileageScaleAnchor s_mileage_anchor;
 
     // 常量定义
     constexpr float PLUSE_TO_CM = (2.0f * PI * SystemConfig::WHEEL_RADIUS) / SystemConfig::PULSES_PER_REV;  // 编码器计数转换为轮子移动的距离（cm）
@@ -80,9 +107,12 @@ namespace {
     constexpr float DEFAULT_VISION_LATENCY_MS =
         DEFAULT_TUNE_CONFIG.latency.vision_latency_ms;
     constexpr float VISION_LATERAL_DEADBAND_CM = 0.15f;
-    constexpr float VISION_LATERAL_MAX_STEP_CM = 0.85f;
-    constexpr float VISION_LATERAL_CORRECTION_GAIN = 0.90f;
-    constexpr float VISION_ENCODER_RESET_THRESHOLD_CM = 3.0f;
+    constexpr float VISION_ENCODER_RESET_THRESHOLD_CM = 15.0f;
+    constexpr float MILEAGE_AXIS_ALIGNMENT_MIN = 0.92f;
+    constexpr float MILEAGE_SAMPLE_CONSISTENCY_TOL = 0.03f;
+    constexpr float MILEAGE_MAX_CROSS_TRACK_CM = 3.0f;
+    constexpr float MILEAGE_MAX_CROSS_TRACK_RATIO = 0.15f;
+    constexpr uint8_t MILEAGE_REQUIRED_CONSISTENT_SAMPLES = 2U;
     // 段法向修正要求段向量至少 1cm，否则方向不可靠
     constexpr float VISION_LATERAL_MIN_SEGMENT_LEN_SQ = 1.0f;   // (1 cm)^2
     // 延时外推封顶余量：指令位移(合速度模) × 该系数为外推矢量模上限。1.0=严格按指令；
@@ -95,9 +125,12 @@ namespace {
         return 1.0f / __builtin_sqrtf(x);
     }
 
-    [[gnu::always_inline]] inline void push_odom_history(uint32_t tick_ms, const Pose2D& pose) {
+    [[gnu::always_inline]] inline void push_odom_history(uint32_t tick_ms,
+                                                        const Pose2D& pose,
+                                                        const Pose2D& raw_pose) {
         s_odom_history[s_odom_history_idx].tick_ms = tick_ms;
         s_odom_history[s_odom_history_idx].pose = pose;
+        s_odom_history[s_odom_history_idx].raw_pose = raw_pose;
         s_odom_history[s_odom_history_idx].valid = true;
         s_odom_history_idx = static_cast<uint16_t>((s_odom_history_idx + 1U) % ODOM_HISTORY_SIZE);
     }
@@ -118,11 +151,43 @@ namespace {
 
     void reset_odom_history(const Pose2D& pose, uint32_t tick_ms) {
         s_encoder_pose = pose;
+        s_raw_encoder_pose = pose;
         s_odom_history_idx = 0;
         for (auto& sample : s_odom_history) {
             sample.valid = false;
         }
-        push_odom_history(tick_ms, s_encoder_pose);
+        push_odom_history(tick_ms, s_encoder_pose, s_raw_encoder_pose);
+    }
+
+    [[gnu::always_inline]] inline bool mileage_scale_enabled() {
+        return tune.vision_long.enable > 0.5f &&
+               tune.vision_long.scale_learn_enable > 0.5f;
+    }
+
+    [[gnu::always_inline]] inline float mileage_scale_for_axis(uint8_t axis) {
+        if (!mileage_scale_enabled()) return 1.0f;
+        float value = axis == 0U ? s_mileage_scale_x : s_mileage_scale_y;
+        float lo = tune.vision_long.scale_min;
+        float hi = tune.vision_long.scale_max;
+        if (!std::isfinite(value) || !std::isfinite(lo) || !std::isfinite(hi) || lo > hi) {
+            return 1.0f;
+        }
+        return value < lo ? lo : (value > hi ? hi : value);
+    }
+
+    void reset_mileage_scale_learner(bool full) {
+        s_mileage_anchor = {};
+        for (auto& axis : s_mileage_axis) {
+            axis.candidate = 1.0f;
+            axis.consistent_count = 0U;
+        }
+        if (full) {
+            s_mileage_scale_x = 1.0f;
+            s_mileage_scale_y = 1.0f;
+        }
+        s_mileage_scale_debug = {};
+        s_mileage_scale_debug.scale_x = s_mileage_scale_x;
+        s_mileage_scale_debug.scale_y = s_mileage_scale_y;
     }
 
     [[gnu::always_inline]] inline float pose_distance_sq_xy(const Pose2D& a, const Pose2D& b) {
@@ -368,6 +433,7 @@ namespace {
     bool match_vision_pose_to_odom_history(const Pose2D& delayed_vision_pose,
                                            uint32_t receive_tick_ms,
                                            Pose2D& out_odom_pose,
+                                           Pose2D& out_raw_odom_pose,
                                            uint32_t& out_capture_tick_ms) {
         (void)delayed_vision_pose;  // 不再用视觉 XY 匹配，仅按时间查表
         constexpr int32_t SINGLE_SIDED_TOL_MS = 2 * (int32_t)SystemConfig::PIT_CH1_PERIOD_MS;
@@ -392,11 +458,17 @@ namespace {
             uint32_t span = after->tick_ms - before->tick_ms;
             if (span == 0U) {
                 out_odom_pose = before->pose;
+                out_raw_odom_pose = before->raw_pose;
             } else {
                 float t = (float)(int32_t)(target_tick - before->tick_ms) / (float)span;
                 out_odom_pose.x   = before->pose.x   + (after->pose.x   - before->pose.x)   * t;
                 out_odom_pose.y   = before->pose.y   + (after->pose.y   - before->pose.y)   * t;
                 out_odom_pose.yaw = after->pose.yaw;  // yaw 仅供调试，取较新值
+                out_raw_odom_pose.x = before->raw_pose.x +
+                                      (after->raw_pose.x - before->raw_pose.x) * t;
+                out_raw_odom_pose.y = before->raw_pose.y +
+                                      (after->raw_pose.y - before->raw_pose.y) * t;
+                out_raw_odom_pose.yaw = after->raw_pose.yaw;
             }
             out_capture_tick_ms = target_tick;
             return true;
@@ -404,11 +476,13 @@ namespace {
         // 只有单侧样本：在容差内就近取用，否则放弃（历史未覆盖该时刻）
         if (before != nullptr && (-best_before) <= SINGLE_SIDED_TOL_MS) {
             out_odom_pose = before->pose;
+            out_raw_odom_pose = before->raw_pose;
             out_capture_tick_ms = before->tick_ms;
             return true;
         }
         if (after != nullptr && best_after <= SINGLE_SIDED_TOL_MS) {
             out_odom_pose = after->pose;
+            out_raw_odom_pose = after->raw_pose;
             out_capture_tick_ms = after->tick_ms;
             return true;
         }
@@ -419,7 +493,8 @@ namespace {
                                              uint32_t receive_tick_ms,
                                              uint32_t& out_capture_tick_ms,
                                              float& out_dx,
-                                             float& out_dy) {
+                                             float& out_dy,
+                                             Pose2D& out_raw_odom_at_capture) {
         out_dx = 0.0f;
         out_dy = 0.0f;
 
@@ -428,6 +503,7 @@ namespace {
                 delayed_vision_pose,
                 receive_tick_ms,
                 odom_at_capture,
+                out_raw_odom_at_capture,
                 out_capture_tick_ms)) {
             return false;
         }
@@ -466,7 +542,8 @@ namespace {
 
     bool compensate_vision_latency(const Pose2D& delayed_vision_pose,
                                    uint32_t receive_tick_ms,
-                                   Pose2D& compensated) {
+                                   Pose2D& compensated,
+                                   Pose2D& raw_odom_at_capture) {
         compensated = delayed_vision_pose;
         float odom_dx = 0.0f;
         float odom_dy = 0.0f;
@@ -479,7 +556,8 @@ namespace {
                 receive_tick_ms,
                 capture_tick_ms,
                 odom_dx,
-                odom_dy)) {
+                odom_dy,
+                raw_odom_at_capture)) {
             return false;
         }
 
@@ -516,6 +594,133 @@ namespace {
         return true;
     }
 
+    void set_mileage_scale_anchor(const Pose2D& vision_pose,
+                                  const Pose2D& raw_odom_pose,
+                                  float along_x,
+                                  float along_y,
+                                  uint8_t axis) {
+        s_mileage_anchor.vision_pose = vision_pose;
+        s_mileage_anchor.raw_odom_pose = raw_odom_pose;
+        s_mileage_anchor.along_x = along_x;
+        s_mileage_anchor.along_y = along_y;
+        s_mileage_anchor.axis = axis;
+        s_mileage_anchor.valid = true;
+        s_mileage_scale_debug.anchor_valid = true;
+    }
+
+    void invalidate_mileage_scale_anchor() {
+        s_mileage_anchor.valid = false;
+        s_mileage_scale_debug.anchor_valid = false;
+    }
+
+    /// \brief 用同采集时刻的视觉与原始编码器位移学习 X/Y 里程比例
+    ///
+    /// \details
+    /// 只接受接近全局 X/Y 的直线段，至少走满配置距离后才形成一个样本
+    /// 连续两个样本相差不超过 3% 才低通写入，转弯和横移明显的窗口直接丢弃
+    ///
+    void update_mileage_scale_learning(const Pose2D& raw_vision_pose,
+                                       const Pose2D& raw_odom_at_capture,
+                                       float along_x,
+                                       float along_y) {
+        if (!mileage_scale_enabled()) {
+            invalidate_mileage_scale_anchor();
+            return;
+        }
+
+        const float abs_x = std::abs(along_x);
+        const float abs_y = std::abs(along_y);
+        uint8_t axis = 0xFFU;
+        if (abs_x >= MILEAGE_AXIS_ALIGNMENT_MIN && abs_x >= abs_y) axis = 0U;
+        else if (abs_y >= MILEAGE_AXIS_ALIGNMENT_MIN) axis = 1U;
+        if (axis > 1U) {
+            invalidate_mileage_scale_anchor();
+            return;
+        }
+
+        if (!s_mileage_anchor.valid || s_mileage_anchor.axis != axis ||
+            s_mileage_anchor.along_x * along_x + s_mileage_anchor.along_y * along_y < 0.98f) {
+            set_mileage_scale_anchor(raw_vision_pose, raw_odom_at_capture,
+                                     along_x, along_y, axis);
+            return;
+        }
+
+        float odom_dx = raw_odom_at_capture.x - s_mileage_anchor.raw_odom_pose.x;
+        float odom_dy = raw_odom_at_capture.y - s_mileage_anchor.raw_odom_pose.y;
+        float vision_dx = raw_vision_pose.x - s_mileage_anchor.vision_pose.x;
+        float vision_dy = raw_vision_pose.y - s_mileage_anchor.vision_pose.y;
+        float encoder_ds = odom_dx * along_x + odom_dy * along_y;
+        float vision_ds = vision_dx * along_x + vision_dy * along_y;
+
+        float min_distance = tune.vision_long.scale_sample_min_cm;
+        if (!std::isfinite(min_distance) || min_distance < 1.0f) min_distance = 20.0f;
+        if (encoder_ds < min_distance) {
+            if (encoder_ds < -1.0f) {
+                set_mileage_scale_anchor(raw_vision_pose, raw_odom_at_capture,
+                                         along_x, along_y, axis);
+            }
+            return;
+        }
+
+        float normal_x = -along_y;
+        float normal_y = along_x;
+        float encoder_cross = odom_dx * normal_x + odom_dy * normal_y;
+        float vision_cross = vision_dx * normal_x + vision_dy * normal_y;
+        float cross_limit = encoder_ds * MILEAGE_MAX_CROSS_TRACK_RATIO;
+        if (cross_limit < MILEAGE_MAX_CROSS_TRACK_CM) cross_limit = MILEAGE_MAX_CROSS_TRACK_CM;
+        if (std::abs(encoder_cross) > cross_limit || std::abs(vision_cross) > cross_limit) {
+            set_mileage_scale_anchor(raw_vision_pose, raw_odom_at_capture,
+                                     along_x, along_y, axis);
+            return;
+        }
+
+        float sample = vision_ds / encoder_ds;
+        float lo = tune.vision_long.scale_min;
+        float hi = tune.vision_long.scale_max;
+        MileageScaleAxisLearner& learner = s_mileage_axis[axis];
+        if (!std::isfinite(sample) || !std::isfinite(lo) || !std::isfinite(hi) ||
+            lo > hi || sample < lo || sample > hi) {
+            learner.consistent_count = 0U;
+            set_mileage_scale_anchor(raw_vision_pose, raw_odom_at_capture,
+                                     along_x, along_y, axis);
+            return;
+        }
+
+        if (learner.consistent_count == 0U ||
+            std::abs(sample - learner.candidate) > MILEAGE_SAMPLE_CONSISTENCY_TOL) {
+            learner.candidate = sample;
+            learner.consistent_count = 1U;
+        } else {
+            learner.candidate = 0.5f * (learner.candidate + sample);
+            if (learner.consistent_count < MILEAGE_REQUIRED_CONSISTENT_SAMPLES) {
+                ++learner.consistent_count;
+            }
+        }
+
+        s_mileage_scale_debug.last_sample = sample;
+        s_mileage_scale_debug.last_sample_distance_cm = encoder_ds;
+        s_mileage_scale_debug.last_axis = static_cast<uint8_t>(axis + 1U);
+        s_mileage_scale_debug.consistent_x = s_mileage_axis[0].consistent_count;
+        s_mileage_scale_debug.consistent_y = s_mileage_axis[1].consistent_count;
+
+        if (learner.consistent_count >= MILEAGE_REQUIRED_CONSISTENT_SAMPLES) {
+            float alpha = clampf(tune.vision_long.scale_learn_alpha, 0.0f, 1.0f);
+            float old_scale = axis == 0U ? s_mileage_scale_x : s_mileage_scale_y;
+            float new_scale = clampf((1.0f - alpha) * old_scale + alpha * learner.candidate,
+                                     lo, hi);
+            if (axis == 0U) s_mileage_scale_x = new_scale;
+            else            s_mileage_scale_y = new_scale;
+            learner.consistent_count = 0U;
+            s_mileage_scale_debug.consistent_x = s_mileage_axis[0].consistent_count;
+            s_mileage_scale_debug.consistent_y = s_mileage_axis[1].consistent_count;
+        }
+
+        s_mileage_scale_debug.scale_x = s_mileage_scale_x;
+        s_mileage_scale_debug.scale_y = s_mileage_scale_y;
+        set_mileage_scale_anchor(raw_vision_pose, raw_odom_at_capture,
+                                 along_x, along_y, axis);
+    }
+
     // 段法向修正（当前在用）：只把视觉误差沿段法向投影后限步收敛，沿运动方向的分量丢弃
     [[gnu::always_inline]] inline bool apply_projected_lateral_correction(const Pose2D& vision_pose,
                                                                           Pose2D& odom_pose,
@@ -532,8 +737,8 @@ namespace {
         if (!calc_smoothed_correction_step(
                 err,
                 VISION_LATERAL_DEADBAND_CM,
-                VISION_LATERAL_MAX_STEP_CM,
-                VISION_LATERAL_CORRECTION_GAIN,
+                tune.vision_lateral.max_step_cm,
+                tune.vision_lateral.gain,
                 tune.tracker.vision_reject_dist,
                 step)) {
             return false;
@@ -541,6 +746,118 @@ namespace {
 
         odom_pose.x += normal_x * step;
         odom_pose.y += normal_y * step;
+        return true;
+    }
+
+    // 纵向（沿运动方向）缓慢修正：治编码器打滑累积（加速打滑=虚增→欠到；刹车打滑=虚减→过冲）。
+    //
+    // 与横向的本质区别：横向误差不随时间恶化成"冲过头"，晚 L 知道也能纠回来，所以全程可信；
+    // 纵向误差直接变成"该刹车时还以为没到"，因此必须在离目标足够远时才修、进刹车区一律冻结。
+    //
+    // 冻结窗口 = max(当前速度下的刹车距离, v*L*gain, freeze_floor)：
+    //   刹车距离 —— 进了刹车段就别再动位置，否则改一次位置等于改一次刹车曲线起点；
+    //   v*L      —— 视觉这帧描述的是 L 毫秒前的车，这段距离内视觉说不了话；
+    //   floor    —— 与速度无关的硬下限。低速时前两项都塌到 1cm 以下，此时若仍让视觉推位置，
+    //               ±0.5cm 视觉噪声会直接灌进停车判定 → 自激振荡（2026-07-14 踩过）。
+    // 两项交叉点 v = 2*brake_acc*L：brake_acc=390、L=0.31s 时约 242cm/s，高于当前 max_vel，
+    // 故今天由 v*L 主导；刹车距离项是 L 被在线估计压低后的保险。
+    //
+    // 关键：step 同时写入 s_encoder_pose。physical.pose 与 s_encoder_pose 吃同一个编码器增量，
+    // 差别仅在于视觉修正只写前者；而到达/越线/切段判定全部读后者（要零延迟）。若只写
+    // physical.pose，纵向修正就落在一个判定侧不读的量上，对停车精度贡献恰好为零。
+    // 因此纵向修正必须两边都写；横向仍只写 physical.pose，保持 s_encoder_pose 横向纯净
+    // （切向判定的横向容差不能被视觉延迟污染）。
+    [[gnu::always_inline]] inline bool apply_projected_longitudinal_correction(
+            const Pose2D& vision_pose,
+            const Pose2D& raw_vision_pose,
+            const Pose2D& raw_odom_at_capture,
+            Pose2D& odom_pose,
+            float segment_dx,
+            float segment_dy,
+            float segment_len_sq,
+            const Point2D& segment_end,
+            bool is_push_segment) {
+        if (!(tune.vision_long.enable > 0.5f)) {
+            invalidate_mileage_scale_anchor();
+            return false;
+        }
+
+        float inv_len = 1.0f / __builtin_sqrtf(segment_len_sq);
+        float along_x = segment_dx * inv_len;
+        float along_y = segment_dy * inv_len;
+
+        // 剩余距离按零延迟编码器位姿算：判定侧用的就是它，窗口判据必须与判定同源
+        float s_remain = (segment_end.x - s_encoder_pose.x) * along_x +
+                         (segment_end.y - s_encoder_pose.y) * along_y;
+        if (!(s_remain > 0.0f)) {
+            invalidate_mileage_scale_anchor();
+            return false;
+        }
+
+        // 当前速度取编码器实测合速度（无视觉延迟，且刹车滑行时能反映真实速度）
+        const auto& w = App::g_state.physical.current_wheel_speed;
+        Velocity2D enc_v = Algorithm::Motion::Kinematics::forward(w.lf, w.lb, w.rf, w.rb);
+        float v = __builtin_sqrtf(enc_v.vx * enc_v.vx + enc_v.vy * enc_v.vy);
+        if (!std::isfinite(v)) return false;
+
+        float brake_acc = tune.dynamics.max_acc * tune.dynamics.brake_limit;
+        {
+            float cap = tune.dynamics.brake_acc_ceiling;
+            if (std::isfinite(cap) && cap > 1.0f && cap < brake_acc) brake_acc = cap;
+        }
+        float freeze = tune.vision_long.freeze_floor_cm;
+        if (brake_acc > 1.0f) {
+            float brake_dist = (v * v) / (2.0f * brake_acc);
+            if (brake_dist > freeze) freeze = brake_dist;
+        }
+        float lag_window = v * (current_L() * 0.001f) * tune.vision_long.latency_window_gain;
+        if (std::isfinite(lag_window) && lag_window > freeze) freeze = lag_window;
+
+        if (!(s_remain > freeze)) {
+            invalidate_mileage_scale_anchor();
+            return false;
+        }
+
+        if (is_push_segment) invalidate_mileage_scale_anchor();
+        else update_mileage_scale_learning(raw_vision_pose, raw_odom_at_capture,
+                                           along_x, along_y);
+
+        float err = (vision_pose.x - odom_pose.x) * along_x +
+                    (vision_pose.y - odom_pose.y) * along_y;
+
+        float max_step = is_push_segment ? tune.vision_long.push_max_step_cm
+                                         : tune.vision_long.max_step_cm;
+        if (!(max_step > 0.0f)) return false;
+
+        // 粗差闸传纵向自己的 reject_dist_cm，不能沿用横向的 vision_reject_dist（默认 1cm）：
+        // 那是"横向偏这么多就是误检"的尺度，而纵向要治的打滑累积本身就是 1~3cm，沿用会把
+        // 待修误差全判成误检、修正恒为 0。更大的真异常仍由 15cm 粗差硬拽兜底。
+        float step = 0.0f;
+        if (!calc_smoothed_correction_step(
+                err,
+                VISION_LATERAL_DEADBAND_CM,
+                max_step,
+                0.90f,
+                tune.vision_long.reject_dist_cm,
+                step)) {
+            return false;
+        }
+
+        float step_x = along_x * step;
+        float step_y = along_y * step;
+        odom_pose.x += step_x;
+        odom_pose.y += step_y;
+        // 判定侧读的是 s_encoder_pose，纵向必须同步，否则本次修正无人消费。
+        // 历史必须整体平移（同 set_encoder_pose_xy 的理由）：延时补偿算的是
+        // s_encoder_pose - odom_at_capture，只平移当前值会让这个差每帧多算一个 step，
+        // 修正量被反复计入 → 外推越来越大。平移整段历史保持帧间差值不变。
+        s_encoder_pose.x += step_x;
+        s_encoder_pose.y += step_y;
+        for (auto& sample : s_odom_history) {
+            if (!sample.valid) continue;
+            sample.pose.x += step_x;
+            sample.pose.y += step_y;
+        }
         return true;
     }
 
@@ -554,13 +871,13 @@ namespace {
         bool any = false;
         if (calc_smoothed_correction_step(vision_pose.x - odom_pose.x,
                                           VISION_LATERAL_DEADBAND_CM, FULL_MAX_STEP_CM,
-                                          VISION_LATERAL_CORRECTION_GAIN,
+                                          0.90f,
                                           tune.tracker.vision_reject_dist, step_x)) {
             odom_pose.x += step_x; any = true;
         }
         if (calc_smoothed_correction_step(vision_pose.y - odom_pose.y,
                                           VISION_LATERAL_DEADBAND_CM, FULL_MAX_STEP_CM,
-                                          VISION_LATERAL_CORRECTION_GAIN,
+                                          0.90f,
                                           tune.tracker.vision_reject_dist, step_y)) {
             odom_pose.y += step_y; any = true;
         }
@@ -580,6 +897,7 @@ void init() {
     is_calibrated = false;
     q0 = 0.70710678f; q1 = 0.0f; q2 = 0.0f; q3 = 0.70710678f;  // 初始化四元数 (Yaw = 90度)
     reset_odom_history(App::g_state.physical.pose, 0);
+    reset_mileage_scale_learner(true);
     reset_latency_estimator(true);  // 开机全清，包括已学到的 L
     imu_icm42688.init();  // ICM42688 IMU 初始化 (spi)
 }
@@ -604,6 +922,7 @@ void set_position(float x, float y, float yaw_deg) {
     // 3. 同步状态树
     App::g_state.physical.pose.yaw = yaw_deg;
     reset_odom_history(App::g_state.physical.pose, Core::Scheduler::get_sys_tick_ms());
+    reset_mileage_scale_learner(false);
     reset_latency_estimator(false);  // 瞬移/硬重置：清检测器与 FIFO，保留已学 L（延时本身不变）
 }
 
@@ -862,19 +1181,27 @@ void update_position_20ms_tick(const int16_t* encoder_counts, float current_yaw_
     float dx_global = dx_local * sin_yaw + dy_local * cos_yaw;
     float dy_global = -dx_local * cos_yaw + dy_local * sin_yaw;
 
-    // 更新全局物理位姿
-    App::g_state.physical.pose.x += dx_global;
-    App::g_state.physical.pose.y += dy_global;
+    // 原始轨迹专供视觉学习，始终保留未吃在线比例的编码器增量
+    s_raw_encoder_pose.x += dx_global;
+    s_raw_encoder_pose.y += dy_global;
+    s_raw_encoder_pose.yaw = current_yaw_deg;
 
-    s_encoder_pose.x += dx_global;
-    s_encoder_pose.y += dy_global;
+    // X/Y 比例分别作用于之后的里程增量，末端冻结视觉时仍继续使用最后确认值
+    float corrected_dx_global = dx_global * mileage_scale_for_axis(0U);
+    float corrected_dy_global = dy_global * mileage_scale_for_axis(1U);
+
+    App::g_state.physical.pose.x += corrected_dx_global;
+    App::g_state.physical.pose.y += corrected_dy_global;
+
+    s_encoder_pose.x += corrected_dx_global;
+    s_encoder_pose.y += corrected_dy_global;
     s_encoder_pose.yaw = current_yaw_deg;
 
     uint32_t now = Core::Scheduler::get_sys_tick_ms();
-    push_odom_history(now, s_encoder_pose);
+    push_odom_history(now, s_encoder_pose, s_raw_encoder_pose);
 
     // 用本周期的全局位移矢量驱动编码器侧拐点检测（实时延时估计）
-    feed_encoder_sample(dx_global, dy_global, now);
+    feed_encoder_sample(corrected_dx_global, corrected_dy_global, now);
 }
 
 
@@ -882,12 +1209,12 @@ void update_position_20ms_tick(const int16_t* encoder_counts, float current_yaw_
 // 模块 4: 视觉标定与坐标修正
 // =============================================================================
 
-/// \brief 取零延迟纯编码器位姿（不含任何视觉修正）
+/// \brief 取零延迟控制里程位姿
 Pose2D get_encoder_pose() {
     return s_encoder_pose;
 }
 
-/// \brief 把纯编码器位姿 XY 重新钉到给定坐标
+/// \brief 把控制里程位姿 XY 重新钉到给定坐标
 ///
 /// \details
 /// 只做平移：s_encoder_pose 与整个 s_odom_history 一起加同一个偏移量。
@@ -906,9 +1233,10 @@ void set_encoder_pose_xy(float x, float y) {
         sample.pose.x += ox;
         sample.pose.y += oy;
     }
+    invalidate_mileage_scale_anchor();
 }
 
-/// \brief 用最新视觉位姿只修正"与运动方向垂直"的那个轴（段法向）
+/// \brief 用最新视觉位姿修正段法向、纵向里程和在线比例
 /// \param segment_start 当前直线段起点，与 segment_end 一起定义运动方向
 /// \param segment_end 当前直线段终点（当前追踪目标）
 /// \param last_consumed_seq 外层保存的最后一帧已处理视觉序号
@@ -916,15 +1244,16 @@ void set_encoder_pose_xy(float x, float y) {
 ///
 /// \details
 /// 先用编码器纯积分补偿视觉管线延时(tick 查表 + 实时 L)，再把视觉误差投影到
-/// **段法向**做限步收敛：横向(防蹭箱/贴线)延迟无害、该信视觉；纵向(沿运动方向)
-/// 被 ~L 延迟拽会造成过冲，交给零延迟编码器，视觉一律不碰。
+/// **段法向**做限步收敛，并在末端冻结区外缓慢修正纵向坐标
+/// 同采集时刻的原始视觉/编码器位移还会用于学习之后的 X/Y 编码器里程比例
 /// 段向量退化(<1cm，如原地保持/锁点)时方向不可靠，本帧不修，纯靠编码器保持。
 /// 与编码器积分偏离过大(粗差跳变)时仍走硬贴合并重置历史保护。
 /// 按视觉帧序号消费新数据，不清 art1_pose_updated，避免与标定/调试流程抢同一个 bool 标志。
 ///
 bool apply_vision_axis_correction(const Point2D& segment_start, const Point2D& segment_end,
                                   uint32_t& last_consumed_seq,
-                                  bool allow_near_target_correction) {
+                                  bool allow_near_target_correction,
+                                  bool is_push_segment) {
     (void)allow_near_target_correction;
 
     auto& vision_data = App::g_state.vision;
@@ -945,7 +1274,9 @@ bool apply_vision_axis_correction(const Point2D& segment_start, const Point2D& s
         return false;
     }
     Pose2D vision_pose;
-    if (!compensate_vision_latency(raw_vision_pose, vision_data.art1_pose_tick_ms, vision_pose)) {
+    Pose2D raw_odom_at_capture;
+    if (!compensate_vision_latency(raw_vision_pose, vision_data.art1_pose_tick_ms,
+                                   vision_pose, raw_odom_at_capture)) {
         return false;
     }
 
@@ -960,16 +1291,19 @@ bool apply_vision_axis_correction(const Point2D& segment_start, const Point2D& s
         pose.x = vision_pose.x;
         pose.y = vision_pose.y;
         reset_odom_history(pose, Core::Scheduler::get_sys_tick_ms());
+        reset_mileage_scale_learner(false);
         s_vision_latency_debug.correction_x = pose.x - before_x;
         s_vision_latency_debug.correction_y = pose.y - before_y;
         return true;
     }
 
-    // 只纠段法向（与运动方向垂直的那一轴）；沿运动方向的分量丢弃，纵向纯靠编码器
+    // 段法向：全程纠（横向对延迟不敏感，防蹭箱/贴线该信视觉）
+    // 段方向：只在离目标足够远时缓慢纠（治打滑累积），进刹车/切向区冻结、交零延迟编码器
     float seg_dx = segment_end.x - segment_start.x;
     float seg_dy = segment_end.y - segment_start.y;
     float seg_len_sq = seg_dx * seg_dx + seg_dy * seg_dy;
     if (seg_len_sq < VISION_LATERAL_MIN_SEGMENT_LEN_SQ) {
+        invalidate_mileage_scale_anchor();
         return false;   // 段太短/退化：方向不可靠，本帧不修
     }
 
@@ -977,6 +1311,12 @@ bool apply_vision_axis_correction(const Point2D& segment_start, const Point2D& s
     float before_y = pose.y;
     bool applied = apply_projected_lateral_correction(vision_pose, pose,
                                                      seg_dx, seg_dy, seg_len_sq);
+    applied = apply_projected_longitudinal_correction(vision_pose,
+                                                      raw_vision_pose,
+                                                      raw_odom_at_capture,
+                                                      pose,
+                                                      seg_dx, seg_dy, seg_len_sq,
+                                                      segment_end, is_push_segment) || applied;
 
     s_vision_latency_debug.correction_x = pose.x - before_x;
     s_vision_latency_debug.correction_y = pose.y - before_y;
@@ -1073,6 +1413,12 @@ AsyncCalibState async_calibrate_vision(uint32_t timeout_ms, float reject_thresho
 
 const VisionLatencyDebug& get_vision_latency_debug() {
     return s_vision_latency_debug;
+}
+
+const MileageScaleDebug& get_mileage_scale_debug() {
+    s_mileage_scale_debug.scale_x = s_mileage_scale_x;
+    s_mileage_scale_debug.scale_y = s_mileage_scale_y;
+    return s_mileage_scale_debug;
 }
 
 

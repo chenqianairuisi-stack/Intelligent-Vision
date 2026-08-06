@@ -18,8 +18,8 @@ namespace LinearTerminalConfig {
 
 inline constexpr float CRUISE_SPEED_CM_S = 100.0f;
 inline constexpr float SHORT_MIN_SPEED_CM_S = 15.0f;
-inline constexpr float SHORT_SLOWDOWN_DIST_CM = 15.0f;
-inline constexpr float LONG_MIN_SPEED_CM_S = 15.0f;
+inline constexpr float SHORT_SLOWDOWN_DIST_CM = 12.0f;
+inline constexpr float LONG_MIN_SPEED_CM_S = 25.0f;
 inline constexpr float LONG_SLOWDOWN_DIST_CM = 35.0f;
 inline constexpr float STOP_DIST_CM = 0.8f;
 inline constexpr float LONG_SEGMENT_THRESHOLD_CM = 60.0f;
@@ -32,7 +32,7 @@ inline constexpr bool AUTO_WINDOW_ENABLE = true;
 inline constexpr float SLOWDOWN_SEG_RATIO = 0.50f;
 inline constexpr float WINDOW_ACC_MARGIN = 0.80f;
 inline constexpr bool USE_FIXED_DECEL_STEP = false;
-inline constexpr bool USE_LEGACY_MIN_SPEED = false;
+inline constexpr bool USE_LEGACY_MIN_SPEED = true;
 inline constexpr float TERMINAL_MIN_SPEED_CM_S = 12.0f;
 
 static_assert(SHORT_SLOWDOWN_DIST_CM > STOP_DIST_CM,
@@ -73,6 +73,11 @@ struct TuningConfig {
         float kinematic_gain_x;       // 车体 X 方向运动学标定倍率
         float kinematic_gain_y;       // 车体 Y 方向运动学标定倍率
         float brake_limit;            // 制动能力相对 max_acc 的比例
+        // 轮胎-地面附着力决定的刹车减速度绝对上限 cm/s2，与 max_acc 无关。
+        // brake_limit×max_acc 是"想要多强"，本项是"地面给得起多强"，实际取两者较小值。
+        // 标定：从已知速度 v 全力刹车，量滑行距离 d，a = v^2/(2d)。
+        // 默认按当前 max_acc×brake_limit 的 390cm/s2 作为基准，后续只需按实测制动距离校准本项。
+        float brake_acc_ceiling;
     } dynamics;
 
     struct {
@@ -129,6 +134,35 @@ struct TuningConfig {
     } terminal;
 
     WheelControlParams wheels[TUNING_WHEEL_COUNT]; // LF、LB、RF、RB
+
+    // 纵向（沿运动方向）视觉缓慢修正：段中间用延时补偿后的视觉纠编码器打滑累积，
+    // 进入刹车/切向区后完全冻结、纯靠零延迟编码器收尾。横向纠偏与本组无关、全程不变。
+    // 新字段一律追加在结构体尾部：中间插入会改变后续字段偏移，已保存的 Flash 配置
+    // 会因 payload_size 不符被判无效而静默回默认值。
+    struct {
+        float enable;                 // 总开关，0 关闭（行为与改前逐位一致），1 开启
+        float freeze_floor_cm;        // 冻结窗口硬下限 cm：与速度无关，由视觉自身精度决定。
+                                      // 低速时 v*L 与刹车距离都塌到 1cm 以下，此时若仍让视觉推
+                                      // 位置，±0.5cm 视觉噪声会灌进停车判定 → 自激振荡。
+        float latency_window_gain;    // v*L 项倍率，1.0=严格按估计延迟；调小=更早开始信视觉
+        float max_step_cm;            // 普通段单帧限步 cm。上限依据：位置跳变引起的速度指令
+                                      // 跳变须远小于每拍降速限幅 brake_acc*dt
+        float push_max_step_cm;       // 推箱段单帧限步 cm：接触面容不下速度突变，取更保守值
+        float reject_dist_cm;         // 纵向粗差闸 cm：超过判为视觉异常本帧不修。必须大于待治的
+                                      // 打滑累积量级（1~3cm），不能沿用横向的 vision_reject_dist
+                                      // （默认 1cm），否则要修的误差全被判成误检、修正恒为 0
+        float scale_learn_enable;      // 视觉里程比例在线学习开关，0 关闭，1 开启
+        float scale_learn_alpha;       // 比例低通更新系数，越大适应越快
+        float scale_sample_min_cm;     // 单次比例样本要求的最小直线位移 cm
+        float scale_min;               // 学习比例下限，防止异常视觉把里程拉坏
+        float scale_max;               // 学习比例上限，防止异常视觉把里程拉坏
+    } vision_long;
+
+    // 横向视觉修正独立调参，避免和纵向末端冻结及里程学习互相影响
+    struct {
+        float max_step_cm;             // 普通视觉帧沿段法向最多修正多少 cm
+        float gain;                    // 横向误差本帧采用比例，1.0 表示限步后全部采用
+    } vision_lateral;
 };
 
 inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
@@ -141,6 +175,8 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
         1.090f,  // dynamics.kinematic_gain_x
         1.000f,  // dynamics.kinematic_gain_y
         0.65f,   // dynamics.brake_limit
+        390.0f,  // dynamics.brake_acc_ceiling：与当前 600×0.65 一致，不改变现有线性减速手感；
+                 // 后续调高 max_acc 时刹车能力不再被同步虚高。
     },
     {
         0.3f,    // tracker.reach_radius
@@ -149,7 +185,7 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
         2.0f,    // tracker.corner_switch_window
         0.7f,    // tracker.corner_line_tolerance
         100.0f,  // tracker.vision_request_interval_ms
-        1.0f,    // tracker.vision_reject_dist
+        10.0f,   // tracker.vision_reject_dist：横向误差接受范围，避免偏差超过 1cm 后反而完全不修
         0.010f,  // tracker.ang_tolerance
         5.0f,    // tracker.corner_pause_speed
     },
@@ -158,7 +194,7 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
     },
     {
         1.0f,     // latency.encoder_latency_gain
-        310.0f,   // latency.vision_latency_ms
+        380.0f,   // latency.vision_latency_ms
         1.0f,     // latency.enable_estimation
         45.0f,    // latency.turn_thresh_deg
         0.30f,    // latency.enc_v_min
@@ -194,6 +230,23 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
         {{0.46f, 0.56f, 0.0f}, 0.076f, 0.012f, 0.018f, 1.0f},  // lb
         {{0.46f, 0.74f, 0.0f}, 0.080f, 0.012f, 0.028f, 1.0f},  // rf
         {{0.46f, 0.56f, 0.0f}, 0.100f, 0.024f, 0.014f, 2.0f},  // rb
+    },
+    {
+        1.0f,     // vision_long.enable：默认开启，中远段缓慢修正纵向里程，末端冻结逻辑保持不变
+        3.0f,     // vision_long.freeze_floor_cm
+        1.0f,     // vision_long.latency_window_gain
+        1.0f,     // vision_long.max_step_cm
+        1.0f,     // vision_long.push_max_step_cm
+        10.0f,    // vision_long.reject_dist_cm：与 15cm 硬重置阈值衔接，不留拒绝修正空档
+        1.0f,     // vision_long.scale_learn_enable
+        0.10f,    // vision_long.scale_learn_alpha
+        10.0f,    // vision_long.scale_sample_min_cm
+        0.85f,    // vision_long.scale_min
+        1.15f,    // vision_long.scale_max
+    },
+    {
+        1.5f,     // vision_lateral.max_step_cm
+        1.0f,     // vision_lateral.gain
     },
 };
 
@@ -231,6 +284,7 @@ inline ParamItem params[] = {
     {"GainX   ", "KX", &tune.dynamics.kinematic_gain_x, 0.001f, 0.5f, 1.5f},
     {"GainY   ", "KY", &tune.dynamics.kinematic_gain_y, 0.001f, 0.5f, 1.5f},
     {"BrakeLim", "BL", &tune.dynamics.brake_limit, 0.05f, 0.05f, 1.0f},
+    {"BrakeCap", "BC", &tune.dynamics.brake_acc_ceiling, 10.0f, 50.0f, 5000.0f},
     {"Reach   ", "TR", &tune.tracker.reach_radius, 0.1f, 0.05f, 10.0f},
     {"ReachMin", "TM", &tune.tracker.reach_radius_min, 0.1f, 0.1f, 3.0f},
     {"TurnVel ", "CV", &tune.tracker.corner_pass_speed, 1.0f, 0.0f, 80.0f},
@@ -254,6 +308,19 @@ inline ParamItem params[] = {
     {"LagAlpha", "LA", &tune.latency.lowpass_alpha, 0.05f, 0.0f, 1.0f},
     {"LagStale", "LS", &tune.latency.l_stale_ms, 100.0f, 100.0f, 60000.0f},
     {"BombWait", "BW", &tune.bomb.explosion_wait_ms, 50.0f, 500.0f, 10000.0f},
+    {"VLongEn ", "VN", &tune.vision_long.enable, 1.0f, 0.0f, 1.0f},
+    {"VLFloor ", "VF", &tune.vision_long.freeze_floor_cm, 0.5f, 0.0f, 30.0f},
+    {"VLLagG  ", "VG", &tune.vision_long.latency_window_gain, 0.05f, 0.0f, 2.0f},
+    {"VLStep  ", "VS", &tune.vision_long.max_step_cm, 0.05f, 0.0f, 3.0f},
+    {"VLPushSt", "VP", &tune.vision_long.push_max_step_cm, 0.05f, 0.0f, 3.0f},
+    {"VLRej   ", "VJ", &tune.vision_long.reject_dist_cm, 0.5f, 0.5f, 20.0f},
+    {"VLScEn  ", "VE", &tune.vision_long.scale_learn_enable, 1.0f, 0.0f, 1.0f},
+    {"VLScAlph", "VA", &tune.vision_long.scale_learn_alpha, 0.05f, 0.01f, 1.0f},
+    {"VLScDist", "VD", &tune.vision_long.scale_sample_min_cm, 5.0f, 5.0f, 100.0f},
+    {"VLScMin ", "SM", &tune.vision_long.scale_min, 0.01f, 0.5f, 1.5f},
+    {"VLScMax ", "SX", &tune.vision_long.scale_max, 0.01f, 0.5f, 1.5f},
+    {"HorStep ", "HS", &tune.vision_lateral.max_step_cm, 0.1f, 0.0f, 5.0f},
+    {"HorGain ", "HG", &tune.vision_lateral.gain, 0.05f, 0.0f, 1.5f},
     {"YawBand ", "YB", &tune.yaw.lin_band, 0.01f, 0.02f, 1.0f},
     {"YawKd   ", "YD", &tune.yaw.kd, 0.01f, 0.0f, 2.0f},
     {"YawGain ", "YG", &tune.yaw.translate_gain, 0.05f, 0.1f, 3.0f},
@@ -345,7 +412,8 @@ inline bool config_valid(const TuningConfig& config) {
         return true;
     };
     return check_table(params) && check_table(wheel_params) &&
-           config.latency.l_min_ms <= config.latency.l_max_ms;
+           config.latency.l_min_ms <= config.latency.l_max_ms &&
+           config.vision_long.scale_min <= config.vision_long.scale_max;
 }
 
 inline float& wheel_value(WheelControlParams& wheel, ScreenEditGroup group) {
