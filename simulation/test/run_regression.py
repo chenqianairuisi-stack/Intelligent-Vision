@@ -435,7 +435,21 @@ def count_patrol_rotations(patrol_events, map_info):
 
     for event in patrol_events:
         if event[0] == "OBSERVE":
-            obs_group.append((event[1], event[2]))
+            observe_yaw = event[3] if len(event) >= 4 else None
+            if observe_yaw is None:
+                # 兼容旧输出：缺少真实 yaw 时才按同一驻留点的实体位置推断
+                obs_group.append((event[1], event[2]))
+                continue
+
+            # 新输出逐次记录宏动作的 ALIGN_YAW，不能把同格连续观测合并
+            if obs_group:
+                current_yaw, added = process_obs_group(obs_group, virtual_pos, current_yaw)
+                rotations += added
+                obs_group = []
+            observe_yaw %= 360
+            if current_yaw != observe_yaw:
+                rotations += 1
+                current_yaw = observe_yaw
         elif event[0] == "MOVE":
             if obs_group:
                 current_yaw, added = process_obs_group(obs_group, virtual_pos, current_yaw)
@@ -461,7 +475,10 @@ def parse_path_sections(lines, map_info):
             while i < len(lines) and lines[i] not in ("SOKOBAN", "SOKOBAN_REPLAY_BEGIN", "FAILED", "MCU_TRACE"):
                 parts = lines[i].split()
                 if parts and parts[0] == "OBSERVE" and len(parts) >= 3:
-                    patrol_events.append(["OBSERVE", int(parts[1]), parts[2] == "1"])
+                    observe_yaw = int(parts[3]) if len(parts) >= 4 else None
+                    patrol_events.append(
+                        ["OBSERVE", int(parts[1]), parts[2] == "1", observe_yaw]
+                    )
                 elif len(parts) >= 2:
                     patrol_events.append(["MOVE", from_output_coord(int(parts[0]), int(parts[1]))])
                 i += 1

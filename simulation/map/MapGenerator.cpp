@@ -16,10 +16,10 @@
 #include "../../project/Core/system_config.h"
 
 /* 
-.\map\run_map_generator.ps1 -Build -Count 20 -Boxes 3 -OutDir map\map_generated
-.\map\run_map_generator.ps1 -Build -Mode with-bomb -Bombs 3 -Count 20 -Boxes 3 -OutDir map\map_generated -Prefix bomb
-.\map\run_map_generator.ps1 -Build -Mode with-bomb -Bombs 3 -Count 20 -Boxes 3 -WallDensity 0.4 -MinPairPushes 8 -QualityCandidates 100
-.\map\run_map_generator.ps1 -Build -Mode with-bomb -Difficulty hard -Bombs 3 -Count 20 -Boxes 3 -WallDensity 0.30 -MinPairPushes 4 -QualityCandidates 4 -MaxAttempts 25000 -WriteMeta
+.\simulation\map\run_map_generator.ps1 -Build -Count 20 -Boxes 3 -OutDir map\map_generated
+.\simulation\map\run_map_generator.ps1 -Build -Mode with-bomb -Bombs 3 -Count 20 -Boxes 3 -OutDir map\map_generated -Prefix bomb
+.\simulation\map\run_map_generator.ps1 -Build -Style legacy -Mode with-bomb -Bombs 3 -Count 20 -Boxes 3 -WallDensity 0.4 -MinPairPushes 8 -QualityCandidates 100
+.\simulation\map\run_map_generator.ps1 -Build -Mode with-bomb -Difficulty hard -Bombs 3 -Count 20 -Boxes 3 -WallDensity 0.30 -MinPairPushes 4 -QualityCandidates 4 -MaxAttempts 25000 -WriteMeta
 */
 
 
@@ -50,6 +50,10 @@ constexpr int MAX_DISPERSED_MIN_PAIR_PUSHES = 6;
 constexpr double HARD_MAX_WALL_DENSITY = 0.40;
 constexpr int HARD_MAX_EFFECTIVE_QUALITY_CANDIDATES = 96;
 constexpr int HARD_MAX_MIN_PAIR_PUSHES = 12;
+constexpr double OFFICIAL_MAX_WALL_DENSITY = 0.18;
+constexpr double OFFICIAL_HARD_MAX_WALL_DENSITY = 0.24;
+constexpr int OFFICIAL_MAX_INTERNAL_WALLS = 23;
+constexpr int OFFICIAL_HARD_MAX_INTERNAL_WALLS = 28;
 
 enum class GeneratorMode {
     NO_BOMB,
@@ -61,9 +65,15 @@ enum class DifficultyMode {
     HARD,
 };
 
+enum class GeneratorStyle {
+    OFFICIAL,
+    LEGACY,
+};
+
 struct GeneratorConfig {
     GeneratorMode mode = GeneratorMode::NO_BOMB;
     DifficultyMode difficulty = DifficultyMode::NORMAL;
+    GeneratorStyle style = GeneratorStyle::OFFICIAL;
     int count = 10;
     int boxes = 3;
     int bombs = 0;
@@ -72,7 +82,7 @@ struct GeneratorConfig {
     int min_pair_pushes = 4;
     int min_bomb_required_pairs = 1;
     int min_entity_spacing = 2;
-    double wall_density = 0.24;
+    double wall_density = 0.14;
     uint32_t seed = 0;
     bool write_meta = false;
     bool require_phase2_specific_bomb = false;
@@ -655,6 +665,20 @@ bool grid_wall_layout_quality_ok(const Grid& grid, const GeneratorConfig& cfg) {
     int largest_component = 0;
     count_wall_components(grid, component_count, largest_component);
     bool hard = cfg.difficulty == DifficultyMode::HARD;
+    if (cfg.style == GeneratorStyle::OFFICIAL) {
+        // 正式赛样本的内部墙体保持稀疏，且普通地图不出现厚墙块
+        const int border_walls = 2 * MAP_MAX_WIDTH + 2 * MAP_MAX_HEIGHT - 4;
+        const int internal_walls = count_walls(grid) - border_walls;
+        const int interior_count = (MAP_MAX_WIDTH - 2) * (MAP_MAX_HEIGHT - 2);
+        const int min_internal = std::max(
+            8, static_cast<int>(cfg.wall_density * interior_count * 0.70));
+        if (internal_walls < min_internal) return false;
+        if (count_wall_blocks_2x2(grid) > 0) return false;
+        if (count_thick_wall_cells(grid) > (hard ? 8 : 2)) return false;
+        if (largest_component > (hard ? 14 : 8)) return false;
+        if (component_count < 3) return false;
+        return true;
+    }
     if (component_count < (hard ? 2 : 3)) return false;
     if (largest_component > (hard ? 34 : 18)) return false;
     if (count_thick_wall_cells(grid) > (hard ? 30 : 18)) return false;
@@ -662,7 +686,7 @@ bool grid_wall_layout_quality_ok(const Grid& grid, const GeneratorConfig& cfg) {
     return true;
 }
 
-Grid make_random_grid(std::mt19937& rng, const GeneratorConfig& cfg) {
+Grid make_legacy_grid(std::mt19937& rng, const GeneratorConfig& cfg) {
     Grid grid;
     for (int y = 0; y < MAP_MAX_HEIGHT; ++y) {
         for (int x = 0; x < MAP_MAX_WIDTH; ++x) {
@@ -736,6 +760,67 @@ Grid make_random_grid(std::mt19937& rng, const GeneratorConfig& cfg) {
     }
 
     return grid;
+}
+
+// 正式赛地图以分散单格墙和短墙段为主，普通模式不生成 2x2 厚墙
+Grid make_official_grid(std::mt19937& rng, const GeneratorConfig& cfg) {
+    Grid grid;
+    for (int y = 0; y < MAP_MAX_HEIGHT; ++y) {
+        for (int x = 0; x < MAP_MAX_WIDTH; ++x) {
+            grid.wall[y][x] = (x == 0 || y == 0 ||
+                x == MAP_MAX_WIDTH - 1 || y == MAP_MAX_HEIGHT - 1);
+        }
+    }
+    open_reserved_start_zones(grid);
+
+    const int interior_count = (MAP_MAX_WIDTH - 2) * (MAP_MAX_HEIGHT - 2);
+    const bool hard = cfg.difficulty == DifficultyMode::HARD;
+    const int max_internal_walls = hard
+        ? OFFICIAL_HARD_MAX_INTERNAL_WALLS : OFFICIAL_MAX_INTERNAL_WALLS;
+    const int target_internal_walls = std::min(
+        max_internal_walls,
+        std::max(8, static_cast<int>(std::lround(interior_count * cfg.wall_density))));
+    std::uniform_int_distribution<int> x_dist(1, MAP_MAX_WIDTH - 2);
+    std::uniform_int_distribution<int> y_dist(1, MAP_MAX_HEIGHT - 2);
+    std::uniform_int_distribution<int> shape_dist(0, 99);
+    std::uniform_int_distribution<int> dir_dist(0, 1);
+
+    const int max_attempts = target_internal_walls * 48 + 160;
+    for (int attempt = 0;
+         count_walls(grid) - (2 * MAP_MAX_WIDTH + 2 * MAP_MAX_HEIGHT - 4) < target_internal_walls &&
+         attempt < max_attempts;
+         ++attempt) {
+        const int x = x_dist(rng);
+        const int y = y_dist(rng);
+        const int shape = shape_dist(rng);
+        const bool horizontal = dir_dist(rng) == 0;
+        const int length = shape < 72 ? 1 : (shape < 96 ? 2 : (hard ? 3 : 2));
+        std::vector<Cell> changed;
+        for (int i = 0; i < length; ++i) {
+            const int nx = x + (horizontal ? i : 0);
+            const int ny = y + (horizontal ? 0 : i);
+            add_wall_cell(grid, changed, nx, ny);
+        }
+
+        int component_count = 0;
+        int largest_component = 0;
+        count_wall_components(grid, component_count, largest_component);
+        const bool invalid = changed.empty() || !all_floor_connected(grid) ||
+            count_wall_blocks_2x2(grid) > 0 ||
+            count_thick_wall_cells(grid) > (hard ? 8 : 2) ||
+            largest_component > (hard ? 14 : 8);
+        if (invalid) {
+            for (Cell c : changed) grid.wall[c.y][c.x] = false;
+        }
+    }
+
+    return grid;
+}
+
+Grid make_random_grid(std::mt19937& rng, const GeneratorConfig& cfg) {
+    return cfg.style == GeneratorStyle::OFFICIAL
+        ? make_official_grid(rng, cfg)
+        : make_legacy_grid(rng, cfg);
 }
 
 bool evaluate_pair_reachability(const Grid& grid,
@@ -1046,6 +1131,12 @@ void fill_map_stats(GeneratedMap& map) {
 
 bool wall_layout_quality_ok(const GeneratedMap& map, const GeneratorConfig& cfg) {
     bool hard = cfg.difficulty == DifficultyMode::HARD;
+    if (cfg.style == GeneratorStyle::OFFICIAL) {
+        if (map.wall_block_count > 0) return false;
+        if (map.thick_wall_count > (hard ? 8 : 2)) return false;
+        if (map.largest_wall_component > (hard ? 14 : 8)) return false;
+        return map.wall_component_count >= 3;
+    }
     if (map.largest_wall_component > (hard ? 34 : 18)) return false;
     if (map.thick_wall_count > (hard ? 30 : 18)) return false;
     if (map.wall_block_count > (hard ? 18 : 10)) return false;
@@ -1282,6 +1373,8 @@ bool sample_entities(const Grid& grid,
 
     GeneratedMap best;
     int valid_count = 0;
+    const int entity_spacing = cfg.style == GeneratorStyle::OFFICIAL
+        ? 1 : cfg.min_entity_spacing;
 
     auto pick_entity_set = [&](std::vector<Cell>& dst,
                                const std::vector<Cell>& blocked,
@@ -1291,7 +1384,7 @@ bool sample_entities(const Grid& grid,
         for (int guard = 0; static_cast<int>(dst.size()) < cfg.boxes && guard < 1200; ++guard) {
             Cell picked = source[pick_dist(rng)];
             if (contains_cell(blocked, picked) || contains_cell(dst, picked)) continue;
-            if (!spacing_ok(dst, picked, cfg.min_entity_spacing)) continue;
+            if (!spacing_ok(dst, picked, entity_spacing)) continue;
             dst.push_back(picked);
         }
         return static_cast<int>(dst.size()) == cfg.boxes;
@@ -1454,7 +1547,7 @@ void print_usage(const char* exe) {
         << "  --out-dir PATH            output directory, default map/map_generated\n"
         << "  --prefix NAME             output file prefix, default gen\n"
         << "  --seed N                  random seed, default current time\n"
-        << "  --wall-density F          internal wall density, default 0.24\n"
+        << "  --wall-density F          internal wall density, default 0.14\n"
         << "  --min-pair-pushes N       every box-target pair minimum pushes, default 4\n"
         << "  --min-bomb-required-pairs N hard mode requires at least this many initially blocked pairs, default 1\n"
         << "  --require-phase2-specific-bomb hard bomb maps keep partial pair reachability, requiring semantic-specific phase2 choice\n"
@@ -1462,6 +1555,7 @@ void print_usage(const char* exe) {
         << "  --max-attempts N          max attempts per map, default 50000\n"
         << "  --mode no-bomb|with-bomb  generation mode, default no-bomb\n"
         << "  --difficulty normal|hard  hard mode generates bomb-required maps\n"
+        << "  --style official|legacy   wall layout style, default official\n"
         << "  --write-meta              write sidecar diagnostics for generated maps\n";
 }
 
@@ -1562,6 +1656,18 @@ bool parse_args(int argc, char** argv, GeneratorConfig& cfg) {
                 std::cerr << "--difficulty must be normal or hard\n";
                 return false;
             }
+        } else if (arg == "--style") {
+            const char* value = need_value("--style");
+            if (!value) return false;
+            std::string style = value;
+            if (style == "official" || style == "game") {
+                cfg.style = GeneratorStyle::OFFICIAL;
+            } else if (style == "legacy" || style == "random") {
+                cfg.style = GeneratorStyle::LEGACY;
+            } else {
+                std::cerr << "--style must be official or legacy\n";
+                return false;
+            }
         } else if (arg == "--write-meta") {
             cfg.write_meta = true;
         } else if (arg == "--require-phase2-specific-bomb") {
@@ -1611,10 +1717,16 @@ bool parse_args(int argc, char** argv, GeneratorConfig& cfg) {
         std::cerr << "--wall-density must be in [0, 0.55]\n";
         return false;
     }
-    double max_wall_density =
-        cfg.difficulty == DifficultyMode::HARD ? HARD_MAX_WALL_DENSITY : MAX_DISPERSED_WALL_DENSITY;
+    double max_wall_density = 0.0;
+    if (cfg.style == GeneratorStyle::OFFICIAL) {
+        max_wall_density = cfg.difficulty == DifficultyMode::HARD
+            ? OFFICIAL_HARD_MAX_WALL_DENSITY : OFFICIAL_MAX_WALL_DENSITY;
+    } else {
+        max_wall_density = cfg.difficulty == DifficultyMode::HARD
+            ? HARD_MAX_WALL_DENSITY : MAX_DISPERSED_WALL_DENSITY;
+    }
     if (cfg.wall_density > max_wall_density) {
-        std::cerr << "Notice: dispersed wall layout clamps --wall-density from "
+        std::cerr << "Notice: selected wall style clamps --wall-density from "
                 << cfg.wall_density << " to " << max_wall_density
                 << "\n";
         cfg.wall_density = max_wall_density;
@@ -1622,7 +1734,7 @@ bool parse_args(int argc, char** argv, GeneratorConfig& cfg) {
     int max_min_pair_pushes =
         cfg.difficulty == DifficultyMode::HARD ? HARD_MAX_MIN_PAIR_PUSHES : MAX_DISPERSED_MIN_PAIR_PUSHES;
     if (cfg.min_pair_pushes > max_min_pair_pushes) {
-        std::cerr << "Notice: dispersed wall layout caps --min-pair-pushes from "
+        std::cerr << "Notice: selected wall style caps --min-pair-pushes from "
                 << cfg.min_pair_pushes << " to " << max_min_pair_pushes
                 << "\n";
         cfg.min_pair_pushes = max_min_pair_pushes;
@@ -1630,7 +1742,7 @@ bool parse_args(int argc, char** argv, GeneratorConfig& cfg) {
     int max_quality_candidates =
         cfg.difficulty == DifficultyMode::HARD ? HARD_MAX_EFFECTIVE_QUALITY_CANDIDATES : MAX_EFFECTIVE_QUALITY_CANDIDATES;
     if (cfg.quality_candidates > max_quality_candidates) {
-        std::cerr << "Notice: dispersed wall layout caps --quality-candidates from "
+        std::cerr << "Notice: selected wall style caps --quality-candidates from "
                 << cfg.quality_candidates << " to " << max_quality_candidates
                 << "\n";
         cfg.quality_candidates = max_quality_candidates;
@@ -1655,11 +1767,13 @@ int main(int argc, char** argv) {
 
     std::mt19937 rng(cfg.seed);
     const char* mode_name = cfg.mode == GeneratorMode::WITH_BOMB ? "with-bomb" : "no-bomb";
+    const char* style_name = cfg.style == GeneratorStyle::OFFICIAL ? "official" : "legacy";
     std::cout << "MapGenerator seed=" << cfg.seed
             << " count=" << cfg.count
             << " boxes=" << cfg.boxes
             << " bombs=" << cfg.bombs
             << " mode=" << mode_name
+            << " style=" << style_name
             << " phase2_specific_bomb=" << (cfg.require_phase2_specific_bomb ? "yes" : "no")
             << "\n";
 

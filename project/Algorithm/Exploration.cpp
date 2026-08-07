@@ -34,8 +34,8 @@ namespace ExplorationConfig {
     inline constexpr int OBS_POSE_BRANCHES = 4 * OBS_POSES_PER_YAW;
     inline constexpr int GRID_TIME_CACHE_SLOTS = 32;            // 小型 LRU 距离图缓存槽数，含进入方向约 12KB
     inline constexpr int PATROL_DFS_FRAME_LIMIT = 16;           // DFS 递归帧复用数组深度上限
-    inline constexpr uint32_t PATROL_DFS_OPS_LIMIT = 15000;      // 巡图参考解只保留有限搜索预算
-    inline constexpr int OBS_SUCCESSOR_HASH_SLOTS = 128;         // 单层观测后继去重哈希槽数
+    inline constexpr uint32_t PATROL_DFS_OPS_LIMIT = 15000;     // 巡图参考解只保留有限搜索预算
+    inline constexpr int OBS_SUCCESSOR_HASH_SLOTS = 128;        // 单层观测后继去重哈希槽数
     inline constexpr int FALLBACK_CLEAR_MAX_STEPS = 5;          // 巡图兜底开通单格瓶颈允许的连续推送距离
     inline constexpr int SEED_POSES_PER_YAW = 2;                // 种子每个朝向保留两个候选做精确一步前瞻
     inline constexpr int SEED_POSE_BRANCHES = 4 * SEED_POSES_PER_YAW;
@@ -1247,9 +1247,21 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                 uint16_t turn_cost = get_turn_cost(curr_yaw, vp.target_yaw);
                 uint16_t total_cost = OBSERVE_ACTION_COST + dist + turn_cost + vp.penalty[k];
 
-                // 当前动作和剩余观测下界使用同一总代价，覆盖收益不再重复计权
+                // 排序分数保留整数下界，同时补偿本次新增目标的边际收益
+                // 避免两个候选落入同一观测次数桶时，联合观测因局部移动代价略高而落选
+                int newly_target_count = 0;
+                for (int t = 0; t < cached_level.target_count; ++t) {
+                    if (newly_seen & (1UL << (cached_level.box_count + t))) {
+                        ++newly_target_count;
+                    }
+                }
+                const int target_coverage_reward =
+                    OBSERVE_ACTION_COST /
+                        PlanningCommon::ObservationConfig::MAX_TARGETS_PER_OBSERVATION +
+                    1;
                 int32_t score = total_cost +
-                    minimum_remaining_observations(mask | newly_seen) * OBSERVE_ACTION_COST;
+                    minimum_remaining_observations(mask | newly_seen) * OBSERVE_ACTION_COST -
+                    newly_target_count * target_coverage_reward;
 
                 int vp_yaw_idx = 0;
                 int int_yaw = (int)(vp.target_yaw + 0.5f) % 360;

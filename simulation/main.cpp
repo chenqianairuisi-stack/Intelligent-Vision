@@ -609,8 +609,12 @@ int main() {
                 received_mask |= entity_bit;
                 // PATROL 段保留观测完成事件，visualizer 可按真实 ART2 回传顺序逐个揭示语义
                 const bool is_box = entity_id < logical_level.box_count;
+                // 观测结果必须携带本次 ALIGN_YAW 的真实朝向，供 visualizer 统计旋转次数
+                const int observe_yaw = static_cast<int>(
+                    current_macro_action.observe.view.target_yaw + 0.5f) % 360;
                 patrol_out.push_back(
-                    "OBSERVE " + std::to_string(entity_id) + " " + (is_box ? "1" : "0")
+                    "OBSERVE " + std::to_string(entity_id) + " " + (is_box ? "1" : "0") +
+                    " " + std::to_string(observe_yaw)
                 );
                 mcu_trace.push_back(
                     "ART2_RESULT " + std::to_string(entity_id) + " " +
@@ -1166,13 +1170,20 @@ int main() {
     out_file << "MCU_TRACE\n";
     for (const auto& s : mcu_trace) out_file << s << "\n";
 
+    bool sokoban_path_valid = false;
     if (success && !patrol_failed) {
         const auto& path = solver.get_result_path();
-        write_sokoban_replay_diag(out_file, logical_level, path);
+        // 定长路径溢出时 StaticArray 会静默丢弃前段，必须先校验起点再对外报告成功
+        sokoban_path_valid = !path.empty() && path[0] == logical_level.player_start;
+        if (sokoban_path_valid) {
+            write_sokoban_replay_diag(out_file, logical_level, path);
+        } else {
+            out_file << "SOKOBAN_PATH_INVALID\n";
+        }
     }
 
     out_file << "SOKOBAN\n";
-    if (success && !patrol_failed) {
+    if (success && !patrol_failed && sokoban_path_valid) {
         const auto& path = solver.get_result_path();
         for (int i = 0; i < path.size(); ++i) {
             out_file << point_to_output_string(path[i]) << "\n";

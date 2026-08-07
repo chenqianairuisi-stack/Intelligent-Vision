@@ -6,10 +6,12 @@ param(
     [string]$Mode = "no-bomb",
     [ValidateSet("normal", "hard")]
     [string]$Difficulty = "normal",
+    [ValidateSet("official", "game", "legacy", "random")]
+    [string]$Style = "official",
     [string]$OutDir = "map\map_generated",
     [string]$Prefix = "gen",
     [uint32]$Seed = 0,
-    [double]$WallDensity = 0.24,
+    [double]$WallDensity = 0.14,
     [int]$MinPairPushes = 4,
     [int]$MinBombRequiredPairs = 1,
     [int]$QualityCandidates = 56,
@@ -50,6 +52,7 @@ $argsList = @(
     "--mode", "$Mode",
     "--bombs", "$Bombs",
     "--difficulty", "$Difficulty",
+    "--style", "$Style",
     "--min-bomb-required-pairs", "$MinBombRequiredPairs"
 )
 

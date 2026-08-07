@@ -91,8 +91,6 @@ private:
     static constexpr int MAX_NODE_MACROS = MAX_BOMBS;
     // 普通动作与宏动作合并排序后的候选上限
     static constexpr int MAX_NODE_ACTIONS = MAX_NODE_MOVES + MAX_NODE_MACROS;
-    // 混合宏层去重表大小，去掉不同宏顺序反复到达的同一状态
-    static constexpr int MIXED_MACRO_TT_SIZE = 1024;
 
     // 单个普通推动作：只记录“推哪个实体、往哪推、玩家需走多远”等增量信息
     struct TinyMove {
@@ -131,32 +129,6 @@ private:
         uint8_t final_dir;
         uint8_t flags;              // bit0=valid, bit1=success
         uint8_t reserved;
-    };
-
-    struct BoxProgressCandidate {
-        uint8_t box_idx;
-        uint8_t target_idx;
-        point waypoint;
-        int16_t sort_key;
-    };
-
-    struct MixedMacroStructureInfo {
-        int open_cells = 0;
-        int corridor_cells = 0;
-        int corridor_pct = 0;
-        int coupling_score = 0;
-        int structure_score = 0;
-        bool has_box_on_bomb_route = false;
-        bool has_bomb_near_box_route = false;
-        bool has_target_path_waiting_wall = false;
-        bool any_box_can_leave_bomb_route = false;
-        bool prefer_box_first = false;
-    };
-
-    struct MixedMacroTTEntry {
-        uint32_t hash = 0xFFFFFFFFu;
-        uint16_t best_path_len = 0xFFFF;
-        uint16_t reserved = 0;
     };
 
     // 单节点动态占用表：以 192B 栈空间换掉热路径内反复线性扫描箱子/炸弹数组
@@ -262,29 +234,6 @@ private:
     // 根部一次性构造“先完成炸弹任务，再完成少箱推箱”的候选路径
     bool try_bomb_then_small_box_macro_solution(
         StaticArray<point, MAX_PATH_LENGTH>& out_path) const;
-    // 小实体混合宏层：把箱子部分推进、炸弹清墙、箱子完成放到同一层搜索
-    bool try_mixed_small_entity_macro_solution(
-        StaticArray<point, MAX_PATH_LENGTH>& out_path) const;
-    bool search_mixed_small_entity_macro(
-        const GameState& state,
-        int depth,
-        int& node_budget,
-        uint32_t visited_hashes[16],
-        const StaticArray<point, MAX_PATH_LENGTH>& path,
-        StaticArray<point, MAX_PATH_LENGTH>& best_path,
-        int& best_len) const;
-    int collect_box_progress_candidates(
-        const GameState& state,
-        const NodeOccupancy& occupancy,
-        BoxProgressCandidate candidates[16]) const;
-    // 判断混合宏层是否真的命中箱子-炸弹共享瓶颈，避免开阔图提前进入粗粒度搜索
-    bool should_use_mixed_small_entity_macro_layer(const GameState& state) const;
-    // 统计静态通行邻居数，供宏层结构门控识别走廊/分叉
-    int static_passage_degree(point p, uint8_t blown_mask) const;
-    // 评估混合宏层共享依赖结构，供门控和候选排序复用
-    MixedMacroStructureInfo evaluate_mixed_small_entity_macro_structure(const GameState& state) const;
-    bool probe_mixed_macro_transposition(uint32_t hash, int path_len) const;
-    void store_mixed_macro_transposition(uint32_t hash, int path_len) const;
     // 从任意搜索状态尝试用少箱宏层完成剩余纯推箱任务
     bool try_small_box_macro_solution_from_state(
         const GameState& state,
@@ -299,22 +248,6 @@ private:
         uint16_t target_bit,
         const StaticArray<point, MAX_PATH_LENGTH>& path,
         const StaticArray<point, MAX_PATH_LENGTH>& next_path) const;
-    // 校验部分推进宏不会提前把箱子推入同语义目标
-    bool validate_box_progress_segment(
-        const SokobanLevel& level,
-        point player_pos,
-        int moving_level_idx,
-        uint8_t sem,
-        uint16_t remaining_target_mask,
-        const StaticArray<point, MAX_PATH_LENGTH>& path,
-        const StaticArray<point, MAX_PATH_LENGTH>& next_path) const;
-    bool build_box_macro_successor_state(
-        const GameState& state,
-        int box_idx,
-        point box_target,
-        int target_idx,
-        point final_player,
-        GameState& out_state) const;
     // 递归枚举少量箱子的完成顺序和目标分配，选出最短可展开宏序列
     bool search_small_box_macro_order(
         int depth,
@@ -425,7 +358,6 @@ private:
     uint32_t search_node_budget = 0;                                     // 本轮搜索节点预算，0 表示不限制
     uint32_t search_node_count = 0;                                      // 本轮已展开节点数
     bool search_aborted = false;                                         // 节点预算耗尽时中止本轮搜索
-    mutable MixedMacroTTEntry mixed_macro_tt[MIXED_MACRO_TT_SIZE] = {};  // 混合宏层跨分支去重
 
     // --- Zobrist 随机表与路径环路检测 ---
     uint32_t ZOBRIST_SPECIFIC_BOX[MAX_BOXES][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];   // 带语义编号的箱子哈希

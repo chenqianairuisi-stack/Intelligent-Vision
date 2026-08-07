@@ -37,7 +37,7 @@ SOLVER_PATH = os.path.join(PROJECT_DIR, "solver.exe")
 MAP_INPUT_PATH = os.path.join(VISUALIZER_DIR, "map_input.txt")
 PATH_OUTPUT_PATH = os.path.join(VISUALIZER_DIR, "path_output.txt")
 SETTINGS_PATH = os.path.join(VISUALIZER_DIR, "visualizer_settings.json")
-DEFAULT_MAP_DIR = os.path.join(PROJECT_DIR, "map", "map_clear")
+DEFAULT_MAP_DIR = os.path.join(PROJECT_DIR, "map", "map_game")
 
 BOMB_COLORS = ["#e67e22", "#1abc9c", "#e74c3c", "#f39c12", "#8e44ad"]
 PLAYBACK_SPEEDS = [1.0, 2.0, 4.0, 0.5]
@@ -122,6 +122,7 @@ class SokobanVisualizerQt(QMainWindow):
         self.semantic_random_mode = True
 
         self.sokoban_failed = False
+        self.sokoban_invalid_path = False
         self.is_solving = False
         self.is_solver_running = False
         self.current_phase = 1
@@ -812,7 +813,8 @@ class SokobanVisualizerQt(QMainWindow):
             car_y = max(0, min(MAP_H - 1, int(self.car_y_edit.text())))
         except ValueError:
             car_x, car_y = PLAN_START_X, PLAN_START_Y
-        self.player = [car_x, MAP_H - 1 - car_y]
+        # 界面坐标使用左下角规划坐标，显示位置保持编辑框中的坐标
+        self.player = [car_x, car_y]
         self.is_solving = False
         self.playback_paused = False
         self.animation_finished = True
@@ -833,20 +835,21 @@ class SokobanVisualizerQt(QMainWindow):
                 map_lines.append("-" * MAP_W)
             self.map_data = [list(line.ljust(MAP_W, "-"))[:MAP_W] for line in map_lines]
 
-        for y in range(MAP_H):
+        for file_y in range(MAP_H):
+            grid_y = MAP_H - 1 - file_y
             for x in range(MAP_W):
-                c = self.map_data[y][x]
+                c = self.map_data[file_y][x]
                 if c == "@":
                     if not self.has_saved_car_start:
-                        self.player = [x, y]
+                        self.player = [x, grid_y]
                         self.car_x_edit.setText(str(x))
-                        self.car_y_edit.setText(str(MAP_H - 1 - y))
+                        self.car_y_edit.setText(str(grid_y))
                 elif c == "$":
-                    self.boxes.append([x, y])
+                    self.boxes.append([x, grid_y])
                 elif c == ".":
-                    self.targets.append([x, y])
+                    self.targets.append([x, grid_y])
                 elif c == "*":
-                    self.bombs.append([x, y])
+                    self.bombs.append([x, grid_y])
 
         self.semantic_defaults = self.build_default_semantics()
         self.refresh_ui_inputs()
@@ -1087,11 +1090,13 @@ class SokobanVisualizerQt(QMainWindow):
             QMessageBox.critical(self, "Error", "Car start X/Y must be integers")
             return
         self.save_current_car_start()
-        self.player = [car_x, MAP_H - 1 - car_y]
+        # 界面和求解器使用同一套左下角规划坐标
+        self.player = [car_x, car_y]
 
         with open(MAP_INPUT_PATH, "w", encoding="utf-8") as f:
             for row in self.map_data:
                 f.write("".join("-" if c == "@" else c for c in row) + "\n")
+            # 界面和规划器都使用左下角原点，坐标直接传递
             f.write(f"START {car_x} {car_y}\n")
             self.box_semantics = [int(ch) for ch in box_sem]
             self.target_semantics = [int(ch) for ch in target_sem]
@@ -1132,6 +1137,7 @@ class SokobanVisualizerQt(QMainWindow):
         self.obs_clear_pushes = []
         self.patrol_events, self.sokoban_path = [], []
         self.sokoban_failed = False
+        self.sokoban_invalid_path = False
         self.build_info = ""
         self.output_semantics = []
         self.box_ids = list(range(len(self.boxes)))
@@ -1140,7 +1146,8 @@ class SokobanVisualizerQt(QMainWindow):
             lines = [line.strip() for line in f.readlines() if line.strip()]
 
         def from_output_coord(x, y):
-            return [x, MAP_H - 1 - y]
+            # 求解器输出已经是左下角规划坐标，界面内部也使用同一坐标
+            return [x, y]
 
         def from_output_quad(vals):
             start = from_output_coord(vals[0], vals[1])
@@ -1200,7 +1207,10 @@ class SokobanVisualizerQt(QMainWindow):
                 while i < len(lines) and lines[i] not in ["SOKOBAN", "FAILED", "SOKOBAN_REPLAY_BEGIN", "MCU_TRACE"]:
                     parts = lines[i].split()
                     if parts[0] == "OBSERVE":
-                        self.patrol_events.append(["OBSERVE", int(parts[1]), parts[2] == "1"])
+                        observe_yaw = int(parts[3]) if len(parts) >= 4 else None
+                        self.patrol_events.append(
+                            ["OBSERVE", int(parts[1]), parts[2] == "1", observe_yaw]
+                        )
                     else:
                         self.patrol_events.append(["MOVE", from_output_coord(int(parts[0]), int(parts[1]))])
                     i += 1
@@ -1212,6 +1222,8 @@ class SokobanVisualizerQt(QMainWindow):
                 if i < len(lines):
                     i += 1
                 continue
+            elif line == "SOKOBAN_PATH_INVALID":
+                self.sokoban_invalid_path = True
             elif line == "SOKOBAN":
                 i += 1
                 while i < len(lines) and lines[i] != "MCU_TRACE":
@@ -1225,7 +1237,9 @@ class SokobanVisualizerQt(QMainWindow):
             elif line == "MCU_TRACE":
                 # MCU/ART2 调试事件不参与路径回放
                 i += 1
-                while i < len(lines) and lines[i] not in ["PATROL", "SOKOBAN", "SOKOBAN_REPLAY_BEGIN"]:
+                while i < len(lines) and lines[i] not in [
+                    "PATROL", "SOKOBAN", "SOKOBAN_PATH_INVALID", "SOKOBAN_REPLAY_BEGIN"
+                ]:
                     i += 1
                 continue
             i += 1
@@ -1348,7 +1362,21 @@ class SokobanVisualizerQt(QMainWindow):
 
         for ev in self.patrol_events:
             if ev[0] == "OBSERVE":
-                obs_group.append((ev[1], ev[2]))
+                observe_yaw = ev[3] if len(ev) >= 4 else None
+                if observe_yaw is None:
+                    # 兼容旧输出：缺少真实 yaw 时才按同一驻留点的实体位置推断
+                    obs_group.append((ev[1], ev[2]))
+                    continue
+
+                # 新输出逐次记录宏动作的 ALIGN_YAW，不能把同格连续观测合并
+                if obs_group:
+                    current_yaw, added_rot = process_obs_group(obs_group, virtual_pos, current_yaw)
+                    patrol_rotations += added_rot
+                    obs_group = []
+                observe_yaw %= 360
+                if current_yaw != observe_yaw:
+                    patrol_rotations += 1
+                    current_yaw = observe_yaw
             elif ev[0] == "MOVE":
                 if obs_group:
                     current_yaw, added_rot = process_obs_group(obs_group, virtual_pos, current_yaw)
@@ -1407,7 +1435,10 @@ class SokobanVisualizerQt(QMainWindow):
             idx = self.anim_step - len(self.patrol_events)
             next_pos = self.sokoban_path[idx]
         else:
-            if self.sokoban_failed:
+            if self.sokoban_invalid_path:
+                self.set_status("推箱路径超出固定容量", "error")
+                QMessageBox.warning(self, "结束", "推箱路径无效：路径长度超过固定容量，未执行完整解。")
+            elif self.sokoban_failed:
                 self.set_status("推箱子无解", "error")
                 QMessageBox.warning(self, "结束", "巡图完毕，但推箱子无解！(可能是墙壁死锁)")
             else:
@@ -1445,12 +1476,14 @@ class SokobanVisualizerQt(QMainWindow):
         for i, b in enumerate(self.bombs):
             if b and b == next_pos:
                 nx, ny = b[0] + dx, b[1] + dy
-                if 0 <= ny < MAP_H and 0 <= nx < MAP_W and self.map_data[ny][nx] == "#":
+                file_ny = MAP_H - 1 - ny
+                if 0 <= ny < MAP_H and 0 <= nx < MAP_W and self.map_data[file_ny][nx] == "#":
                     for dy_w in [-1, 0, 1]:
                         for dx_w in [-1, 0, 1]:
                             ey, ex = ny + dy_w, nx + dx_w
-                            if 0 < ey < MAP_H - 1 and 0 < ex < MAP_W - 1 and self.map_data[ey][ex] == "#":
-                                self.map_data[ey][ex] = "-"
+                            file_ey = MAP_H - 1 - ey
+                            if 0 < ey < MAP_H - 1 and 0 < ex < MAP_W - 1 and self.map_data[file_ey][ex] == "#":
+                                self.map_data[file_ey][ex] = "-"
                     self.bombs[i] = None
                 else:
                     b[0] += dx
@@ -1474,8 +1507,8 @@ class SokobanVisualizerQt(QMainWindow):
             return
         for y in range(MAP_H):
             for x in range(MAP_W):
-                rect = QRectF(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE)
-                if self.map_data[y][x] == "#":
+                rect = QRectF(x * CELL_SIZE, self.screen_y(y) * CELL_SIZE, CELL_SIZE, CELL_SIZE)
+                if self.map_data[MAP_H - 1 - y][x] == "#":
                     self.draw_round_rect(painter, rect.adjusted(1, 1, -1, -1), wall_fill, wall_stroke, 5)
                 else:
                     self.draw_round_rect(painter, rect.adjusted(1, 1, -1, -1), floor_fill, floor_stroke, 4)
@@ -1498,10 +1531,15 @@ class SokobanVisualizerQt(QMainWindow):
     def cell_rect(self, x, y, margin=5):
         return QRectF(
             x * CELL_SIZE + margin,
-            y * CELL_SIZE + margin,
+            self.screen_y(y) * CELL_SIZE + margin,
             CELL_SIZE - margin * 2,
             CELL_SIZE - margin * 2,
         )
+
+    @staticmethod
+    def screen_y(grid_y):
+        """把左下角规划坐标转换为画布的屏幕行号"""
+        return MAP_H - 1 - grid_y
 
     def draw_round_rect(self, painter, rect, fill, stroke, radius):
         path = QPainterPath()
@@ -1523,7 +1561,7 @@ class SokobanVisualizerQt(QMainWindow):
         self.draw_entity_text(painter, x, y, f"B{idx}", idx, True)
 
     def draw_bomb(self, painter, x, y):
-        center = QPointF(x * CELL_SIZE + CELL_SIZE / 2, y * CELL_SIZE + CELL_SIZE / 2)
+        center = QPointF(x * CELL_SIZE + CELL_SIZE / 2, self.screen_y(y) * CELL_SIZE + CELL_SIZE / 2)
         painter.setBrush(QColor("#222831"))
         painter.setPen(QPen(QColor("#111820"), 2))
         painter.drawEllipse(center, 14, 14)
@@ -1557,7 +1595,7 @@ class SokobanVisualizerQt(QMainWindow):
     def draw_overlays(self, painter):
         painter.setRenderHint(QPainter.Antialiasing, True)
         for ox, oy in self.chosen_obs:
-            cx, cy = ox * CELL_SIZE + CELL_SIZE / 2, oy * CELL_SIZE + CELL_SIZE / 2
+            cx, cy = ox * CELL_SIZE + CELL_SIZE / 2, self.screen_y(oy) * CELL_SIZE + CELL_SIZE / 2
             painter.setPen(QPen(QColor("#2f80ed"), 3))
             painter.drawLine(QPointF(cx - 9, cy - 9), QPointF(cx + 9, cy + 9))
             painter.drawLine(QPointF(cx - 9, cy + 9), QPointF(cx + 9, cy - 9))
@@ -1579,8 +1617,8 @@ class SokobanVisualizerQt(QMainWindow):
             painter.drawRoundedRect(self.cell_rect(bx, by, 3), 5, 5)
             painter.drawRoundedRect(self.cell_rect(wx, wy, 3), 5, 5)
             painter.drawLine(
-                QPointF(bx * CELL_SIZE + CELL_SIZE / 2, by * CELL_SIZE + CELL_SIZE / 2),
-                QPointF(wx * CELL_SIZE + CELL_SIZE / 2, wy * CELL_SIZE + CELL_SIZE / 2),
+                QPointF(bx * CELL_SIZE + CELL_SIZE / 2, self.screen_y(by) * CELL_SIZE + CELL_SIZE / 2),
+                QPointF(wx * CELL_SIZE + CELL_SIZE / 2, self.screen_y(wy) * CELL_SIZE + CELL_SIZE / 2),
             )
             for sx, sy, tx, ty in task.pushes:
                 self.draw_arrow(painter, sx, sy, tx, ty, color)
@@ -1590,8 +1628,8 @@ class SokobanVisualizerQt(QMainWindow):
         if dashed:
             pen.setDashPattern([5, 3])
         painter.setPen(pen)
-        start = QPointF(sx * CELL_SIZE + CELL_SIZE / 2, sy * CELL_SIZE + CELL_SIZE / 2)
-        end = QPointF(tx * CELL_SIZE + CELL_SIZE / 2, ty * CELL_SIZE + CELL_SIZE / 2)
+        start = QPointF(sx * CELL_SIZE + CELL_SIZE / 2, self.screen_y(sy) * CELL_SIZE + CELL_SIZE / 2)
+        end = QPointF(tx * CELL_SIZE + CELL_SIZE / 2, self.screen_y(ty) * CELL_SIZE + CELL_SIZE / 2)
         painter.drawLine(start, end)
         dx = end.x() - start.x()
         dy = end.y() - start.y()

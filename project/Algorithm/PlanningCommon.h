@@ -17,7 +17,7 @@ inline constexpr bool ENABLE_FACE_TO_FACE = true;
 inline constexpr bool ENABLE_OPTIMAL_DIST = true;
 
 // 单目标点允许正前方 1/2/3 格和前两格斜角观测
-inline constexpr bool ENABLE_DIAGONAL = true;
+inline constexpr bool ENABLE_DIAGONAL = true;                
 inline constexpr bool ENABLE_TARGET_FAR_FACE_TO_FACE = true;
 
 // 开启以 F2 正中目标为核心、组合 F2 左右斜角目标的联合观测
