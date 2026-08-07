@@ -3,6 +3,7 @@
 
 #include "Telemetry.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdarg>
 #include <cstddef>
@@ -160,6 +161,27 @@ void send_tune_snapshot() {
                 static_cast<double>(tune.dynamics.max_ang_vel),
                 static_cast<double>(tune.dynamics.max_ang_acc),
                 static_cast<double>(tune.dynamics.brake_limit));
+    // 上车调纵向时要能一眼看到实际生效的刹车能力：brake_limit×max_acc 与 BC 取小
+    send_format("[TUNE] BC=%.1f brake_acc=%.1f | VN=%.0f VF=%.2f VG=%.2f VS=%.2f VP=%.2f VJ=%.2f\r\n",
+                static_cast<double>(tune.dynamics.brake_acc_ceiling),
+                static_cast<double>(std::min(tune.dynamics.max_acc * tune.dynamics.brake_limit,
+                                             tune.dynamics.brake_acc_ceiling)),
+                static_cast<double>(tune.vision_long.enable),
+                static_cast<double>(tune.vision_long.freeze_floor_cm),
+                static_cast<double>(tune.vision_long.latency_window_gain),
+                static_cast<double>(tune.vision_long.max_step_cm),
+                static_cast<double>(tune.vision_long.push_max_step_cm),
+                static_cast<double>(tune.vision_long.reject_dist_cm));
+    send_format("[TUNE] VE=%.0f VA=%.2f VD=%.1f SM=%.2f SX=%.2f\r\n",
+                static_cast<double>(tune.vision_long.scale_learn_enable),
+                static_cast<double>(tune.vision_long.scale_learn_alpha),
+                static_cast<double>(tune.vision_long.scale_sample_min_cm),
+                static_cast<double>(tune.vision_long.scale_min),
+                static_cast<double>(tune.vision_long.scale_max));
+    send_format("[TUNE] VR=%.2f HS=%.2f HG=%.2f\r\n",
+                static_cast<double>(tune.tracker.vision_reject_dist),
+                static_cast<double>(tune.vision_lateral.max_step_cm),
+                static_cast<double>(tune.vision_lateral.gain));
     for (std::size_t index = 0u; index < WHEEL_COUNT; ++index) {
         const auto& wheel = tune.wheels[index];
         send_format("[%s] KP=%.3f KI=%.3f KD=%.4f KV=%.3f KA=%.3f KB=%.3f KS=%.3f\r\n",
@@ -323,17 +345,17 @@ void process_tune_assignment(const char* text) {
 void process_tel_command(const char* text) {
     char operation[12] = {};
     if (!read_word(text, operation, sizeof(operation))) {
-        send_error("TEL", "use Q, MODE <0..3>, or OFF");
+        send_error("TEL", "use Q, MODE <0..4>, or OFF");
     } else if (same_word(operation, "Q")) {
-        send_format("[TEL] mode=%d (0=wheel 1=pose 2=imu 3=latency)\r\n",
+        send_format("[TEL] mode=%d (0=wheel 1=pose 2=imu 3=latency 4=mileage)\r\n",
                     App::g_state.debug.telemetry_mode);
     } else if (same_word(operation, "OFF")) {
         App::g_state.debug.telemetry_mode = -1;
         send_text("[TEL] OFF\r\n");
     } else if (same_word(operation, "MODE")) {
         int mode = -1;
-        if (!read_int(text, mode) || *text != '\0' || mode < 0 || mode > 3) {
-            send_error("TEL", "mode must be 0..3");
+        if (!read_int(text, mode) || *text != '\0' || mode < 0 || mode > 4) {
+            send_error("TEL", "mode must be 0..4");
         } else {
             App::g_state.debug.telemetry_mode = mode;
             send_format("[TEL] mode=%d\r\n", mode);
@@ -613,6 +635,17 @@ void send_wave_data() {
         data[5] = latency.compensated_pose.y - pose.y;
         data[6] = latency.correction_x;
         data[7] = latency.correction_y;
+        send_wave_csv(data);
+    } else if (mode == 4) {
+        const auto& mileage = Subsystem::PoseEstimator::get_mileage_scale_debug();
+        data[0] = mileage.scale_x;
+        data[1] = mileage.scale_y;
+        data[2] = mileage.last_sample;
+        data[3] = mileage.last_sample_distance_cm;
+        data[4] = static_cast<float>(mileage.last_axis);
+        data[5] = static_cast<float>(mileage.consistent_x);
+        data[6] = static_cast<float>(mileage.consistent_y);
+        data[7] = mileage.anchor_valid ? 1.0f : 0.0f;
         send_wave_csv(data);
     }
 

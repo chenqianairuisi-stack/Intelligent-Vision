@@ -137,15 +137,16 @@ namespace Subsystem::PoseEstimator {
     // 强行重置里程计坐标
     void set_position(float x, float y, float yaw_deg);
 
-    // 零延迟纯编码器位姿（不含视觉修正）：供切向/到达判定使用，避免视觉管线延迟污染纵向
+    // 零延迟控制里程位姿：包含已确认的里程比例和纵向视觉平移，供切向/到达判定使用
     Pose2D get_encoder_pose();
-    // 把纯编码器位姿的 XY 重新钉到给定坐标（整段历史一起平移，保留延时匹配所需的差值）
+    // 把控制里程位姿的 XY 重新钉到给定坐标（整段历史一起平移，保留延时匹配所需的差值）
     void set_encoder_pose_xy(float x, float y);
 
     // Apply latency-compensated vision correction for the current straight segment.
     bool apply_vision_axis_correction(const Point2D& segment_start, const Point2D& segment_end,
                                       uint32_t& last_consumed_seq,
-                                      bool allow_near_target_correction = false);
+                                      bool allow_near_target_correction = false,
+                                      bool is_push_segment = false);
 
     // 主循环在每个稳定视觉帧上调用，喂入帧间位移以驱动视觉侧拐点检测与实时延时估计
     void notify_vision_inflection(float dx, float dy, uint32_t gap_ms);
@@ -171,6 +172,19 @@ namespace Subsystem::PoseEstimator {
     };
 
     const VisionLatencyDebug& get_vision_latency_debug();
+
+    struct MileageScaleDebug {
+        float scale_x;                 // 当前 X 方向里程比例
+        float scale_y;                 // 当前 Y 方向里程比例
+        float last_sample;             // 最近一个通过范围检查的比例样本
+        float last_sample_distance_cm; // 最近样本的原始编码器位移
+        uint8_t last_axis;             // 0 无样本，1 X，2 Y
+        uint8_t consistent_x;          // X 方向当前连续一致样本数
+        uint8_t consistent_y;          // Y 方向当前连续一致样本数
+        bool anchor_valid;             // 是否已有本轮学习锚点
+    };
+
+    const MileageScaleDebug& get_mileage_scale_debug();
 
     // 两个高频中断钩子
     void update_yaw_1ms_tick();

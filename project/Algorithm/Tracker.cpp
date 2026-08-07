@@ -121,7 +121,7 @@ namespace {
         // 同步给底盘 Stanley 贴线用：段起点随切段一起更新
         App::g_state.control.segment_start = segment_start;
 
-        // 纵向重同步：切段时把编码器纯积分位姿 XY 贴齐当前融合位姿，消除横向纠偏累积的纵向漂移。
+        // 纵向重同步：切段时把控制里程位姿 XY 贴齐当前融合位姿，消除横向纠偏累积的纵向漂移。
         // set_encoder_pose_xy 只平移历史整体（不清历史），保留延时匹配所需的帧间差值。
         const auto& fused = App::g_state.physical.pose;
         Subsystem::PoseEstimator::set_encoder_pose_xy(fused.x, fused.y);
@@ -424,6 +424,7 @@ namespace {
 /// \param raw_path 规划层输出的原始网格路径
 /// \param has_start_grid 是否提供真实逻辑起点
 /// \param start_grid 当前逻辑地图上的小车格点
+/// \param force_vision_assist 是否在整条路径上持续请求 ART1 定位
 ///
 /// \details
 /// 路径压缩只保留拐点和终点，并在新路径开始时重置视觉校正状态
@@ -431,7 +432,8 @@ namespace {
 ///
 static void load_path_impl(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
                             bool has_start_grid,
-                            point start_grid) {
+                            point start_grid,
+                            bool force_vision_assist = false) {
     auto& plan = App::g_state.planning;
     auto& ctrl = App::g_state.control;
 
@@ -484,7 +486,8 @@ static void load_path_impl(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
     }
 
     // 视觉校正需要知道当前直线段的真实起点，用来区分前进轴和横向轴
-    reset_vision_assist(can_use_start ? grid_to_physical(start_grid) : current_pose_point());
+    reset_vision_assist(can_use_start ? grid_to_physical(start_grid) : current_pose_point(),
+                        force_vision_assist);
     plan.current_wp_idx = 0;
     ctrl.tracker_state = TrackerState::TRACKING;
     ctrl.mode = ControlMode::AUTO_TRACKING;
@@ -498,6 +501,11 @@ void load_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path) {
 // 载入网格路径并使用真实逻辑起点辅助压缩 [start_grid 参与第一段方向判断，可避免路径首点缺失导致的拐点压缩错误]
 void load_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path, point start_grid) {
     load_path_impl(raw_path, true, start_grid);
+}
+
+// 载入需要持续请求 ART1 的网格路径，供跨关返航等关键移动使用
+void load_path_with_vision_assist(const StaticArray<point, MAX_PATH_LENGTH>& raw_path) {
+    load_path_impl(raw_path, false, {0, 0}, true);
 }
 
 // 推箱 / Sokoban 路径载入：现与观测 load_path 行为完全一致——不再插 0.2cm 顶死补点，
@@ -598,7 +606,8 @@ __attribute__((section(".ramfunc"))) void update_vision_assist(const Point2D& ta
         segment_start,
         target,
         plan.vision_last_correction_seq,
-        true
+        true,
+        is_push_extra_waypoint(plan.current_wp_idx)
     );
 }
 
@@ -677,7 +686,8 @@ __attribute__((section(".ramfunc"))) void vision_correction_tick() {
         plan.vision_segment_start,
         {ctrl.current_target.x, ctrl.current_target.y},
         plan.vision_last_correction_seq,
-        true
+        true,
+        is_push_extra_waypoint(plan.current_wp_idx)
     );
 }
 
@@ -814,7 +824,8 @@ __attribute__((section(".ramfunc"))) void update_target() {
             Point2D next_segment_start = crossed_continuous_corner
                 ? target_phys
                 : current_pose_point();
-            reset_vision_assist(next_segment_start);
+            // 强制视觉路径跨航点后仍保留 ART1 请求兜底
+            reset_vision_assist(next_segment_start, s_force_vision_assist_current_segment);
             plan.current_wp_idx++;
             clear_stop_settle();
             target_phys = plan.physical_path[plan.current_wp_idx];
