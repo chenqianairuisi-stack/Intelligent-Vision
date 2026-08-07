@@ -17,6 +17,8 @@ namespace MotionCost {
     inline constexpr uint16_t GRID_MOVE = 1;
     // 路径方向发生变化时的停车和再启动惩罚，麦轮拐点停顿明显时应显著大于 GRID_MOVE
     inline constexpr uint16_t CORNER_STOP = 3;
+    // 推箱宏层切换发力方向时的额外惩罚，避免等步数路径产生多余折线
+    inline constexpr uint16_t PUSH_DIRECTION_CHANGE = 4;
     // 到达观测位后为了对准目标朝向产生的额外代价，不参与普通路径拐点统计
     inline constexpr uint16_t OBSERVE_YAW = 6;
     // uint16_t 对外接口的饱和值，和旧 BFS 不可达返回值保持一致
@@ -1285,6 +1287,233 @@ bool append_box_push_path(SokobanLevel& lvl, point& player_pos, const BoxPushTas
 
     lvl.boxes[moving_box] = task.box_target;
     player_pos = final_car_pos;
+    return true;
+}
+
+/// \brief 在同一箱子起点和目标之间按小车代价重新选择推箱轨迹
+/// \param lvl 当前关卡，会在成功后同步箱子位置
+/// \param player_pos 当前小车位置，成功后更新为最后发力点
+/// \param task 箱子起点和目标
+/// \param out_path 追加底层小车路径，不包含输入 player_pos
+/// \param initial_dir 进入当前小车位置的方向，未知时传 -1
+/// \param required_final_dir 要求最后一次推动方向，未知时传 -1
+///
+/// \details
+/// 宏状态仍然是“箱子位置 + 最后一次推动方向”，但边权加入小车绕到下一发力点的
+/// 实际步数和推动方向切换惩罚。它只改变同一箱子的一段路径，不改变其它实体状态。
+bool append_box_push_optimized_path(
+    SokobanLevel& lvl,
+    point& player_pos,
+    const BoxPushTask& task,
+    StaticArray<point, MAX_PATH_LENGTH>& out_path,
+    int initial_dir,
+    int required_final_dir) {
+    int moving_box = -1;
+    for (int i = 0; i < lvl.box_count; ++i) {
+        if (lvl.boxes[i] == task.box_start) {
+            moving_box = i;
+            break;
+        }
+    }
+    if (moving_box == -1) return task.box_start == task.box_target;
+    if (task.box_start == task.box_target) return true;
+    if (initial_dir < -1 || initial_dir >= 4) initial_dir = -1;
+    if (required_final_dir < -1 || required_final_dir >= 4) required_final_dir = -1;
+
+    auto passable = [&](point p) {
+        if (!in_bounds(p) || lvl.map[p.y][p.x] == 1) return false;
+        for (int i = 0; i < lvl.box_count; ++i) {
+            if (i != moving_box && lvl.boxes[i] == p) return false;
+        }
+        for (int b = 0; b < lvl.bomb_count; ++b) {
+            if (lvl.bombs[b].x != -1 && lvl.bombs[b] == p) return false;
+        }
+        return true;
+    };
+
+    auto fill_micro_distances = [&](point start, point obstacle) {
+        if (!in_bounds(start) || start == obstacle || !passable(start)) return false;
+        b_ws.micro_gen++;
+        if (b_ws.micro_gen == 0) {
+            std::memset(b_ws.micro_visited, 0, sizeof(b_ws.micro_visited));
+            b_ws.micro_gen = 1;
+        }
+        int head = 0;
+        int tail = 0;
+        b_ws.micro_q[tail++] = start;
+        b_ws.micro_visited[start.y][start.x] = b_ws.micro_gen;
+        b_ws.micro_dist[start.y][start.x] = 0;
+        while (head < tail) {
+            point curr = b_ws.micro_q[head++];
+            for (int d = 0; d < 4; ++d) {
+                point np = curr + MOVE[d];
+                if (!in_bounds(np) || np == obstacle) continue;
+                if (b_ws.micro_visited[np.y][np.x] == b_ws.micro_gen || !passable(np)) continue;
+                b_ws.micro_visited[np.y][np.x] = b_ws.micro_gen;
+                b_ws.micro_dist[np.y][np.x] = static_cast<uint8_t>(b_ws.micro_dist[curr.y][curr.x] + 1);
+                b_ws.micro_q[tail++] = np;
+            }
+        }
+        return true;
+    };
+    auto micro_distance = [&](point end) {
+        if (!in_bounds(end) || b_ws.micro_visited[end.y][end.x] != b_ws.micro_gen) return 9999;
+        return static_cast<int>(b_ws.micro_dist[end.y][end.x]);
+    };
+
+    std::memset(b_ws.state_cost, 0xFF, sizeof(b_ws.state_cost));
+    std::memset(b_ws.state_node, 0xFF, sizeof(b_ws.state_node));
+    std::memset(b_ws.state_closed, 0, sizeof(b_ws.state_closed));
+
+    uint16_t heap[1024];
+    int heap_size = 0;
+    int node_count = 0;
+    bool overflow = false;
+    auto heap_less = [&](uint16_t a, uint16_t b) {
+        return b_ws.node_cost[a] < b_ws.node_cost[b];
+    };
+    auto heap_push = [&](uint16_t idx) {
+        if (heap_size >= 1024) {
+            overflow = true;
+            return;
+        }
+        int i = heap_size++;
+        heap[i] = idx;
+        while (i > 0) {
+            int parent = (i - 1) / 2;
+            if (!heap_less(heap[i], heap[parent])) break;
+            uint16_t tmp = heap[i];
+            heap[i] = heap[parent];
+            heap[parent] = tmp;
+            i = parent;
+        }
+    };
+    auto heap_pop = [&]() -> int {
+        if (heap_size <= 0) return -1;
+        uint16_t root = heap[0];
+        heap[0] = heap[--heap_size];
+        int i = 0;
+        while (true) {
+            int left = i * 2 + 1;
+            int right = left + 1;
+            int best = i;
+            if (left < heap_size && heap_less(heap[left], heap[best])) best = left;
+            if (right < heap_size && heap_less(heap[right], heap[best])) best = right;
+            if (best == i) break;
+            uint16_t tmp = heap[i];
+            heap[i] = heap[best];
+            heap[best] = tmp;
+            i = best;
+        }
+        return static_cast<int>(root);
+    };
+    auto keep_state = [&](point box_pos, uint8_t dir, uint16_t cost, uint16_t parent_idx) {
+        if (!in_bounds(box_pos) || dir >= 4 || cost >= b_ws.state_cost[box_pos.y][box_pos.x][dir]) return;
+        if (node_count >= 1024) {
+            overflow = true;
+            return;
+        }
+        uint16_t idx = static_cast<uint16_t>(node_count++);
+        b_ws.q[idx] = {box_pos.x, box_pos.y, dir, parent_idx};
+        b_ws.node_cost[idx] = cost;
+        b_ws.state_cost[box_pos.y][box_pos.x][dir] = cost;
+        b_ws.state_node[box_pos.y][box_pos.x][dir] = idx;
+        heap_push(idx);
+    };
+
+    if (fill_micro_distances(player_pos, task.box_start)) {
+        for (uint8_t d = 0; d < 4; ++d) {
+            point stand = task.box_start - MOVE[d];
+            if (!passable(stand)) continue;
+            int walk = micro_distance(stand);
+            if (walk == 9999) continue;
+            int cost = walk + ((initial_dir >= 0 && initial_dir != d) ? MotionCost::PUSH_DIRECTION_CHANGE : 0);
+            keep_state(task.box_start, d, static_cast<uint16_t>(cost), 65535);
+        }
+    }
+
+    int target_node_idx = -1;
+    while (!overflow && heap_size > 0) {
+        int idx = heap_pop();
+        if (idx < 0) break;
+        BombMacroNode curr = b_ws.q[idx];
+        if (b_ws.state_closed[curr.by][curr.bx][curr.p_dir]) continue;
+        if (b_ws.node_cost[idx] != b_ws.state_cost[curr.by][curr.bx][curr.p_dir]) continue;
+        b_ws.state_closed[curr.by][curr.bx][curr.p_dir] = 1;
+        point box_pos = {curr.bx, curr.by};
+        if (box_pos == task.box_target &&
+            (required_final_dir < 0 || curr.p_dir == required_final_dir)) {
+            target_node_idx = idx;
+            break;
+        }
+
+        point forward = box_pos + MOVE[curr.p_dir];
+        if (passable(forward)) {
+            uint32_t next_cost = static_cast<uint32_t>(b_ws.node_cost[idx]) + 1;
+            if (next_cost < 65535) keep_state(forward, curr.p_dir, static_cast<uint16_t>(next_cost), static_cast<uint16_t>(idx));
+        }
+
+        point current_car = box_pos - MOVE[curr.p_dir];
+        bool has_turn_candidate = false;
+        for (uint8_t d = 0; d < 4; ++d) {
+            if (d != curr.p_dir && passable(box_pos - MOVE[d])) {
+                has_turn_candidate = true;
+                break;
+            }
+        }
+        if (!has_turn_candidate || !fill_micro_distances(current_car, box_pos)) continue;
+        for (uint8_t d = 0; d < 4; ++d) {
+            if (d == curr.p_dir) continue;
+            point next_face = box_pos - MOVE[d];
+            if (!passable(next_face)) continue;
+            int walk = micro_distance(next_face);
+            if (walk == 9999) continue;
+            uint32_t next_cost = static_cast<uint32_t>(b_ws.node_cost[idx]) +
+                                 static_cast<uint32_t>(walk) + MotionCost::PUSH_DIRECTION_CHANGE;
+            if (next_cost < 65535) keep_state(box_pos, d, static_cast<uint16_t>(next_cost), static_cast<uint16_t>(idx));
+        }
+    }
+    if (overflow || target_node_idx < 0) return false;
+
+    StaticArray<BombMacroNode, 256> macro_path;
+    for (int idx = target_node_idx; idx != 65535; idx = b_ws.q[idx].parent_idx) {
+        macro_path.push_back(b_ws.q[idx]);
+    }
+    std::reverse(macro_path.begin(), macro_path.end());
+    if (macro_path.empty()) return false;
+
+    StaticArray<point, MAX_PATH_LENGTH> generated;
+    auto append_micro_path = [&](point start, point end, point obstacle) {
+        StaticArray<point, MAX_PATH_LENGTH> segment;
+        SokobanLevel micro_level = lvl;
+        micro_level.boxes[moving_box] = obstacle;
+        if (!get_grid_path(micro_level, start, end, segment)) return false;
+        for (int i = 0; i < segment.size(); ++i) {
+            if (generated.size() >= MAX_PATH_LENGTH) return false;
+            generated.push_back(segment[i]);
+        }
+        return true;
+    };
+
+    point car = player_pos;
+    for (int i = 0; i + 1 < macro_path.size(); ++i) {
+        const BombMacroNode& curr = macro_path[i];
+        const BombMacroNode& next = macro_path[i + 1];
+        point box_pos = {curr.bx, curr.by};
+        point face = box_pos - MOVE[next.p_dir];
+        if (!append_micro_path(car, face, box_pos)) return false;
+        car = face;
+        if (curr.bx == next.bx && curr.by == next.by) continue;
+        if (generated.size() >= MAX_PATH_LENGTH) return false;
+        generated.push_back(box_pos);
+        car = box_pos;
+    }
+
+    if (out_path.size() + generated.size() > MAX_PATH_LENGTH) return false;
+    for (int i = 0; i < generated.size(); ++i) out_path.push_back(generated[i]);
+
+    lvl.boxes[moving_box] = task.box_target;
+    player_pos = car;
     return true;
 }
 

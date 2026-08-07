@@ -278,8 +278,10 @@ private:
         GameState& out_state) const;
     // 根据宏路径末端玩家位置反推最后一次推炸弹的方向；4 表示无法推向目标墙
     uint8_t infer_final_bomb_push_dir(point final_player, point target_wall) const;
-    // 成功求解后仅优化玩家行走段的转弯，保持推动序列不变
+    // 成功求解后优化同箱连续推动轨迹和玩家行走段转弯
     void optimize_final_path_turns();
+    // 对边界状态一致的同箱连续推动片段做代价优先重规划
+    void optimize_final_box_push_runs();
     // 为相邻推动作之间的一段行走重新寻路，优先减少转弯并限制额外步数
     bool append_optimized_walk_segment(
         const GameState& state,

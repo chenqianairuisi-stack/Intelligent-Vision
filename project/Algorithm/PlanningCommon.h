@@ -131,6 +131,13 @@ bool is_box_position_safe(const SokobanLevel& lvl, uint8_t box_id, uint16_t cand
 
 // --- 推物体路径生成 ---
 bool append_box_push_path(SokobanLevel& lvl, point& player_pos, const BoxPushTask& task, StaticArray<point, MAX_PATH_LENGTH>& out_path);
+// 在不改变箱子起点/目标的前提下，优先选择小车绕行代价较低的推箱宏路径
+bool append_box_push_optimized_path(SokobanLevel& lvl,
+                                    point& player_pos,
+                                    const BoxPushTask& task,
+                                    StaticArray<point, MAX_PATH_LENGTH>& out_path,
+                                    int initial_dir = -1,
+                                    int required_final_dir = -1);
 bool get_direct_bomb_push_path_cost(const SokobanLevel& lvl, point player_start, const BombTask& task, uint16_t& out_cost, point& out_final_player);
 bool get_bomb_push_path(const SokobanLevel& lvl, point player_start, const BombTask& task, StaticArray<point, MAX_PATH_LENGTH>& out_path);
 

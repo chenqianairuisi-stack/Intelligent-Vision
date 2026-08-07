@@ -2605,18 +2605,6 @@ static inline uint8_t dir_between(point a, point b) {
     return 4;
 }
 
-static int count_path_turns(const StaticArray<point, MAX_PATH_LENGTH>& path) {
-    int turns = 0;
-    uint8_t last_dir = 4;
-    for (int i = 1; i < path.size(); ++i) {
-        uint8_t d = dir_between(path[i - 1], path[i]);
-        if (d == 4) continue;
-        if (last_dir != 4 && d != last_dir) ++turns;
-        last_dir = d;
-    }
-    return turns;
-}
-
 /// \brief 在找到推箱解后，重新拼接某段玩家行走路径
 ///
 /// \details
@@ -2727,16 +2715,273 @@ bool Sokoban::append_optimized_walk_segment(
     return true;
 }
 
+/// \brief 对同一个箱子的连续推动片段做局部代价重规划
+///
+/// \details
+/// 替换片段必须从相同动态状态出发，并回到完全相同的箱子、炸弹、目标 mask 和玩家位置。
+/// 这样后续原路径仍可直接拼接，局部优化不会改变全局箱子完成顺序。
+void Sokoban::optimize_final_box_push_runs() {
+    if (final_path.size() <= 2) return;
+
+    auto replay_step = [&](GameState& state,
+                           point next,
+                           int& pushed_idx,
+                           bool& pushed_bomb,
+                           uint8_t& move_dir,
+                           point& push_to) {
+        pushed_idx = -1;
+        pushed_bomb = false;
+        move_dir = dir_between(state.player, next);
+        push_to = {-1, -1};
+        if (move_dir >= 4 || is_overstep(next) || is_solid(next, state.blown_mask)) return false;
+
+        int box_idx = find_box_id(state, next);
+        int bomb_idx = get_bomb_id(state, next);
+        if (box_idx == -1 && bomb_idx == -1) {
+            state.player = next;
+            return true;
+        }
+
+        push_to = next + MOVE[move_dir];
+        if (is_overstep(push_to)) return false;
+        if (find_box_id(state, push_to) != -1 || get_bomb_id(state, push_to) != -1) return false;
+
+        if (box_idx != -1) {
+            if (is_solid(push_to, state.blown_mask)) return false;
+            pushed_idx = box_idx;
+            int target_idx = find_active_target_index(state, state.target_mask, push_to, box_idx);
+            if (target_idx != -1) {
+                state.target_mask = static_cast<uint16_t>(state.target_mask & ~(1U << target_idx));
+                for (int b = box_idx; b + 1 < state.num_boxes; ++b) {
+                    state.box_x[b] = state.box_x[b + 1];
+                    state.box_y[b] = state.box_y[b + 1];
+                    state.box_semantics[b] = state.box_semantics[b + 1];
+                }
+                --state.num_boxes;
+            } else {
+                state.box_x[box_idx] = push_to.x;
+                state.box_y[box_idx] = push_to.y;
+            }
+        } else {
+            pushed_idx = bomb_idx;
+            pushed_bomb = true;
+            bool explodes = is_solid(push_to, state.blown_mask) &&
+                            bomb_tasks[bomb_idx].target_wall == push_to;
+            if (is_solid(push_to, state.blown_mask) && !explodes) return false;
+            if (explodes) {
+                state.blown_mask = static_cast<uint8_t>(state.blown_mask | (1 << bomb_idx));
+            } else {
+                state.bomb_x[bomb_idx] = push_to.x;
+                state.bomb_y[bomb_idx] = push_to.y;
+            }
+        }
+
+        state.player = next;
+        return true;
+    };
+
+    auto same_state = [](const GameState& a, const GameState& b) {
+        if (a.player != b.player ||
+            a.num_boxes != b.num_boxes ||
+            a.num_bombs != b.num_bombs ||
+            a.target_mask != b.target_mask ||
+            a.blown_mask != b.blown_mask) {
+            return false;
+        }
+        for (int i = 0; i < a.num_boxes; ++i) {
+            if (a.box_x[i] != b.box_x[i] ||
+                a.box_y[i] != b.box_y[i] ||
+                a.box_semantics[i] != b.box_semantics[i]) {
+                return false;
+            }
+        }
+        for (int i = 0; i < a.num_bombs; ++i) {
+            if (a.bomb_x[i] != b.bomb_x[i] || a.bomb_y[i] != b.bomb_y[i]) return false;
+        }
+        return true;
+    };
+
+    auto segment_cost = [](point start,
+                           const StaticArray<point, MAX_PATH_LENGTH>& segment,
+                           int initial_dir,
+                           int next_dir) {
+        int cost = 0;
+        int last_dir = initial_dir;
+        point curr = start;
+        for (int i = 0; i < segment.size(); ++i) {
+            uint8_t dir = dir_between(curr, segment[i]);
+            if (dir >= 4) return 9999;
+            ++cost;
+            if (last_dir >= 0 && last_dir < 4 && last_dir != dir) cost += DISPLAY_TURN_COST;
+            last_dir = dir;
+            curr = segment[i];
+        }
+        if (next_dir >= 0 && next_dir < 4 && last_dir >= 0 && last_dir < 4 && last_dir != next_dir) {
+            cost += DISPLAY_TURN_COST;
+        }
+        return cost;
+    };
+
+    StaticArray<point, MAX_PATH_LENGTH> original = final_path;
+    StaticArray<point, MAX_PATH_LENGTH> rebuilt;
+    rebuilt.push_back(original[0]);
+    GameState state = initial_state;
+    bool changed = false;
+
+    int i = 1;
+    while (i < original.size()) {
+        GameState first_after = state;
+        int first_idx = -1;
+        bool first_is_bomb = false;
+        uint8_t first_dir = 4;
+        point first_to = {-1, -1};
+        if (!replay_step(first_after, original[i], first_idx, first_is_bomb, first_dir, first_to)) return;
+
+        if (first_idx == -1 || first_is_bomb) {
+            rebuilt.push_back(original[i]);
+            state = first_after;
+            ++i;
+            continue;
+        }
+
+        const GameState run_start_state = state;
+        const int run_box_idx = first_idx;
+        const uint8_t run_semantic = state.box_semantics[run_box_idx];
+        const point box_start = {state.box_x[run_box_idx], state.box_y[run_box_idx]};
+        GameState scan_state = state;
+        GameState run_end_state = first_after;
+        point box_end = first_to;
+        uint8_t final_push_dir = first_dir;
+        int run_end = i + 1;
+        int push_count = 0;
+        int direction_run_count = 0;
+        uint8_t previous_push_dir = 4;
+        GameState previous_push_end_state = state;
+        point previous_box_end = box_start;
+        int previous_push_end = i;
+        GameState suffix_boundary_state = state;
+        point suffix_boundary_box_end = box_start;
+        uint8_t suffix_boundary_final_dir = 4;
+        int suffix_boundary_end = i;
+        int suffix_boundary_push_count = 0;
+
+        for (int j = i; j < original.size(); ++j) {
+            GameState next_state = scan_state;
+            int pushed_idx = -1;
+            bool pushed_bomb = false;
+            uint8_t push_dir = 4;
+            point push_target = {-1, -1};
+            if (!replay_step(next_state, original[j], pushed_idx, pushed_bomb, push_dir, push_target)) return;
+
+            if (pushed_idx != -1) {
+                if (pushed_bomb || pushed_idx != run_box_idx ||
+                    scan_state.box_semantics[pushed_idx] != run_semantic) {
+                    break;
+                }
+                if (push_count == 0) {
+                    direction_run_count = 1;
+                } else if (push_dir != previous_push_dir) {
+                    ++direction_run_count;
+                    // 保留最后一段直推作为后缀，只优化它之前的折线路段
+                    suffix_boundary_state = previous_push_end_state;
+                    suffix_boundary_box_end = previous_box_end;
+                    suffix_boundary_final_dir = previous_push_dir;
+                    suffix_boundary_end = previous_push_end;
+                    suffix_boundary_push_count = push_count;
+                }
+                ++push_count;
+                box_end = push_target;
+                final_push_dir = push_dir;
+                run_end = j + 1;
+                run_end_state = next_state;
+                previous_push_dir = push_dir;
+                previous_push_end_state = next_state;
+                previous_box_end = push_target;
+                previous_push_end = j + 1;
+                bool completed = next_state.num_boxes < scan_state.num_boxes;
+                scan_state = next_state;
+                if (completed) break;
+                continue;
+            }
+            scan_state = next_state;
+        }
+
+        if (direction_run_count >= 3 && suffix_boundary_push_count >= 2) {
+            run_end_state = suffix_boundary_state;
+            box_end = suffix_boundary_box_end;
+            final_push_dir = suffix_boundary_final_dir;
+            run_end = suffix_boundary_end;
+            push_count = suffix_boundary_push_count;
+        }
+
+        StaticArray<point, MAX_PATH_LENGTH> original_segment;
+        for (int k = i; k < run_end; ++k) original_segment.push_back(original[k]);
+
+        bool use_candidate = false;
+        StaticArray<point, MAX_PATH_LENGTH> candidate;
+        if (push_count >= 2 && direction_run_count >= 3) {
+            SokobanLevel level;
+            build_level_from_state(run_start_state, level);
+            point candidate_player = run_start_state.player;
+            BoxPushTask task{box_start, box_end};
+            int initial_dir = rebuilt.size() >= 2
+                ? dir_between(rebuilt[rebuilt.size() - 2], rebuilt.back())
+                : -1;
+            int next_dir = run_end < original.size()
+                ? dir_between(original[run_end - 1], original[run_end])
+                : -1;
+
+            if (PlanningCommon::append_box_push_optimized_path(
+                    level,
+                    candidate_player,
+                    task,
+                    candidate,
+                    initial_dir,
+                    final_push_dir) &&
+                candidate_player == run_end_state.player &&
+                rebuilt.size() + candidate.size() + original.size() - run_end <= MAX_PATH_LENGTH) {
+                GameState candidate_end = run_start_state;
+                bool candidate_valid = true;
+                for (int k = 0; k < candidate.size(); ++k) {
+                    int pushed_idx = -1;
+                    bool pushed_bomb = false;
+                    uint8_t push_dir = 4;
+                    point push_target = {-1, -1};
+                    if (!replay_step(candidate_end, candidate[k], pushed_idx, pushed_bomb, push_dir, push_target)) {
+                        candidate_valid = false;
+                        break;
+                    }
+                }
+                if (candidate_valid && same_state(candidate_end, run_end_state)) {
+                    int original_cost = segment_cost(run_start_state.player, original_segment, initial_dir, next_dir);
+                    int candidate_cost = segment_cost(run_start_state.player, candidate, initial_dir, next_dir);
+                    use_candidate = candidate_cost < original_cost;
+                }
+            }
+        }
+
+        const StaticArray<point, MAX_PATH_LENGTH>& chosen = use_candidate ? candidate : original_segment;
+        for (int k = 0; k < chosen.size(); ++k) rebuilt.push_back(chosen[k]);
+        if (use_candidate) changed = true;
+        state = run_end_state;
+        i = run_end;
+    }
+
+    if (changed) final_path = rebuilt;
+}
+
 /// \brief 对最终路径做轻量后处理，尝试减少行走转弯
 ///
 /// \details
-/// 推箱动作本身保持不变，只替换相邻推动作之间的玩家行走段。
-/// 若优化结果没有收益或路径变长过多，则保留原始路径。
+/// 先重规划边界状态一致的同箱连续推动片段，再替换相邻推动作之间的玩家行走段。
+/// 每一层都按面板总代价验收，没有收益时保留进入该层前的路径。
 void Sokoban::optimize_final_path_turns() {
     if (final_path.size() <= 2) return;
 
+    optimize_final_box_push_runs();
+
     StaticArray<point, MAX_PATH_LENGTH> original = final_path;
-    int original_turns = count_path_turns(original);
+    int original_cost = path_display_cost(original);
     GameState state = initial_state;
     StaticArray<point, MAX_PATH_LENGTH> optimized;
     optimized.push_back(final_path[0]);
@@ -2837,8 +3082,7 @@ void Sokoban::optimize_final_path_turns() {
         i = walk_end + 1;
     }
 
-    int optimized_turns = count_path_turns(optimized);
-    if (optimized_turns < original_turns || optimized.size() <= original.size()) {
+    if (path_display_cost(optimized) <= original_cost) {
         final_path = optimized;
     } else {
         final_path = original;
