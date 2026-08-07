@@ -350,16 +350,106 @@ bool has_entity(const SokobanLevel& lvl, int x, int y, int ignored_bomb) {
     return has_bomb(lvl, p, ignored_bomb);
 }
 
-// 计算指定车位与朝向在当前地图上的真实观测覆盖。
-// 箱子和目标点使用不同的候选几何：箱子只允许正前方两种距离，
-// 目标点允许七种无遮挡几何，并限制一次最多返回三个目标点。
+// 生成目标点单槽位可见性，前五项是单目标候选，F1 斜角只允许参与联合观测
+static void collect_target_observe_slots(const SokobanLevel& lvl,
+                                         point view_pos,
+                                         point f,
+                                         point left,
+                                         point right,
+                                         TargetObserveSlots& out_slots) {
+    struct TargetViewGrid {
+        point pos;
+        uint16_t penalty;
+        bool enabled;
+    };
+
+    const TargetViewGrid target_candidates[ObservationConfig::TARGET_OBSERVE_SLOT_COUNT] = {
+        {view_pos + f, 0u, ObservationConfig::ENABLE_FACE_TO_FACE},
+        {view_pos + f + f, ObservationConfig::TARGET_OPTIMAL_PENALTY, ObservationConfig::ENABLE_OPTIMAL_DIST},
+        {view_pos + f + f + left, ObservationConfig::TARGET_DIAGONAL_PENALTY, ObservationConfig::ENABLE_DIAGONAL},
+        {view_pos + f + f + right, ObservationConfig::TARGET_DIAGONAL_PENALTY, ObservationConfig::ENABLE_DIAGONAL},
+        {view_pos + f + f + f, ObservationConfig::TARGET_FAR_PENALTY, ObservationConfig::ENABLE_TARGET_FAR_FACE_TO_FACE},
+        {view_pos + f + left, ObservationConfig::TARGET_DIAGONAL_PENALTY, ObservationConfig::ENABLE_TARGET_JOINT_F1_DIAGONAL},
+        {view_pos + f + right, ObservationConfig::TARGET_DIAGONAL_PENALTY, ObservationConfig::ENABLE_TARGET_JOINT_F1_DIAGONAL},
+    };
+
+    auto blocks_los = [&](point p) {
+        return !in_bounds(p) || lvl.map[p.y][p.x] == 1 || has_entity(lvl, p.x, p.y);
+    };
+    auto target_id_at = [&](point p) {
+        if (has_box(lvl, p)) return -1;
+        for (int i = 0; i < lvl.target_count; ++i) {
+            if (lvl.targets[i] == p) return i;
+        }
+        return -1;
+    };
+    auto target_candidate_blocked = [&](int slot) {
+        const point front = view_pos + f;
+        if (slot == ObservationConfig::TARGET_SLOT_F2_CORE) return blocks_los(front);
+        if (slot == ObservationConfig::TARGET_SLOT_F2_LEFT) {
+            return blocks_los(front) || blocks_los(front + left);
+        }
+        if (slot == ObservationConfig::TARGET_SLOT_F2_RIGHT) {
+            return blocks_los(front) || blocks_los(front + right);
+        }
+        if (slot == ObservationConfig::TARGET_SLOT_F3) {
+            return blocks_los(front) || blocks_los(front + f);
+        }
+        return false;
+    };
+    auto far_target_has_joint_side_target = [&](point far_target) {
+        // F3 目标的左右目标可与其从更近的 F2 位姿联合观测时，不再保留单独 F3 候选
+        const point two_steps_front = view_pos + f + f;
+        const point side_targets[2] = {far_target + left, far_target + right};
+        const point side_rays[2] = {two_steps_front + left, two_steps_front + right};
+        for (int side = 0; side < 2; ++side) {
+            if (target_id_at(side_targets[side]) < 0) continue;
+            if (!blocks_los(side_rays[side])) return true;
+        }
+        return false;
+    };
+
+    for (int slot = 0; slot < ObservationConfig::TARGET_OBSERVE_SLOT_COUNT; ++slot) {
+        const TargetViewGrid& candidate = target_candidates[slot];
+        if (!candidate.enabled || target_candidate_blocked(slot)) continue;
+        const int target_id = target_id_at(candidate.pos);
+        if (target_id < 0) continue;
+        if (slot == ObservationConfig::TARGET_SLOT_F3 &&
+            ObservationConfig::ENABLE_TARGET_JOINT_F2_DIAGONAL &&
+            far_target_has_joint_side_target(candidate.pos)) {
+            continue;
+        }
+
+        const int entity_id = lvl.box_count + target_id;
+        if (entity_id >= MAX_ENTITIES) continue;
+        out_slots.mask[slot] = uint32_t{1u} << entity_id;
+        out_slots.penalty[slot] = candidate.penalty;
+    }
+}
+
+/// \brief 按当前地图重新计算单个观测位姿的真实覆盖
+/// \param lvl 当前地图
+/// \param view_pos 车体观测位置
+/// \param target_yaw 车头朝向
+/// \param out_mask 输出当前可见实体集合
+/// \param out_penalty 输出目标几何惩罚
+/// \param out_target_slots 可选输出目标槽位，供 Exploration 组合联合观测动作
 bool evaluate_observe_pose(const SokobanLevel& lvl,
                            point view_pos,
                            float target_yaw,
                            uint32_t& out_mask,
-                           uint16_t& out_penalty) {
+                           uint16_t& out_penalty,
+                           TargetObserveSlots* out_target_slots) {
     out_mask = 0u;
     out_penalty = MotionCost::INF;
+
+    TargetObserveSlots local_slots{};
+    TargetObserveSlots& target_slots = out_target_slots ? *out_target_slots : local_slots;
+    for (int slot = 0; slot < ObservationConfig::TARGET_OBSERVE_SLOT_COUNT; ++slot) {
+        target_slots.mask[slot] = 0u;
+        target_slots.penalty[slot] = MotionCost::INF;
+    }
+
     if (!in_bounds(view_pos) || lvl.map[view_pos.y][view_pos.x] == 1 ||
         has_box(lvl, view_pos) || has_bomb(lvl, view_pos)) {
         return false;
@@ -375,152 +465,40 @@ bool evaluate_observe_pose(const SokobanLevel& lvl,
     const point right = {static_cast<int8_t>(-f.y), f.x};
     const point left = {f.y, static_cast<int8_t>(-f.x)};
 
-    struct ViewGrid {
-        point pos;
-        uint16_t penalty;
-        bool enabled;
-        bool is_box_view;
-    };
+    collect_target_observe_slots(lvl, view_pos, f, left, right, target_slots);
 
-    // 箱子候选与目标点候选刻意分开。箱子只保留正前方 1~2 格直视位；
-    // 目标点保留正前方、前两格斜角和前三格斜角几何。
-    const ViewGrid box_candidates[2] = {
-        {view_pos + f, 0u, ObservationConfig::ENABLE_FACE_TO_FACE, true},
-        {view_pos + f + f, 0u, ObservationConfig::ENABLE_OPTIMAL_DIST, true},
-    };
-    const ViewGrid target_candidates[7] = {
-        {view_pos + f, 0u, ObservationConfig::ENABLE_FACE_TO_FACE, false},
-        {view_pos + f + f, ObservationConfig::TARGET_OPTIMAL_PENALTY, ObservationConfig::ENABLE_OPTIMAL_DIST, false},
-        {view_pos + f + f + left, ObservationConfig::TARGET_DIAGONAL_PENALTY, ObservationConfig::ENABLE_FAR_DIAGONAL, false},
-        {view_pos + f + f + right, ObservationConfig::TARGET_DIAGONAL_PENALTY, ObservationConfig::ENABLE_FAR_DIAGONAL, false},
-        {view_pos + f + f + f, ObservationConfig::TARGET_FAR_PENALTY, ObservationConfig::ENABLE_TARGET_FAR_FACE_TO_FACE, false},
-        {view_pos + f + f + f + left, ObservationConfig::TARGET_FAR_PENALTY + ObservationConfig::TARGET_DIAGONAL_PENALTY, ObservationConfig::ENABLE_FAR_DIAGONAL, false},
-        {view_pos + f + f + f + right, ObservationConfig::TARGET_FAR_PENALTY + ObservationConfig::TARGET_DIAGONAL_PENALTY, ObservationConfig::ENABLE_FAR_DIAGONAL, false},
-    };
-
-    // 目标点与箱子一样属于实体；只有观测射线的中间格会形成遮挡，
-    // 候选端点本身由后续实体查询处理，不能把被观测目标误判成自身遮挡。
     auto blocks_los = [&](point p) {
         return !in_bounds(p) || lvl.map[p.y][p.x] == 1 || has_entity(lvl, p.x, p.y);
     };
-    auto candidate_blocked = [&](const ViewGrid& candidate, int index) {
-        const point front = view_pos + f;
-        if (candidate.is_box_view) {
-            if (index <= 1) {
-                // index + 1 是直视距离；只检查射线中间格，候选端点由实体查询处理。
-                point ray = front;
-                for (int step = 1; step <= index; ++step) {
-                    if (blocks_los(ray)) return true;
-                    ray = ray + f;
-                }
-                return false;
-            }
-        }
-        if (index == 1) return blocks_los(front);
-        if (index == 2) {
-            // 前两格斜角只检查前方两层的左侧通道；同层正中目标不在这条视线上。
-            return blocks_los(front) || blocks_los(front + left);
-        }
-        if (index == 3) {
-            return blocks_los(front) || blocks_los(front + right);
-        }
-        // 隔三格还要检查前两层对应射线格；候选端点本身不算自身遮挡。
-        if (index == 4) return blocks_los(front) || blocks_los(front + f);
-        if (index == 5) {
-            return blocks_los(front) || blocks_los(front + left) || blocks_los(front + f) ||
-                   blocks_los(front + f + left);
-        }
-        if (index == 6) {
-            return blocks_los(front) || blocks_los(front + right) || blocks_los(front + f) ||
-                   blocks_los(front + f + right);
-        }
-        return false;
-    };
-    auto box_id_at = [&](point p) {
-        for (int i = 0; i < lvl.box_count; ++i) {
-            if (lvl.boxes[i] == p) return i;
-        }
-        return -1;
-    };
-    auto target_id_at = [&](point p) {
-        // 箱子压在目标点上时只提交箱子观测，目标点待箱子移开后再确认。
-        if (has_box(lvl, p)) return -1;
-        for (int i = 0; i < lvl.target_count; ++i) {
-            if (lvl.targets[i] == p) return i;
-        }
-        return -1;
-    };
-
-    uint16_t max_penalty = 0u;
-    uint8_t entity_count = 0u;
-    uint8_t target_count = 0u;
+    const point box_candidates[2] = {view_pos + f, view_pos + f + f};
     for (int i = 0; i < 2; ++i) {
-        const ViewGrid& candidate = box_candidates[i];
-        if (!candidate.enabled || candidate_blocked(candidate, i)) continue;
-        const int box_id = box_id_at(candidate.pos);
-        if (box_id < 0) continue;
+        const bool enabled = i == 0
+            ? ObservationConfig::ENABLE_FACE_TO_FACE
+            : ObservationConfig::ENABLE_OPTIMAL_DIST;
+        if (!enabled || (i == 1 && blocks_los(view_pos + f))) continue;
 
-        // 正前方的遮挡关系已经保证同一条视线至多出现一个箱子；
-        // 这里再次显式守卫，避免以后扩展候选几何时破坏“一次一个箱子”。
-        if ((out_mask & ((uint32_t{1u} << lvl.box_count) - 1u)) != 0u) continue;
-        out_mask |= uint32_t{1u} << box_id;
-        ++entity_count;
-    }
-
-    struct TargetHit {
-        int target_id;
-        uint16_t penalty;
-        int candidate_index;
-    };
-    TargetHit target_hits[7] = {};
-    int target_hit_count = 0;
-    for (int i = 0; i < 7; ++i) {
-        const ViewGrid& candidate = target_candidates[i];
-        if (!candidate.enabled || candidate_blocked(candidate, i)) continue;
-        const int target_id = target_id_at(candidate.pos);
-        if (target_id < 0) continue;
-
-        bool duplicate = false;
-        for (int j = 0; j < target_hit_count; ++j) {
-            if (target_hits[j].target_id == target_id) {
-                duplicate = true;
-                break;
-            }
-        }
-        if (!duplicate && target_hit_count < 7) {
-            target_hits[target_hit_count++] = {target_id, candidate.penalty, i};
+        for (int box_id = 0; box_id < lvl.box_count; ++box_id) {
+            if (lvl.boxes[box_id] != box_candidates[i]) continue;
+            if ((out_mask & ((uint32_t{1u} << lvl.box_count) - 1u)) != 0u) break;
+            out_mask |= uint32_t{1u} << box_id;
+            break;
         }
     }
 
-    // 先取观测几何代价较低的目标点，最多保留三个；
-    // 路径和转向代价仍由上层巡图搜索决定，不用箱子距离做偏置。
-    for (int i = 0; i < target_hit_count - 1; ++i) {
-        for (int j = 0; j < target_hit_count - 1 - i; ++j) {
-            const TargetHit& a = target_hits[j];
-            const TargetHit& b = target_hits[j + 1];
-            if (a.penalty > b.penalty ||
-                (a.penalty == b.penalty && a.candidate_index > b.candidate_index)) {
-                const TargetHit temp = target_hits[j];
-                target_hits[j] = target_hits[j + 1];
-                target_hits[j + 1] = temp;
-            }
-        }
-    }
-    const int selected_targets = std::min(
-        target_hit_count,
-        static_cast<int>(ObservationConfig::MAX_TARGETS_PER_OBSERVATION));
-    for (int i = 0; i < selected_targets; ++i) {
-        const int entity_id = lvl.box_count + target_hits[i].target_id;
-        if (entity_id >= MAX_ENTITIES) continue;
-        out_mask |= uint32_t{1u} << entity_id;
-        max_penalty = std::max(max_penalty, target_hits[i].penalty);
-        ++entity_count;
-        ++target_count;
+    const int target_slot_count = ObservationConfig::ENABLE_TARGET_JOINT_F1_DIAGONAL
+        ? ObservationConfig::TARGET_OBSERVE_SLOT_COUNT
+        : ObservationConfig::TARGET_SINGLE_SLOT_COUNT;
+    uint16_t max_penalty = 0u;
+    bool has_target = false;
+    for (int slot = 0; slot < target_slot_count; ++slot) {
+        if (target_slots.mask[slot] == 0u) continue;
+        out_mask |= target_slots.mask[slot];
+        max_penalty = std::max(max_penalty, target_slots.penalty[slot]);
+        has_target = true;
     }
 
-    if (entity_count == 0u) return false;
-    // 几何罚分按一次观测的最差目标计算，避免覆盖越多反而累计越高
-    out_penalty = target_count == 0u ? 0u : max_penalty;
+    if (out_mask == 0u) return false;
+    out_penalty = has_target ? max_penalty : 0u;
     return true;
 }
 

@@ -34,6 +34,8 @@ namespace ExplorationConfig {
     inline constexpr int OBS_POSE_BRANCHES = 4 * OBS_POSES_PER_YAW;
     inline constexpr int GRID_TIME_CACHE_SLOTS = 32;            // 小型 LRU 距离图缓存槽数，含进入方向约 12KB
     inline constexpr int PATROL_DFS_FRAME_LIMIT = 16;           // DFS 递归帧复用数组深度上限
+    inline constexpr uint32_t PATROL_DFS_OPS_LIMIT = 15000;      // 巡图参考解只保留有限搜索预算
+    inline constexpr int OBS_SUCCESSOR_HASH_SLOTS = 128;         // 单层观测后继去重哈希槽数
     inline constexpr int FALLBACK_CLEAR_MAX_STEPS = 5;          // 巡图兜底开通单格瓶颈允许的连续推送距离
     inline constexpr int SEED_POSES_PER_YAW = 2;                // 种子每个朝向保留两个候选做精确一步前瞻
     inline constexpr int SEED_POSE_BRANCHES = 4 * SEED_POSES_PER_YAW;
@@ -41,6 +43,11 @@ namespace ExplorationConfig {
 }
 
 using namespace ExplorationConfig;
+
+static_assert((OBS_SUCCESSOR_HASH_SLOTS & (OBS_SUCCESSOR_HASH_SLOTS - 1)) == 0,
+              "Observation successor hash size must be a power of two");
+static_assert(MAX_ENTITIES * OBS_POSE_BRANCHES < OBS_SUCCESSOR_HASH_SLOTS,
+              "Observation successor hash table must retain one empty slot");
 
 // ============================================================================
 // 热点工作区
@@ -141,10 +148,17 @@ StaticArray<ViewPose, MAX_OBS_POINTS> Exploration::build_current_views(const Sok
                 const bool out_is_box_view = (out[j].mask[0] & box_mask) != 0u;
                 if (out[j].pos == vp.pos && out[j].target_yaw == vp.target_yaw &&
                     out_is_box_view == is_box_view) {
-                    out[j].mask[0] |= vp.mask[0];
-                    if (vp.penalty[0] < out[j].penalty[0]) out[j].penalty[0] = vp.penalty[0];
-                    exists = true;
-                    break;
+                    if (is_box_view) {
+                        out[j].mask[0] |= vp.mask[0];
+                        if (vp.penalty[0] < out[j].penalty[0]) out[j].penalty[0] = vp.penalty[0];
+                        exists = true;
+                        break;
+                    }
+                    // 目标点同一物理位姿可能有多排候选，只有同一排 mask 才允许去重
+                    if (out[j].mask[0] == vp.mask[0]) {
+                        exists = true;
+                        break;
+                    }
                 }
             }
             if (!exists) out.push_back(vp);
@@ -183,7 +197,10 @@ void Exploration::build_entity_views(const SokobanLevel* multi_maps, int B) {
                 bool valid_any = false;
                 uint32_t masks[MAX_BOMBS + 1] = {0};
                 uint16_t pens[MAX_BOMBS + 1];
-                for (int k = 0; k <= B; ++k) pens[k] = COST_INFINITY;
+                PlanningCommon::TargetObserveSlots target_slots[MAX_BOMBS + 1] = {};
+                for (int k = 0; k <= B; ++k) {
+                    pens[k] = COST_INFINITY;
+                }
 
                 // 在每个炸弹阶段的地图快照上评估这个观测位姿
                 for (int k = 0; k <= B; ++k) {
@@ -191,7 +208,8 @@ void Exploration::build_entity_views(const SokobanLevel* multi_maps, int B) {
                     
                     uint32_t mask = 0u;
                     uint16_t penalty = 0u;
-                    if (PlanningCommon::evaluate_observe_pose(lvl, p, true_yaw, mask, penalty)) {
+                    if (PlanningCommon::evaluate_observe_pose(
+                            lvl, p, true_yaw, mask, penalty, &target_slots[k])) {
                         masks[k] = mask;
                         pens[k] = penalty;
                         valid_any = true;
@@ -208,14 +226,16 @@ void Exploration::build_entity_views(const SokobanLevel* multi_maps, int B) {
                     // 箱子和目标点共用物理位姿，但在巡图候选中保持两套
                     // 独立掩码，避免一次箱子观测顺带提交目标点，反之亦然。
                     auto append_category_views = [&](uint32_t category_mask,
-                                                     bool is_box_category) {
+                                                      bool is_box_category,
+                                                      const uint32_t* view_masks,
+                                                      const uint16_t* view_pens) {
                         ViewPose vp;
                         vp.pos = p;
                         vp.target_yaw = true_yaw;
                         bool category_valid = false;
                         for (int k = 0; k <= B; ++k) {
-                            vp.mask[k] = masks[k] & category_mask;
-                            vp.penalty[k] = is_box_category ? 0u : pens[k];
+                            vp.mask[k] = view_masks[k] & category_mask;
+                            vp.penalty[k] = is_box_category ? 0u : view_pens[k];
                             category_valid = category_valid || vp.mask[k] != 0u;
                         }
                         if (!category_valid) return;
@@ -270,8 +290,66 @@ void Exploration::build_entity_views(const SokobanLevel* multi_maps, int B) {
                         }
                     };
 
-                    append_category_views(box_mask, true);
-                    append_category_views(target_mask, false);
+                    append_category_views(box_mask, true, masks, pens);
+
+                    auto append_target_pattern = [&](int slot0, int slot1, int slot2) {
+                        uint32_t pattern_masks[MAX_BOMBS + 1] = {};
+                        uint16_t pattern_pens[MAX_BOMBS + 1];
+                        const int pattern_slots[3] = {slot0, slot1, slot2};
+                        for (int k = 0; k <= B; ++k) {
+                            bool pattern_valid = true;
+                            uint32_t pattern_mask = 0u;
+                            uint16_t pattern_penalty = 0u;
+                            for (int member = 0; member < 3; ++member) {
+                                const int slot = pattern_slots[member];
+                                if (slot < 0) continue;
+                                if (target_slots[k].mask[slot] == 0u) {
+                                    pattern_valid = false;
+                                    break;
+                                }
+                                pattern_mask |= target_slots[k].mask[slot];
+                                pattern_penalty = std::max(
+                                    pattern_penalty,
+                                    target_slots[k].penalty[slot]);
+                            }
+                            pattern_masks[k] = pattern_valid ? pattern_mask : 0u;
+                            pattern_pens[k] = pattern_valid ? pattern_penalty : COST_INFINITY;
+                        }
+                        append_category_views(target_mask, false, pattern_masks, pattern_pens);
+                    };
+
+                    // 单目标只使用原有五种位置，F1 斜角不得单独形成观测动作
+                    for (int slot = 0;
+                         slot < PlanningCommon::ObservationConfig::TARGET_SINGLE_SLOT_COUNT;
+                         ++slot) {
+                        append_target_pattern(slot, -1, -1);
+                    }
+
+                    const int core = PlanningCommon::ObservationConfig::TARGET_SLOT_F2_CORE;
+                    const int f2_left = PlanningCommon::ObservationConfig::TARGET_SLOT_F2_LEFT;
+                    const int f2_right = PlanningCommon::ObservationConfig::TARGET_SLOT_F2_RIGHT;
+                    const int f1_left = PlanningCommon::ObservationConfig::TARGET_SLOT_F1_LEFT;
+                    const int f1_right = PlanningCommon::ObservationConfig::TARGET_SLOT_F1_RIGHT;
+
+                    if constexpr (PlanningCommon::ObservationConfig::ENABLE_TARGET_JOINT_F2_DIAGONAL) {
+                        // F2 斜角开关控制两个双目标模式和同排三目标模式
+                        append_target_pattern(core, f2_left, -1);
+                        append_target_pattern(core, f2_right, -1);
+                        append_target_pattern(core, f2_left, f2_right);
+                    }
+                    if constexpr (PlanningCommon::ObservationConfig::ENABLE_TARGET_JOINT_F1_DIAGONAL) {
+                        // F1 斜角开关控制两个双目标模式和近排三目标模式
+                        append_target_pattern(core, f1_left, -1);
+                        append_target_pattern(core, f1_right, -1);
+                        append_target_pattern(core, f1_left, f1_right);
+                    }
+                    if constexpr (
+                        PlanningCommon::ObservationConfig::ENABLE_TARGET_JOINT_F2_DIAGONAL &&
+                        PlanningCommon::ObservationConfig::ENABLE_TARGET_JOINT_F1_DIAGONAL) {
+                        // 混合三目标只允许左右交叉组合，对应图中的另外两种情况
+                        append_target_pattern(core, f2_left, f1_right);
+                        append_target_pattern(core, f2_right, f1_left);
+                    }
                 }
             }
         }
@@ -441,6 +519,8 @@ struct PatrolDfsFrame {
     PatrolEntityEval ordered_entities[32];            // 按最近观测代价排序的实体
     PatrolDynamicEval top_poses_by_yaw[OBS_POSE_BRANCHES]; // 每个朝向保留若干低代价位姿
     PatrolDynamicEval sorted_evals[OBS_POSE_BRANCHES];     // 当前实体待展开位姿
+    uint64_t observe_successor_keys[OBS_SUCCESSOR_HASH_SLOTS]; // 本层已展开观测后继键
+    uint16_t observe_successor_costs[OBS_SUCCESSOR_HASH_SLOTS]; // 等价后继的最低动作代价
     StaticArray<point, MAX_PATH_LENGTH> macro_path;   // 炸弹宏任务底层路径
     StaticArray<point, MAX_PATH_LENGTH> support_path; // 推箱前置任务路径
     StaticArray<point, MAX_PATH_LENGTH> prefix_path;  // 顺路观测前缀路径
@@ -688,7 +768,7 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
     ctx.best_cost = SEARCH_COST_INFINITY;
     ctx.best_path.clear();
     ctx.current_path.clear();
-    ctx.ops_limit = 200000;
+    ctx.ops_limit = PATROL_DFS_OPS_LIMIT;
     ctx.ops_count = 0;
     std::memset(ws.materialize_checked, 0, sizeof(ws.materialize_checked));
     std::memset(ws.materialize_ok, 0, sizeof(ws.materialize_ok));
@@ -1022,7 +1102,8 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                    int depth) -> void {
         if (depth >= PATROL_DFS_FRAME_LIMIT) return;
         PatrolDfsFrame& frame = ws.dfs_frames[depth];
-        if (ctx.ops_count++ > ctx.ops_limit) return;
+        if (ctx.ops_count >= ctx.ops_limit) return;
+        ++ctx.ops_count;
         int32_t remaining_bomb_credit = static_cast<int32_t>(B - k) * BONUS_FOR_BOMB;
         if (current_cost - remaining_bomb_credit >= ctx.best_cost) return;
 
@@ -1100,6 +1181,7 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
             k, curr_pos, curr_move_dir, dist_map, frame.final_dir_map);
 
         int unvisited_count = 0;
+        uint16_t nearest_observe_extra = COST_INFINITY;
 
         // 为每个未观测实体估计最近可达观测位姿，用于排序展开
         for (int e = 0; e < total_entities; ++e) {
@@ -1117,8 +1199,17 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
 
                 uint16_t cost = dist + get_turn_cost(curr_yaw, vp.target_yaw) + vp.penalty[k];
                 if (cost < best_cost_for_e) best_cost_for_e = cost;
+                if (cost < nearest_observe_extra) nearest_observe_extra = cost;
             }
             frame.ordered_entities[unvisited_count++] = {e, best_cost_for_e};
+        }
+
+        // 最后炸弹阶段地图不再变化，最近观测的接近代价可安全加入下界
+        if (k == B) {
+            if (nearest_observe_extra == COST_INFINITY) return;
+            const int32_t final_stage_lower_bound = current_cost +
+                remain_observations * OBSERVE_ACTION_COST + nearest_observe_extra;
+            if (final_stage_lower_bound >= ctx.best_cost) return;
         }
 
         for (int i = 0; i < unvisited_count - 1; ++i) {
@@ -1130,7 +1221,12 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                 }
             }
         }
-        // 优先展开代价低、一次能覆盖更多实体的观测动作
+        // 候选必含新增观测位，因此后继键非零，可用零值表示空槽
+        std::fill(frame.observe_successor_keys,
+                  frame.observe_successor_keys + OBS_SUCCESSOR_HASH_SLOTS,
+                  uint64_t{0});
+
+        // 每个实体先保留各朝向最佳候选，再按后继状态去重
         for (int idx = 0; idx < unvisited_count; ++idx) {
             int e = frame.ordered_entities[idx].id;
             if (frame.ordered_entities[idx].min_cost == COST_INFINITY) continue; 
@@ -1182,30 +1278,54 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
 
             for (int i = 0; i < valid_eval_count - 1; ++i) {
                 for (int j = 0; j < valid_eval_count - 1 - i; ++j) {
-                    if (frame.sorted_evals[j].score > frame.sorted_evals[j+1].score) {
+                    if (frame.sorted_evals[j].score > frame.sorted_evals[j + 1].score) {
                         auto temp = frame.sorted_evals[j];
-                        frame.sorted_evals[j] = frame.sorted_evals[j+1];
-                        frame.sorted_evals[j+1] = temp;
+                        frame.sorted_evals[j] = frame.sorted_evals[j + 1];
+                        frame.sorted_evals[j + 1] = temp;
                     }
                 }
             }
 
             for (int i = 0; i < valid_eval_count; ++i) {
-                const auto& best_vp = entity_views[e][frame.sorted_evals[i].vp_idx];
-                MacroAction act = make_observe_macro_action(best_vp, best_vp.mask[k]);
+                const PatrolDynamicEval& eval = frame.sorted_evals[i];
 
-                uint32_t next_mask = mask | best_vp.mask[k];
-                int next_move_dir = frame.final_dir_map[best_vp.pos.y][best_vp.pos.x];
+                const ViewPose& vp = entity_views[e][eval.vp_idx];
+                const uint32_t next_mask = mask | vp.mask[k];
+                int next_move_dir = frame.final_dir_map[vp.pos.y][vp.pos.x];
                 if (next_move_dir < 0 || next_move_dir >= 4) next_move_dir = curr_move_dir;
 
+                int int_yaw = static_cast<int>(vp.target_yaw + 0.5f) % 360;
+                if (int_yaw < 0) int_yaw += 360;
+                const uint64_t successor_key = static_cast<uint64_t>(next_mask) |
+                    (static_cast<uint64_t>(static_cast<uint8_t>(vp.pos.x)) << 20) |
+                    (static_cast<uint64_t>(static_cast<uint8_t>(vp.pos.y)) << 24) |
+                    (static_cast<uint64_t>((int_yaw / 90) & 3) << 28) |
+                    (static_cast<uint64_t>(next_move_dir + 1) << 30);
+                uint32_t hash = static_cast<uint32_t>(
+                    (successor_key ^ (successor_key >> 32)) * 2654435761U);
+                int slot = hash & (OBS_SUCCESSOR_HASH_SLOTS - 1);
+                while (frame.observe_successor_keys[slot] != 0u &&
+                       frame.observe_successor_keys[slot] != successor_key) {
+                    slot = (slot + 1) & (OBS_SUCCESSOR_HASH_SLOTS - 1);
+                }
+
+                // 同一后继只保留更低动作代价，保持原有实体和位姿展开顺序
+                if (frame.observe_successor_keys[slot] == successor_key &&
+                    frame.observe_successor_costs[slot] <= eval.actual_cost) {
+                    continue;
+                }
+                frame.observe_successor_keys[slot] = successor_key;
+                frame.observe_successor_costs[slot] = eval.actual_cost;
+
+                MacroAction act = make_observe_macro_action(vp, vp.mask[k]);
                 ctx.current_path.push_back(act);
                 self(self,
-                     best_vp.pos,
-                     best_vp.target_yaw,
+                     vp.pos,
+                     vp.target_yaw,
                      next_move_dir,
                      k,
                      next_mask,
-                     current_cost + frame.sorted_evals[i].actual_cost,
+                     current_cost + eval.actual_cost,
                      depth + 1);
                 ctx.current_path.pop_back();
             }

@@ -58,8 +58,7 @@ static constexpr int kInfScore = 1000000;
 ///
 /// \details
 /// 调度顺序为：先处理上一轮留下的 followup，再构造参考候选位，
-/// 然后依次评估完成式推箱、接近式推箱、机会性炸弹三个插入槽位。
-/// 当前只有完成式推箱启用，其余槽位保留接口。
+/// 最后评估当前默认关闭的完成式推箱槽位
 bool MacroPlanner::plan_next_action(const MacroPlanContext& ctx, MacroAction& out_action) {
     sync_semantics(semantic_labels);
     exploration_replan_needed = false;
@@ -660,24 +659,11 @@ bool MacroPlanner::refresh_observe_action(const SokobanLevel& level, MacroAction
         return false;
     }
 
-    // Exploration 将箱子和目标点挂在两套候选观测位上。参考动作携带的
-    // active_mask 用于在 Core1 刷新时保留原候选类别，避免同一物理位姿
-    // 因地图变化把另一类实体顺带提交。
-    const uint32_t box_mask = level.box_count == 0u
-        ? 0u
-        : (uint32_t{1u} << level.box_count) - 1u;
-    const uint32_t target_mask =
-        ((uint32_t{1u} << (level.box_count + level.target_count)) - 1u) & ~box_mask;
+    // 刷新只确认原请求实体仍可见，不能把同类其他实体加入 ART2 请求
     const uint32_t requested_mask = action.observe.active_mask;
-    const bool requests_boxes = (requested_mask & box_mask) != 0u;
-    const bool requests_targets = (requested_mask & target_mask) != 0u;
-    if (requests_boxes && !requests_targets) {
-        visible_mask &= box_mask;
-    } else if (requests_targets && !requests_boxes) {
-        visible_mask &= target_mask;
-    }
-    action.observe.active_mask = visible_mask & ~knowledge_state.observed_mask;
-    action.observe.view.mask[0] = visible_mask;
+    const uint32_t refreshed_mask = visible_mask & requested_mask;
+    action.observe.active_mask = refreshed_mask & ~knowledge_state.observed_mask;
+    action.observe.view.mask[0] = refreshed_mask;
     action.observe.view.penalty[0] = penalty;
     return action.observe.active_mask != 0u;
 }
@@ -723,98 +709,6 @@ bool MacroPlanner::prepare_reference_action(const MacroPlanContext& ctx, const M
     }
 
     return false;
-}
-
-/// \brief 尝试用当前位置直接完成当前参考观测。
-/// \param ctx 当前在线调度上下文
-/// \param reference_action 已按当前地图刷新的参考观测动作
-/// \param slot 输出局部替代候选
-/// \return 当前位置观测代价严格更低时返回 true
-///
-/// \details
-/// 参考序列由 Core2 生成，不能假设其观测位在地图变化或在线接入后仍然最优。
-/// 这里只枚举当前位置的四个车头方向，并固定沿用参考动作的实体类别；
-/// 若只覆盖参考动作的一部分，则不推进 reference_cursor，下一轮仍会补齐剩余实体。
-bool MacroPlanner::build_local_observe_slot(const MacroPlanContext& ctx,
-                                            const MacroAction& reference_action,
-                                            SlotCandidate& slot) const {
-    if (reference_action.kind != MacroActionKind::OBSERVE) return false;
-    // 参考位已经在当前位置时不再拆成两个同点观测动作；同点换向由参考动作自身承担。
-    if (reference_action.observe.view.pos == ctx.player) return false;
-
-    const uint32_t box_mask = ctx.level.box_count == 0u
-        ? 0u
-        : (uint32_t{1u} << ctx.level.box_count) - 1u;
-    const uint32_t entity_mask = (ctx.level.box_count + ctx.level.target_count) == 0u
-        ? 0u
-        : (uint32_t{1u} << (ctx.level.box_count + ctx.level.target_count)) - 1u;
-    const uint32_t target_mask = entity_mask & ~box_mask;
-    const uint32_t requested_mask = reference_action.observe.active_mask & entity_mask;
-    const uint32_t requested_new = requested_mask & ~knowledge_state.observed_mask;
-    if (requested_new == 0u) return false;
-
-    const bool requests_boxes = (requested_mask & box_mask) != 0u;
-    const bool requests_targets = (requested_mask & target_mask) != 0u;
-    uint32_t allowed_mask = entity_mask;
-    if (requests_boxes && !requests_targets) {
-        allowed_mask = box_mask;
-    } else if (requests_targets && !requests_boxes) {
-        allowed_mask = target_mask;
-    }
-
-    const int reference_cost = reference_action.real_cost;
-    int best_cost = reference_cost;
-    int best_pop = -1;
-    MacroAction best_action;
-    bool found = false;
-    static constexpr float CARDINAL_YAW[4] = {0.0f, 90.0f, 180.0f, 270.0f};
-
-    for (int i = 0; i < 4; ++i) {
-        const float yaw = CARDINAL_YAW[i];
-        uint32_t visible_mask = 0u;
-        uint16_t penalty = 0u;
-        if (!PlanningCommon::evaluate_observe_pose(
-                ctx.level, ctx.player, yaw, visible_mask, penalty)) {
-            continue;
-        }
-
-        visible_mask &= allowed_mask;
-        const uint32_t newly_seen = visible_mask & ~knowledge_state.observed_mask;
-        if (newly_seen == 0u) continue;
-
-        const int cost = static_cast<int>(penalty) +
-            PlanningCommon::yaw_turn_time_cost(ctx.yaw, yaw);
-        // 同一观测动作的停车开销在两侧相同；这里比较移动、拐点、转向和几何罚分。
-        if (cost >= reference_cost) continue;
-
-        int pop = 0;
-        for (int bit = 0; bit < MAX_ENTITIES; ++bit) {
-            if (newly_seen & (uint32_t{1u} << bit)) ++pop;
-        }
-        if (found && (cost > best_cost || (cost == best_cost && pop <= best_pop))) continue;
-
-        best_action = reference_action;
-        best_action.observe.view.pos = ctx.player;
-        best_action.observe.view.target_yaw = yaw;
-        best_action.observe.view.mask[0] = visible_mask;
-        best_action.observe.view.penalty[0] = penalty;
-        best_action.observe.active_mask = newly_seen;
-        best_action.real_cost = static_cast<uint16_t>(cost);
-        best_cost = cost;
-        best_pop = pop;
-        found = true;
-    }
-
-    if (!found) return false;
-
-    slot.action = best_action;
-    slot.followups.clear();
-    slot.slot = SlotKind::REFERENCE;
-    slot.score = -best_cost;
-    slot.valid = true;
-    slot.consumes_reference =
-        (best_action.observe.active_mask & requested_new) == requested_new;
-    return true;
 }
 
 /// \brief 将推炸弹参考动作拆成“推到中途、观测、继续引爆”
@@ -1151,12 +1045,6 @@ bool MacroPlanner::build_reference_slot(const MacroPlanContext& ctx, SlotCandida
         MacroAction prepared;
         const MacroAction& raw = reference_plan[reference_cursor];
         if (prepare_reference_action(ctx, raw, prepared)) {
-            SlotCandidate local_observe;
-            if (build_local_observe_slot(ctx, prepared, local_observe)) {
-                slot = local_observe;
-                return true;
-            }
-
             if (prepared.kind == MacroActionKind::PUSH_BOMB) {
                 MacroAction prefix;
                 MacroAction observe;

@@ -145,9 +145,6 @@ private:
     void advance_reference_cursor(const SokobanLevel& level);
     bool refresh_observe_action(const SokobanLevel& level, MacroAction& action) const;
     bool prepare_reference_action(const MacroPlanContext& ctx, const MacroAction& raw_action, MacroAction& prepared_action) const;
-    bool build_local_observe_slot(const MacroPlanContext& ctx,
-                                  const MacroAction& reference_action,
-                                  SlotCandidate& slot) const;
     bool build_reference_slot(const MacroPlanContext& ctx, SlotCandidate& slot);
     bool build_bomb_observe_split(const MacroPlanContext& ctx, const MacroAction& bomb_action,
                                 MacroAction& prefix_action, MacroAction& observe_action,
