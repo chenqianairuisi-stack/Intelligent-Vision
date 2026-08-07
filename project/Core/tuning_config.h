@@ -17,9 +17,9 @@ inline constexpr bool ENABLE_LINEAR_TERMINAL_BRAKE = true;
 namespace LinearTerminalConfig {
 
 inline constexpr float CRUISE_SPEED_CM_S = 100.0f;
-inline constexpr float SHORT_MIN_SPEED_CM_S = 15.0f;
+inline constexpr float SHORT_MIN_SPEED_CM_S = 20.0f;
 inline constexpr float SHORT_SLOWDOWN_DIST_CM = 12.0f;
-inline constexpr float LONG_MIN_SPEED_CM_S = 20.0f;
+inline constexpr float LONG_MIN_SPEED_CM_S = 30.0f;
 inline constexpr float LONG_SLOWDOWN_DIST_CM = 35.0f;
 inline constexpr float STOP_DIST_CM = 0.8f;
 inline constexpr float LONG_SEGMENT_THRESHOLD_CM = 60.0f;
@@ -172,14 +172,14 @@ struct TuningConfig {
 inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
     {
         80.0f,   // dynamics.max_duty
-        150.0f,  // dynamics.max_vel
-        600.0f,  // dynamics.max_acc
+        200.0f,  // dynamics.max_vel
+        800.0f,  // dynamics.max_acc
         10.0f,   // dynamics.max_ang_vel
         40.0f,   // dynamics.max_ang_acc
         1.090f,  // dynamics.kinematic_gain_x
         1.000f,  // dynamics.kinematic_gain_y
-        0.65f,   // dynamics.brake_limit
-        390.0f,  // dynamics.brake_acc_ceiling：与当前 600×0.65 一致，不改变现有线性减速手感；
+        0.80f,   // dynamics.brake_limit
+        450.0f,  // dynamics.brake_acc_ceiling：与当前 600×0.65 一致，不改变现有线性减速手感；
                  // 后续调高 max_acc 时刹车能力不再被同步虚高。
     },
     {
@@ -223,7 +223,7 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
     {
         1.0f,     // terminal.stop_brake_gain
         60.0f,    // terminal.short_segment_cm
-        300.0f,   // terminal.short_acceleration
+        600.0f,   // terminal.short_acceleration
         40.0f,    // terminal.approach_zone_cm
         0.25f,    // terminal.approach_ratio
         15.0f,    // terminal.approach_acceleration
@@ -293,7 +293,7 @@ inline ParamItem params[] = {
     {"MaxAAcc ", "AA", &tune.dynamics.max_ang_acc, 0.5f, 0.1f, 200.0f},
     {"GainX   ", "KX", &tune.dynamics.kinematic_gain_x, 0.001f, 0.5f, 1.5f},
     {"GainY   ", "KY", &tune.dynamics.kinematic_gain_y, 0.001f, 0.5f, 1.5f},
-    {"BrakeLim", "BL", &tune.dynamics.brake_limit, 0.05f, 0.05f, 1.0f},
+    {"BrakeLim", "BL", &tune.dynamics.brake_limit, 0.1f, 0.05f, 2.0f},
     {"BrakeCap", "BC", &tune.dynamics.brake_acc_ceiling, 10.0f, 50.0f, 5000.0f},
     {"Reach   ", "TR", &tune.tracker.reach_radius, 0.1f, 0.05f, 10.0f},
     {"ReachMin", "TM", &tune.tracker.reach_radius_min, 0.1f, 0.1f, 3.0f},
