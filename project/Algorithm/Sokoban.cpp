@@ -18,7 +18,7 @@ namespace SokobanConfig {
 #else
     inline constexpr bool ENABLE_PROFILE = false;       // 正式构建关闭高频统计
 #endif
-    inline constexpr bool ENABLE_PATH_POSTOPT = true;   // 是否在成功后优化纯行走段转弯
+    inline constexpr bool ENABLE_PATH_POSTOPT = true;   // 是否在成功后进行路径优化
     
     // IDA* 阈值与启发式权重
     inline constexpr int INITIAL_THRESHOLD_BOOST = 0;   // 初始 threshold 额外增量；默认交给启发式本身决定
@@ -2856,14 +2856,6 @@ void Sokoban::optimize_final_box_push_runs() {
         int push_count = 0;
         int direction_run_count = 0;
         uint8_t previous_push_dir = 4;
-        GameState previous_push_end_state = state;
-        point previous_box_end = box_start;
-        int previous_push_end = i;
-        GameState suffix_boundary_state = state;
-        point suffix_boundary_box_end = box_start;
-        uint8_t suffix_boundary_final_dir = 4;
-        int suffix_boundary_end = i;
-        int suffix_boundary_push_count = 0;
 
         for (int j = i; j < original.size(); ++j) {
             GameState next_state = scan_state;
@@ -2882,12 +2874,6 @@ void Sokoban::optimize_final_box_push_runs() {
                     direction_run_count = 1;
                 } else if (push_dir != previous_push_dir) {
                     ++direction_run_count;
-                    // 保留最后一段直推作为后缀，只优化它之前的折线路段
-                    suffix_boundary_state = previous_push_end_state;
-                    suffix_boundary_box_end = previous_box_end;
-                    suffix_boundary_final_dir = previous_push_dir;
-                    suffix_boundary_end = previous_push_end;
-                    suffix_boundary_push_count = push_count;
                 }
                 ++push_count;
                 box_end = push_target;
@@ -2895,9 +2881,6 @@ void Sokoban::optimize_final_box_push_runs() {
                 run_end = j + 1;
                 run_end_state = next_state;
                 previous_push_dir = push_dir;
-                previous_push_end_state = next_state;
-                previous_box_end = push_target;
-                previous_push_end = j + 1;
                 bool completed = next_state.num_boxes < scan_state.num_boxes;
                 scan_state = next_state;
                 if (completed) break;
@@ -2906,20 +2889,13 @@ void Sokoban::optimize_final_box_push_runs() {
             scan_state = next_state;
         }
 
-        if (direction_run_count >= 3 && suffix_boundary_push_count >= 2) {
-            run_end_state = suffix_boundary_state;
-            box_end = suffix_boundary_box_end;
-            final_push_dir = suffix_boundary_final_dir;
-            run_end = suffix_boundary_end;
-            push_count = suffix_boundary_push_count;
-        }
-
         StaticArray<point, MAX_PATH_LENGTH> original_segment;
         for (int k = i; k < run_end; ++k) original_segment.push_back(original[k]);
 
         bool use_candidate = false;
         StaticArray<point, MAX_PATH_LENGTH> candidate;
-        if (push_count >= 2 && direction_run_count >= 3) {
+        // 对完整连续推动段重规划，允许把换向点向后推迟，避免局部前缀最优锁死后续短路
+        if (push_count >= 2 && direction_run_count >= 2) {
             SokobanLevel level;
             build_level_from_state(run_start_state, level);
             point candidate_player = run_start_state.player;

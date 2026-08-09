@@ -50,6 +50,29 @@ class BombTask:
     pushes: list = field(default_factory=list)
 
 
+def append_patrol_move_events(events, current_pos, target):
+    """轴对齐航段逐格回放，任意斜向航段保留为单次移动"""
+    dx = target[0] - current_pos[0]
+    dy = target[1] - current_pos[1]
+    if dx != 0 and dy != 0:
+        events.append(["MOVE", target])
+        return list(target)
+
+    distance = abs(dx) + abs(dy)
+    if distance <= 1:
+        events.append(["MOVE", target])
+        return list(target)
+
+    step_x = 0 if dx == 0 else (1 if dx > 0 else -1)
+    step_y = 0 if dy == 0 else (1 if dy > 0 else -1)
+    for step in range(1, distance + 1):
+        events.append([
+            "MOVE",
+            [current_pos[0] + step_x * step, current_pos[1] + step_y * step],
+        ])
+    return list(target)
+
+
 class SolverThread(QThread):
     finished_ok = Signal()
     failed = Signal(str)
@@ -1167,6 +1190,7 @@ class SokobanVisualizerQt(QMainWindow):
                     offset += 4
             return task
 
+        patrol_parse_pos = list(self.player)
         i = 0
         while i < len(lines):
             line = lines[i]
@@ -1212,7 +1236,10 @@ class SokobanVisualizerQt(QMainWindow):
                             ["OBSERVE", int(parts[1]), parts[2] == "1", observe_yaw]
                         )
                     else:
-                        self.patrol_events.append(["MOVE", from_output_coord(int(parts[0]), int(parts[1]))])
+                        target = from_output_coord(int(parts[0]), int(parts[1]))
+                        patrol_parse_pos = append_patrol_move_events(
+                            self.patrol_events, patrol_parse_pos, target
+                        )
                     i += 1
                 continue
             elif line == "SOKOBAN_REPLAY_BEGIN":
@@ -1300,12 +1327,22 @@ class SokobanVisualizerQt(QMainWindow):
                 dx, dy = p2[0] - p1[0], p2[1] - p1[1]
                 if dx == 0 and dy == 0:
                     continue
-                length = abs(dx) + abs(dy)
-                curr_dir = (dx // length, dy // length) if length > 0 else (dx, dy)
-                if prev_dir is not None and curr_dir != prev_dir:
-                    turn_count += 1
+                curr_dir = (dx, dy)
+                if prev_dir is not None:
+                    cross = prev_dir[0] * curr_dir[1] - prev_dir[1] * curr_dir[0]
+                    dot = prev_dir[0] * curr_dir[0] + prev_dir[1] * curr_dir[1]
+                    if cross != 0 or dot <= 0:
+                        turn_count += 1
                 prev_dir = curr_dir
             return turn_count
+
+        def path_length(path_coords):
+            total = 0.0
+            for i in range(1, len(path_coords)):
+                dx = path_coords[i][0] - path_coords[i - 1][0]
+                dy = path_coords[i][1] - path_coords[i - 1][1]
+                total += (dx * dx + dy * dy) ** 0.5
+            return int(round(total))
 
         patrol_path = [self.player]
         for ev in self.patrol_events:
@@ -1387,7 +1424,7 @@ class SokobanVisualizerQt(QMainWindow):
             current_yaw, added_rot = process_obs_group(obs_group, virtual_pos, current_yaw)
             patrol_rotations += added_rot
 
-        patrol_steps = sum(1 for event in self.patrol_events if event[0] == "MOVE")
+        patrol_steps = path_length(patrol_path)
         sokoban_steps = len(self.sokoban_path)
         total_steps = patrol_steps + sokoban_steps
         sokoban_rotations = 0
@@ -1655,4 +1692,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-

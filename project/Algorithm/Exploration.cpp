@@ -17,29 +17,31 @@ namespace ExplorationConfig {
     // ------------------------------------------------------------------------
     // 巡图 DFS 代价参数
     // ------------------------------------------------------------------------
-    inline constexpr uint16_t OBSERVE_ACTION_COST = 32;         // 一次观测约等于跨图移动，优先合并可同时识别的实体
-    inline constexpr int32_t BONUS_FOR_BOMB = 8;                // 完成必推炸弹的固定收益，避免把解锁动作无限推迟
-    inline constexpr uint16_t BOMB_ROUTE_COST_DIVISOR = 100;    // 推炸弹本体路径按摊销代价参与观测顺序排序
-    inline constexpr uint16_t FIRST_BOMB_LOCALITY_WEIGHT = 8;   // 巡图炸弹排序：优先处理当前附近的炸弹
-    inline constexpr uint16_t FINAL_NEAR_BOX_RADIUS = 2;        // 收尾位置靠近箱子的判定半径
-    inline constexpr uint16_t FINAL_NO_BOX_PENALTY = 10;        // 收尾位置远离箱子的时间惩罚
-    inline constexpr uint16_t COST_INFINITY = 65535;            // 不可达代价哨兵值
-    inline constexpr int32_t SEARCH_COST_INFINITY = 1000000000; // DFS 有符号代价上界，允许炸弹奖励产生负代价
+    inline constexpr uint16_t OBSERVE_ACTION_COST = 32;          // 一次观测约等于跨图移动，优先合并可同时识别的实体
+    inline constexpr int32_t BONUS_FOR_BOMB = 8;                 // 完成必推炸弹的固定收益，避免把解锁动作无限推迟
+    inline constexpr uint16_t BOMB_ROUTE_COST_DIVISOR = 100;     // 推炸弹本体路径按摊销代价参与观测顺序排序
+    inline constexpr uint16_t FIRST_BOMB_LOCALITY_WEIGHT = 8;    // 巡图炸弹排序：优先处理当前附近的炸弹
+    inline constexpr uint16_t FINAL_NEAR_BOX_RADIUS = 2;         // 收尾位置靠近箱子的判定半径
+    inline constexpr uint16_t FINAL_NO_BOX_PENALTY = 10;         // 收尾位置远离箱子的时间惩罚
+    inline constexpr uint16_t COST_INFINITY = 65535;             // 不可达代价哨兵值
+    inline constexpr int32_t SEARCH_COST_INFINITY = 1000000000;  // DFS 有符号代价上界，允许炸弹奖励产生负代价
 
     // ------------------------------------------------------------------------
     // 搜索缓存与分支上限
     // ------------------------------------------------------------------------
-    inline constexpr int MAX_BOMB_APPROACH_OBS_BRANCHES = 4;    // 每个炸弹宏动作最多展开的顺路观测组合分支数
-    inline constexpr int OBS_POSES_PER_YAW = 1;                 // 每个朝向保留一个候选；关键斜角由独立几何候选直接参与排序
+    inline constexpr int MAX_BOMB_APPROACH_OBS_BRANCHES = 2;     // 每个炸弹宏动作最多展开的顺路观测组合分支数
+    inline constexpr int OBS_POSES_PER_YAW = 2;                  // 每个朝向保留两个候选，降低局部候选裁剪造成的全局漏解
     inline constexpr int OBS_POSE_BRANCHES = 4 * OBS_POSES_PER_YAW;
-    inline constexpr int GRID_TIME_CACHE_SLOTS = 32;            // 小型 LRU 距离图缓存槽数，含进入方向约 12KB
-    inline constexpr int PATROL_DFS_FRAME_LIMIT = 16;           // DFS 递归帧复用数组深度上限
-    inline constexpr uint32_t PATROL_DFS_OPS_LIMIT = 15000;     // 巡图参考解只保留有限搜索预算
-    inline constexpr int OBS_SUCCESSOR_HASH_SLOTS = 128;        // 单层观测后继去重哈希槽数
-    inline constexpr int FALLBACK_CLEAR_MAX_STEPS = 5;          // 巡图兜底开通单格瓶颈允许的连续推送距离
-    inline constexpr int SEED_POSES_PER_YAW = 2;                // 种子每个朝向保留两个候选做精确一步前瞻
+    inline constexpr int GRID_TIME_CACHE_SLOTS = 32;             // 小型 LRU 距离图缓存槽数，含进入方向约 12KB
+    inline constexpr int PATROL_DFS_FRAME_LIMIT = 16;            // DFS 递归帧复用数组深度上限
+    inline constexpr uint32_t PATROL_DFS_OPS_LIMIT = 15000;      // 巡图参考解有限搜索预算
+    inline constexpr uint32_t PATROL_BOMB_DFS_OPS_LIMIT = 2000;  // 带炸弹状态单后继更重，限制展开以稳定在 50ms 内
+    inline constexpr uint32_t PATROL_SMALL_DFS_OPS_LIMIT = 7000; // 小图由固定点顺序后处理补足全局改进
+    inline constexpr int PATROL_SMALL_ENTITY_LIMIT = 8;
+    inline constexpr int OBS_SUCCESSOR_HASH_SLOTS = 512;         // 与扩大后的观测分支匹配，避免后继哈希过早饱和
+    inline constexpr int FALLBACK_CLEAR_MAX_STEPS = 5;           // 巡图兜底开通单格瓶颈允许的连续推送距离
+    inline constexpr int SEED_POSES_PER_YAW = 2;                 // 种子每个朝向保留两个候选做精确一步前瞻
     inline constexpr int SEED_POSE_BRANCHES = 4 * SEED_POSES_PER_YAW;
-
 }
 
 using namespace ExplorationConfig;
@@ -94,7 +96,7 @@ static int yaw_to_move_direction(float yaw) {
     return YAW_TO_MOVE[yaw_index];
 }
 
-// 返回路径最后一段的实际平移方向；空路径时保留调用方已有方向。
+// 返回路径最后一段的实际平移方向；任意斜率末段无法压缩成四方向时返回 -1
 static int path_last_move_direction(point start,
                                     const StaticArray<point, MAX_PATH_LENGTH>& path,
                                     int fallback_dir = -1) {
@@ -103,6 +105,11 @@ static int path_last_move_direction(point start,
     for (int i = 0; i < path.size(); ++i) {
         const point current = path[i];
         const point delta = current - previous;
+        if (delta.x != 0 && delta.y != 0) {
+            last_dir = -1;
+            previous = current;
+            continue;
+        }
         for (int d = 0; d < 4; ++d) {
             if (delta == MOVE[d]) {
                 last_dir = d;
@@ -112,6 +119,348 @@ static int path_last_move_direction(point start,
         previous = current;
     }
     return last_dir;
+}
+
+namespace {
+    inline constexpr int OBSERVE_ROUTE_CACHE_SLOTS = 1536;      // 在路线命中率和 OCRAM 占用之间取折中
+    inline constexpr int OBSERVE_ROUTE_HASH_SLOTS = 4096;
+    inline constexpr uint16_t OBSERVE_ROUTE_INVALID_INDEX = 0xFFFFu;
+    inline constexpr int PATROL_SEQUENCE_MAX_ACTIONS = 32;
+
+    struct ObserveRouteCacheEntry {
+        uint32_t key;
+        uint16_t cost;
+        uint16_t hash_slot;
+        uint16_t lru_prev;
+        uint16_t lru_next;
+    };
+
+    // 独立哈希索引负责常数时间查找，双向链表维持全局 LRU 命中率
+    OCRAM_BSS static ObserveRouteCacheEntry observe_route_cache[
+        OBSERVE_ROUTE_CACHE_SLOTS];
+    OCRAM_BSS static uint16_t observe_route_hash_index[
+        OBSERVE_ROUTE_HASH_SLOTS];
+    OCRAM_BSS static uint16_t observe_route_cache_count = 0u;
+    OCRAM_BSS static uint16_t observe_route_lru_head =
+        OBSERVE_ROUTE_INVALID_INDEX;
+    OCRAM_BSS static uint16_t observe_route_lru_tail =
+        OBSERVE_ROUTE_INVALID_INDEX;
+
+    struct PatrolSequenceOptimizeWorkspace {
+        uint16_t edge_cost[PATROL_SEQUENCE_MAX_ACTIONS + 1]
+                         [PATROL_SEQUENCE_MAX_ACTIONS + 1]{};
+        uint8_t order[PATROL_SEQUENCE_MAX_ACTIONS]{};
+        uint8_t trial[PATROL_SEQUENCE_MAX_ACTIONS]{};
+        uint8_t candidate_order[PATROL_SEQUENCE_MAX_ACTIONS]{};
+        uint8_t best_order[PATROL_SEQUENCE_MAX_ACTIONS]{};
+    };
+
+    OCRAM_BSS static PatrolSequenceOptimizeWorkspace patrol_sequence_ws;
+}
+
+static_assert((OBSERVE_ROUTE_HASH_SLOTS & (OBSERVE_ROUTE_HASH_SLOTS - 1)) == 0,
+              "Observe route hash size must be a power of two");
+
+static uint32_t observe_route_cache_key(int stage,
+                                        point start,
+                                        point end,
+                                        int initial_dir) {
+    const uint32_t dir = static_cast<uint32_t>(initial_dir < 0 ? 4 : initial_dir);
+    return (static_cast<uint32_t>(stage & 0x0F) << 20) |
+           (static_cast<uint32_t>(start.x & 0x0F) << 16) |
+           (static_cast<uint32_t>(start.y & 0x0F) << 12) |
+           (static_cast<uint32_t>(end.x & 0x0F) << 8) |
+           (static_cast<uint32_t>(end.y & 0x0F) << 4) |
+           dir;
+}
+
+static void reset_observe_route_cache() {
+    std::memset(observe_route_cache, 0xFF, sizeof(observe_route_cache));
+    std::memset(observe_route_hash_index, 0xFF, sizeof(observe_route_hash_index));
+    observe_route_cache_count = 0u;
+    observe_route_lru_head = OBSERVE_ROUTE_INVALID_INDEX;
+    observe_route_lru_tail = OBSERVE_ROUTE_INVALID_INDEX;
+}
+
+static uint32_t observe_route_cache_hash(uint32_t key) {
+    uint32_t hash = key;
+    hash ^= hash >> 16;
+    hash *= 0x7FEB352Du;
+    hash ^= hash >> 15;
+    hash *= 0x846CA68Bu;
+    hash ^= hash >> 16;
+    return hash;
+}
+
+static uint16_t find_observe_route_cache_entry(uint32_t key, uint32_t hash) {
+    uint32_t slot = hash & (OBSERVE_ROUTE_HASH_SLOTS - 1);
+    for (int probe = 0; probe < OBSERVE_ROUTE_HASH_SLOTS; ++probe) {
+        const uint16_t entry_index = observe_route_hash_index[slot];
+        if (entry_index == OBSERVE_ROUTE_INVALID_INDEX) {
+            return OBSERVE_ROUTE_INVALID_INDEX;
+        }
+        if (observe_route_cache[entry_index].key == key) return entry_index;
+        slot = (slot + 1u) & (OBSERVE_ROUTE_HASH_SLOTS - 1);
+    }
+    return OBSERVE_ROUTE_INVALID_INDEX;
+}
+
+static void touch_observe_route_cache_entry(uint16_t entry_index) {
+    if (observe_route_lru_head == entry_index) return;
+
+    ObserveRouteCacheEntry& entry = observe_route_cache[entry_index];
+    if (entry.lru_prev != OBSERVE_ROUTE_INVALID_INDEX) {
+        observe_route_cache[entry.lru_prev].lru_next = entry.lru_next;
+    }
+    if (entry.lru_next != OBSERVE_ROUTE_INVALID_INDEX) {
+        observe_route_cache[entry.lru_next].lru_prev = entry.lru_prev;
+    }
+    if (observe_route_lru_tail == entry_index) {
+        observe_route_lru_tail = entry.lru_prev;
+    }
+
+    entry.lru_prev = OBSERVE_ROUTE_INVALID_INDEX;
+    entry.lru_next = observe_route_lru_head;
+    if (observe_route_lru_head != OBSERVE_ROUTE_INVALID_INDEX) {
+        observe_route_cache[observe_route_lru_head].lru_prev = entry_index;
+    } else {
+        observe_route_lru_tail = entry_index;
+    }
+    observe_route_lru_head = entry_index;
+}
+
+// 后移同一探测簇中的条目，删除后仍保持线性探测可提前遇到空槽
+static void erase_observe_route_hash_entry(uint16_t entry_index) {
+    ObserveRouteCacheEntry& removed = observe_route_cache[entry_index];
+    uint32_t hole = removed.hash_slot;
+    uint32_t scan = (hole + 1u) & (OBSERVE_ROUTE_HASH_SLOTS - 1);
+    while (observe_route_hash_index[scan] != OBSERVE_ROUTE_INVALID_INDEX) {
+        const uint16_t shifted_index = observe_route_hash_index[scan];
+        const uint32_t home = observe_route_cache_hash(
+            observe_route_cache[shifted_index].key) &
+            (OBSERVE_ROUTE_HASH_SLOTS - 1);
+        const uint32_t scan_distance =
+            (scan - home) & (OBSERVE_ROUTE_HASH_SLOTS - 1);
+        const uint32_t hole_distance =
+            (hole - home) & (OBSERVE_ROUTE_HASH_SLOTS - 1);
+        if (hole_distance < scan_distance) {
+            observe_route_hash_index[hole] = shifted_index;
+            observe_route_cache[shifted_index].hash_slot =
+                static_cast<uint16_t>(hole);
+            hole = scan;
+        }
+        scan = (scan + 1u) & (OBSERVE_ROUTE_HASH_SLOTS - 1);
+    }
+    observe_route_hash_index[hole] = OBSERVE_ROUTE_INVALID_INDEX;
+    removed.hash_slot = OBSERVE_ROUTE_INVALID_INDEX;
+}
+
+static void store_observe_route_cache_entry(uint32_t key,
+                                            uint32_t hash,
+                                            uint16_t cost) {
+    uint16_t entry_index = OBSERVE_ROUTE_INVALID_INDEX;
+    if (observe_route_cache_count < OBSERVE_ROUTE_CACHE_SLOTS) {
+        entry_index = observe_route_cache_count++;
+    } else {
+        entry_index = observe_route_lru_tail;
+        erase_observe_route_hash_entry(entry_index);
+    }
+
+    uint32_t slot = hash & (OBSERVE_ROUTE_HASH_SLOTS - 1);
+    while (observe_route_hash_index[slot] != OBSERVE_ROUTE_INVALID_INDEX) {
+        slot = (slot + 1u) & (OBSERVE_ROUTE_HASH_SLOTS - 1);
+    }
+
+    ObserveRouteCacheEntry& entry = observe_route_cache[entry_index];
+    entry.key = key;
+    entry.cost = cost;
+    entry.hash_slot = static_cast<uint16_t>(slot);
+    observe_route_hash_index[slot] = entry_index;
+    touch_observe_route_cache_entry(entry_index);
+}
+
+// 按执行层的固定观测终点路线评估接入代价，避免搜索使用过时的网格代价
+static bool evaluate_observe_access(const SokobanLevel& lvl,
+                                    int stage,
+                                    point start,
+                                    const ViewPose& view,
+                                    int initial_dir,
+                                    uint16_t& out_move_cost) {
+    StaticArray<point, MAX_PATH_LENGTH> path;
+    const uint32_t key = observe_route_cache_key(
+        stage, start, view.pos, initial_dir);
+    const uint32_t hash = observe_route_cache_hash(key);
+    const uint16_t cached_index = find_observe_route_cache_entry(key, hash);
+    if (cached_index != OBSERVE_ROUTE_INVALID_INDEX) {
+        ObserveRouteCacheEntry& cached = observe_route_cache[cached_index];
+        touch_observe_route_cache_entry(cached_index);
+        out_move_cost = cached.cost;
+        return cached.cost != COST_INFINITY;
+    }
+
+    if (!PlanningCommon::get_optimized_observe_path(
+            lvl, start, view.pos, path, initial_dir)) {
+        store_observe_route_cache_entry(key, hash, COST_INFINITY);
+        return false;
+    }
+    out_move_cost = PlanningCommon::observe_route_time_cost(
+        start, path, initial_dir);
+    store_observe_route_cache_entry(key, hash, out_move_cost);
+    return true;
+}
+
+// 验证固定观测序列的每个终点仍可从前一终点到达
+static bool validate_fixed_observe_sequence(
+        const SokobanLevel& lvl,
+        point start,
+        const StaticArray<MacroAction, 32>& plan) {
+    point player = start;
+    StaticArray<point, MAX_PATH_LENGTH> path;
+    for (int i = 0; i < plan.size(); ++i) {
+        if (plan[i].kind != MacroActionKind::OBSERVE) return false;
+        path.clear();
+        const point endpoint = plan[i].observe.view.pos;
+        if (!PlanningCommon::get_grid_time_path(lvl, player, endpoint, path)) {
+            return false;
+        }
+        player = endpoint;
+    }
+    return true;
+}
+
+/// \brief 在不改变观测点和朝向的前提下改进无炸弹巡图顺序
+/// \param lvl 固定不变的巡图地图
+/// \param start_pos 巡图起点
+/// \param start_yaw 起始朝向
+/// \param start_mask 已完成观测掩码
+/// \param plan 输入输出观测动作序列
+///
+/// \details
+/// 仅处理 active_mask 互不重叠的纯观测序列，先缓存动作间有向代价，
+/// 再执行两轮有限插入邻域搜索，只有总代价严格下降时才提交新顺序
+static void optimize_observe_sequence_order(
+        const SokobanLevel& lvl,
+        point start_pos,
+        float start_yaw,
+        uint32_t start_mask,
+        StaticArray<MacroAction, 32>& plan) {
+    if (plan.size() < 3 || plan.size() > PATROL_SEQUENCE_MAX_ACTIONS) return;
+
+    const int count = plan.size();
+    uint32_t used_mask = 0u;
+    for (int i = 0; i < count; ++i) {
+        if (plan[i].kind != MacroActionKind::OBSERVE ||
+            plan[i].observe.active_mask == 0u ||
+            (used_mask & plan[i].observe.active_mask) != 0u ||
+            (start_mask & plan[i].observe.active_mask) != 0u) {
+            return;
+        }
+        used_mask |= plan[i].observe.active_mask;
+        patrol_sequence_ws.order[i] = static_cast<uint8_t>(i);
+    }
+
+    auto route_edge_cost = [&](int previous_action,
+                               int next_action) -> uint16_t {
+        point from = start_pos;
+        float from_yaw = start_yaw;
+        if (previous_action >= 0) {
+            from = plan[previous_action].observe.view.pos;
+            from_yaw = plan[previous_action].observe.view.target_yaw;
+        }
+        const ViewPose& next_view = plan[next_action].observe.view;
+        uint16_t route_cost = 0u;
+        if (!evaluate_observe_access(
+                lvl, 0, from, next_view,
+                yaw_to_move_direction(from_yaw), route_cost)) {
+            return COST_INFINITY;
+        }
+        const uint32_t total = static_cast<uint32_t>(OBSERVE_ACTION_COST) +
+            route_cost +
+            PlanningCommon::yaw_turn_time_cost(from_yaw, next_view.target_yaw) +
+            next_view.penalty[0];
+        return total >= COST_INFINITY
+            ? COST_INFINITY : static_cast<uint16_t>(total);
+    };
+
+    for (int next = 0; next < count; ++next) {
+        patrol_sequence_ws.edge_cost[0][next + 1] =
+            route_edge_cost(-1, next);
+    }
+    for (int previous = 0; previous < count; ++previous) {
+        patrol_sequence_ws.edge_cost[previous + 1][previous + 1] =
+            COST_INFINITY;
+        for (int next = 0; next < count; ++next) {
+            if (previous == next) continue;
+            patrol_sequence_ws.edge_cost[previous + 1][next + 1] =
+                route_edge_cost(previous, next);
+        }
+    }
+
+    auto sequence_cost = [&](const uint8_t* order) -> uint32_t {
+        uint32_t total = 0u;
+        int previous_action = -1;
+        for (int i = 0; i < count; ++i) {
+            const int next_action = order[i];
+            const uint16_t edge = patrol_sequence_ws.edge_cost[
+                previous_action + 1][next_action + 1];
+            if (edge == COST_INFINITY) return 0xFFFFFFFFu;
+            total += edge;
+            previous_action = next_action;
+        }
+        return total;
+    };
+
+    const uint32_t initial_total = sequence_cost(patrol_sequence_ws.order);
+    if (initial_total == 0xFFFFFFFFu) return;
+    uint32_t best_total = initial_total;
+
+    for (int pass = 0; pass < 2; ++pass) {
+        uint32_t pass_best = best_total;
+        bool pass_improved = false;
+        for (int remove = 0; remove < count; ++remove) {
+            int compact_size = 0;
+            for (int i = 0; i < count; ++i) {
+                if (i != remove) {
+                    patrol_sequence_ws.trial[compact_size++] =
+                        patrol_sequence_ws.order[i];
+                }
+            }
+
+            for (int insert = 0; insert < count; ++insert) {
+                int compact_index = 0;
+                for (int i = 0; i < count; ++i) {
+                    patrol_sequence_ws.candidate_order[i] = i == insert
+                        ? patrol_sequence_ws.order[remove]
+                        : patrol_sequence_ws.trial[compact_index++];
+                }
+                const uint32_t candidate_total = sequence_cost(
+                    patrol_sequence_ws.candidate_order);
+                if (candidate_total >= pass_best) continue;
+                pass_best = candidate_total;
+                pass_improved = true;
+                std::memcpy(
+                    patrol_sequence_ws.best_order,
+                    patrol_sequence_ws.candidate_order,
+                    static_cast<size_t>(count) * sizeof(uint8_t));
+            }
+        }
+
+        if (!pass_improved || pass_best >= best_total) break;
+        std::memcpy(
+            patrol_sequence_ws.order,
+            patrol_sequence_ws.best_order,
+            static_cast<size_t>(count) * sizeof(uint8_t));
+        best_total = pass_best;
+    }
+
+    if (best_total >= initial_total) return;
+    StaticArray<MacroAction, 32> reordered;
+    for (int i = 0; i < count; ++i) {
+        reordered.push_back(plan[patrol_sequence_ws.order[i]]);
+    }
+    if (validate_fixed_observe_sequence(lvl, start_pos, reordered)) {
+        plan = reordered;
+    }
 }
 
 
@@ -318,18 +667,18 @@ void Exploration::build_entity_views(const SokobanLevel* multi_maps, int B) {
                         append_category_views(target_mask, false, pattern_masks, pattern_pens);
                     };
 
-                    // 单目标只使用原有五种位置，F1 斜角不得单独形成观测动作
-                    for (int slot = 0;
-                         slot < PlanningCommon::ObservationConfig::TARGET_SINGLE_SLOT_COUNT;
-                         ++slot) {
-                        append_target_pattern(slot, -1, -1);
-                    }
-
                     const int core = PlanningCommon::ObservationConfig::TARGET_SLOT_F2_CORE;
                     const int f2_left = PlanningCommon::ObservationConfig::TARGET_SLOT_F2_LEFT;
                     const int f2_right = PlanningCommon::ObservationConfig::TARGET_SLOT_F2_RIGHT;
                     const int f1_left = PlanningCommon::ObservationConfig::TARGET_SLOT_F1_LEFT;
                     const int f1_right = PlanningCommon::ObservationConfig::TARGET_SLOT_F1_RIGHT;
+
+                    // 单目标允许基础五种位置，只有 F1 斜角必须和 F2 正中组成联合观测
+                    for (int slot = 0;
+                         slot < PlanningCommon::ObservationConfig::TARGET_BASE_SLOT_COUNT;
+                         ++slot) {
+                        append_target_pattern(slot, -1, -1);
+                    }
 
                     if constexpr (PlanningCommon::ObservationConfig::ENABLE_TARGET_JOINT_F2_DIAGONAL) {
                         // F2 斜角开关控制两个双目标模式和同排三目标模式
@@ -488,9 +837,8 @@ struct PatrolEntityEval {
 
 /// \brief 单个观测位姿的动态排序结果
 struct PatrolDynamicEval {
-    int vp_idx;             // entity_views 中的位姿下标
-    uint16_t actual_cost;   // 移动加转向后的真实估计代价
-    int32_t score;          // 排序分数，越小越优先
+    int vp_idx;     // entity_views 中的位姿下标
+    int32_t score;  // 排序分数，越小越优先
 };
 
 /// \brief 贪心种子的精确一步前瞻短名单项
@@ -500,7 +848,6 @@ struct PatrolSeedCandidate {
     int32_t shortlist_score; // 当前真实代价加剩余观测下界
     int32_t access_cost;     // 从当前状态执行本次观测的真实代价
     uint8_t coverage;        // 本次新增观测实体数量
-    int8_t next_move_dir;    // 到达候选位后的实际末段移动方向
 };
 
 /// \brief 推炸弹途中插入观测的候选分支
@@ -515,7 +862,6 @@ struct PatrolApproachObsCandidate {
 /// \brief 巡图 DFS 单层复用工作区
 struct PatrolDfsFrame {
     uint16_t dist_map[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]; // 当前状态到所有格子的时间代价
-    uint8_t final_dir_map[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]; // 到达各格子的最短路径末段方向
     PatrolEntityEval ordered_entities[32];            // 按最近观测代价排序的实体
     PatrolDynamicEval top_poses_by_yaw[OBS_POSE_BRANCHES]; // 每个朝向保留若干低代价位姿
     PatrolDynamicEval sorted_evals[OBS_POSE_BRANCHES];     // 当前实体待展开位姿
@@ -537,7 +883,6 @@ struct PatrolScratchWorkspace {
     bool materialize_ok[MAX_BOMBS][MAP_MAX_HEIGHT][MAP_MAX_WIDTH];      // 子任务补全成功标记
     BombTask materialize_cache[MAX_BOMBS][MAP_MAX_HEIGHT][MAP_MAX_WIDTH]; // 补全后的炸弹任务缓存
     uint16_t grid_time_cache[GRID_TIME_CACHE_SLOTS][MAP_MAX_HEIGHT][MAP_MAX_WIDTH]; // 时间距离图缓存
-    uint8_t grid_time_cache_final_dir[GRID_TIME_CACHE_SLOTS][MAP_MAX_HEIGHT][MAP_MAX_WIDTH]; // 距离图对应的末段方向
     uint8_t grid_time_cache_valid[GRID_TIME_CACHE_SLOTS]; // 缓存槽有效标记
     uint8_t grid_time_cache_stage[GRID_TIME_CACHE_SLOTS]; // 缓存对应炸弹阶段
     point grid_time_cache_pos[GRID_TIME_CACHE_SLOTS];     // 缓存对应起点
@@ -547,12 +892,10 @@ struct PatrolScratchWorkspace {
     BoundingContext ctx;                                  // DFS 全局边界上下文
     StaticArray<MacroAction, 32> seed_path;               // 贪心上界路径
     uint16_t seed_dist_map[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]; // 贪心阶段距离图
-    uint8_t seed_final_dir_map[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]; // 贪心阶段末段方向图
     PatrolSeedCandidate seed_candidates[SEED_POSE_BRANCHES]; // 贪心阶段精确前瞻短名单
     StaticArray<point, MAX_PATH_LENGTH> seed_macro_path;  // 贪心阶段炸弹路径
     StaticArray<MacroAction, 32> fallback_path;           // DFS 失败后的兜底路径
     uint16_t fallback_dist_map[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]; // 兜底阶段距离图
-    uint8_t fallback_final_dir_map[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]; // 兜底阶段末段方向图
     StaticArray<point, MAX_PATH_LENGTH> fallback_macro_path; // 兜底炸弹路径
     StaticArray<point, MAX_PATH_LENGTH> fallback_soft_path;  // 兜底软路径
     StaticArray<point, MAX_PATH_LENGTH> fallback_push_path;  // 兜底推箱路径
@@ -573,12 +916,14 @@ OCRAM_BSS static PatrolScratchWorkspace patrol_ws;
 /// \details
 /// 算法使用多阶段动态状态空间搜索：
 /// - 每个炸弹执行阶段对应一张地图快照
-/// - 状态由当前位置、观测朝向、上一段实际移动方向、已观测实体 mask、炸弹阶段 k 组成
+/// - 状态由当前位置、观测朝向、对齐后的初始移动方向、已观测实体 mask、炸弹阶段 k 组成
 /// - 搜索过程中可选择观测动作，也可执行下一个炸弹宏动作切换到下一阶段
 StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
     point start_pos, const StaticArray<BombTask, MAX_BOMBS>& raw_bomb_tasks, float start_yaw, uint32_t start_mask) {
     total_entities = cached_level.box_count + cached_level.target_count;
     if (total_entities == 0) return StaticArray<MacroAction, 32>();
+
+    reset_observe_route_cache();
 
     int B = raw_bomb_tasks.size();
     OCRAM_BSS static SokobanLevel multi_maps[MAX_BOMBS + 1];
@@ -736,7 +1081,8 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
             StaticArray<point, MAX_PATH_LENGTH> path;
 
             if (action.kind == MacroActionKind::OBSERVE) {
-                if (!PlanningCommon::get_grid_time_path(work, work_player, action.observe.view.pos, path)) return false;
+                if (!PlanningCommon::get_grid_time_path(
+                        work, work_player, action.observe.view.pos, path)) return false;
                 work_player = action.observe.view.pos;
                 continue;
             }
@@ -768,7 +1114,11 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
     ctx.best_cost = SEARCH_COST_INFINITY;
     ctx.best_path.clear();
     ctx.current_path.clear();
-    ctx.ops_limit = PATROL_DFS_OPS_LIMIT;
+    // 按单后继计算量分配固定预算，不在运行时无限追加搜索
+    ctx.ops_limit = B > 0
+        ? PATROL_BOMB_DFS_OPS_LIMIT
+        : ((total_entities <= PATROL_SMALL_ENTITY_LIMIT)
+            ? PATROL_SMALL_DFS_OPS_LIMIT : PATROL_DFS_OPS_LIMIT);
     ctx.ops_count = 0;
     std::memset(ws.materialize_checked, 0, sizeof(ws.materialize_checked));
     std::memset(ws.materialize_ok, 0, sizeof(ws.materialize_ok));
@@ -777,8 +1127,7 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
     auto build_grid_time_map_cached = [&](int stage,
                                           point pos,
                                           int initial_dir,
-                                          uint16_t out[MAP_MAX_HEIGHT][MAP_MAX_WIDTH],
-                                          uint8_t out_final_dir[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]) {
+                                          uint16_t out[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]) {
         ++ws.grid_time_cache_clock;
 
         for (int i = 0; i < GRID_TIME_CACHE_SLOTS; ++i) {
@@ -788,11 +1137,6 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                 ws.grid_time_cache_initial_dir[i] == initial_dir) {
                 ws.grid_time_cache_stamp[i] = ws.grid_time_cache_clock;
                 std::memcpy(out, ws.grid_time_cache[i], sizeof(ws.grid_time_cache[i]));
-                if (out_final_dir) {
-                    std::memcpy(out_final_dir,
-                                ws.grid_time_cache_final_dir[i],
-                                sizeof(ws.grid_time_cache_final_dir[i]));
-                }
                 return;
             }
         }
@@ -811,43 +1155,53 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
             pos,
             ws.grid_time_cache[slot],
             initial_dir,
-            ws.grid_time_cache_final_dir[slot]);
+            nullptr);
         ws.grid_time_cache_valid[slot] = 1;
         ws.grid_time_cache_stage[slot] = static_cast<uint8_t>(stage);
         ws.grid_time_cache_pos[slot] = pos;
         ws.grid_time_cache_initial_dir[slot] = static_cast<int8_t>(initial_dir);
         ws.grid_time_cache_stamp[slot] = ws.grid_time_cache_clock;
         std::memcpy(out, ws.grid_time_cache[slot], sizeof(ws.grid_time_cache[slot]));
-        if (out_final_dir) {
-            std::memcpy(out_final_dir,
-                        ws.grid_time_cache_final_dir[slot],
-                        sizeof(ws.grid_time_cache_final_dir[slot]));
-        }
     };
 
     int req_boxes = cached_level.box_count - 1;       
     int req_targets = cached_level.target_count - 1;  
     if (req_boxes < 0) req_boxes = 0;
     if (req_targets < 0) req_targets = 0;
+    const uint32_t box_entity_mask = cached_level.box_count == 0
+        ? 0u
+        : (uint32_t{1u} << cached_level.box_count) - 1u;
+    const uint32_t all_entity_mask = total_entities == 0
+        ? 0u
+        : (uint32_t{1u} << total_entities) - 1u;
+    const uint32_t target_entity_mask = all_entity_mask & ~box_entity_mask;
     auto mask_has_required_counts = [&](uint32_t semantic_mask) -> bool {
-        int seen_boxes = 0;
-        int seen_targets = 0;
-        for (int b = 0; b < cached_level.box_count; ++b) {
-            if (semantic_mask & (1UL << b)) ++seen_boxes;
-        }
-        for (int t = 0; t < cached_level.target_count; ++t) {
-            if (semantic_mask & (1UL << (cached_level.box_count + t))) ++seen_targets;
-        }
+        const int seen_boxes = __builtin_popcount(semantic_mask & box_entity_mask);
+        const int seen_targets = __builtin_popcount(semantic_mask & target_entity_mask);
         return seen_boxes >= req_boxes && seen_targets >= req_targets;
     };
-    auto minimum_remaining_observations = [&](uint32_t semantic_mask) -> int {
-        int seen_boxes = 0;
-        int seen_targets = 0;
-        for (int e = 0; e < total_entities; ++e) {
-            if ((semantic_mask & (1UL << e)) == 0u) continue;
-            if (e < cached_level.box_count) ++seen_boxes;
-            else ++seen_targets;
+    auto trim_new_observation_mask = [&](uint32_t candidate_mask,
+                                         int remain_boxes,
+                                         int remain_targets) -> uint32_t {
+        uint32_t box_candidates = candidate_mask & box_entity_mask;
+        uint32_t target_candidates = candidate_mask & target_entity_mask;
+        uint32_t selected = 0u;
+        // 每次提取最低有效位，避免 DFS 热路径逐实体扫描
+        while (box_candidates != 0u && remain_boxes-- > 0) {
+            const uint32_t bit = box_candidates & (~box_candidates + 1u);
+            selected |= bit;
+            box_candidates ^= bit;
         }
+        while (target_candidates != 0u && remain_targets-- > 0) {
+            const uint32_t bit = target_candidates & (~target_candidates + 1u);
+            selected |= bit;
+            target_candidates ^= bit;
+        }
+        return selected;
+    };
+    auto minimum_remaining_observations = [&](uint32_t semantic_mask) -> int {
+        const int seen_boxes = __builtin_popcount(semantic_mask & box_entity_mask);
+        const int seen_targets = __builtin_popcount(semantic_mask & target_entity_mask);
         const int remain_boxes = std::max(0, req_boxes - seen_boxes);
         const int remain_targets = std::max(0, req_targets - seen_targets);
         return remain_boxes +
@@ -866,14 +1220,8 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
         int32_t current_cost = 0;
 
         for (int guard = 0; guard < 32; ++guard) {
-            int box_seen = 0;
-            int target_seen = 0;
-            for (int e = 0; e < total_entities; ++e) {
-                if (mask & (1UL << e)) {
-                    if (e < cached_level.box_count) ++box_seen;
-                    else ++target_seen;
-                }
-            }
+            const int box_seen = __builtin_popcount(mask & box_entity_mask);
+            const int target_seen = __builtin_popcount(mask & target_entity_mask);
 
             if (mask_has_required_counts(mask)) {
                 int32_t final_cost = current_cost;
@@ -896,22 +1244,12 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
             int remain_b = req_boxes - box_seen; if (remain_b < 0) remain_b = 0;
             int remain_t = req_targets - target_seen; if (remain_t < 0) remain_t = 0;
             auto newly_covers_needed_category = [&](uint32_t newly_seen) -> bool {
-                if (remain_b > 0) {
-                    for (int b = 0; b < cached_level.box_count; ++b) {
-                        if (newly_seen & (1UL << b)) return true;
-                    }
-                }
-                if (remain_t > 0) {
-                    for (int t = 0; t < cached_level.target_count; ++t) {
-                        if (newly_seen & (1UL << (cached_level.box_count + t))) return true;
-                    }
-                }
-                return false;
+                return (remain_b > 0 && (newly_seen & box_entity_mask) != 0u) ||
+                       (remain_t > 0 && (newly_seen & target_entity_mask) != 0u);
             };
 
             uint16_t (&dist_map)[MAP_MAX_HEIGHT][MAP_MAX_WIDTH] = ws.seed_dist_map;
-            build_grid_time_map_cached(
-                k, curr_pos, curr_move_dir, dist_map, ws.seed_final_dir_map);
+            build_grid_time_map_cached(k, curr_pos, curr_move_dir, dist_map);
 
             int best_entity = -1;
             int best_view = -1;
@@ -921,7 +1259,7 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
             int reachable_remaining_targets = 0;
 
             for (int i = 0; i < SEED_POSE_BRANCHES; ++i) {
-                ws.seed_candidates[i] = {-1, -1, 0x7FFFFFFF, COST_INFINITY, 0u, -1};
+                ws.seed_candidates[i] = {-1, -1, 0x7FFFFFFF, COST_INFINITY, 0u};
             }
 
             auto seed_candidate_better = [&](const PatrolSeedCandidate& lhs,
@@ -970,7 +1308,9 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                 bool entity_reachable = false;
                 for (int i = 0; i < entity_views[e].size(); ++i) {
                     const ViewPose& vp = entity_views[e][i];
-                    uint32_t newly_seen = vp.mask[k] & ~mask;
+                    const uint32_t newly_visible = vp.mask[k] & ~mask;
+                    uint32_t newly_seen = trim_new_observation_mask(
+                        newly_visible, remain_b, remain_t);
                     if (newly_seen == 0) continue;
                     if (!newly_covers_needed_category(newly_seen)) continue;
 
@@ -978,20 +1318,23 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                     if (dist == 0xFFFF) continue;
                     entity_reachable = true;
 
-                    const int access_cost = OBSERVE_ACTION_COST + dist +
-                        get_turn_cost(curr_yaw, vp.target_yaw) + vp.penalty[k];
-                    int pop = 0;
-                    for (int bit = 0; bit < 20; ++bit) {
-                        if (newly_seen & (1UL << bit)) ++pop;
+                    uint16_t route_move_cost = 0u;
+                    if (!evaluate_observe_access(
+                            multi_maps[k], k, curr_pos, vp,
+                            curr_move_dir, route_move_cost)) {
+                        continue;
                     }
+                    const int access_cost = OBSERVE_ACTION_COST + route_move_cost +
+                        get_turn_cost(curr_yaw, vp.target_yaw) +
+                        vp.penalty[0];
+                    const int pop = __builtin_popcount(newly_seen);
                     int yaw_index = static_cast<int>((vp.target_yaw + 45.0f) / 90.0f) & 3;
                     const PatrolSeedCandidate candidate{
                         e,
                         i,
                         access_cost + minimum_remaining_observations(mask | newly_seen) * OBSERVE_ACTION_COST,
                         access_cost,
-                        static_cast<uint8_t>(pop),
-                        static_cast<int8_t>(ws.seed_final_dir_map[vp.pos.y][vp.pos.x])
+                        static_cast<uint8_t>(pop)
                     };
                     insert_seed_candidate(candidate, yaw_index);
                 }
@@ -1006,10 +1349,11 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                 const PatrolSeedCandidate& candidate = ws.seed_candidates[i];
                 if (candidate.entity < 0) continue;
                 const ViewPose& vp = entity_views[candidate.entity][candidate.view];
-                const uint32_t next_mask = mask | vp.mask[k];
-                const int next_move_dir =
-                    candidate.next_move_dir >= 0 && candidate.next_move_dir < 4
-                        ? candidate.next_move_dir : curr_move_dir;
+                const uint32_t next_newly_seen = trim_new_observation_mask(
+                    vp.mask[k] & ~mask, remain_b, remain_t);
+                if (next_newly_seen == 0u) continue;
+                const uint32_t next_mask = mask | next_newly_seen;
+                const int next_move_dir = yaw_to_move_direction(vp.target_yaw);
                 int next_box_seen = 0;
                 int next_target_seen = 0;
                 for (int entity = 0; entity < total_entities; ++entity) {
@@ -1019,19 +1363,28 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                 }
                 const bool needs_box = next_box_seen < req_boxes;
                 const bool needs_target = next_target_seen < req_targets;
+                const int next_remain_boxes = std::max(0, req_boxes - next_box_seen);
+                const int next_remain_targets = std::max(0, req_targets - next_target_seen);
                 int next_access = 0;
                 if (needs_box || needs_target) {
                     uint16_t (&lookahead_map)[MAP_MAX_HEIGHT][MAP_MAX_WIDTH] =
                         ws.dfs_frames[0].dist_map;
                     build_grid_time_map_cached(
-                        k, vp.pos, next_move_dir, lookahead_map, nullptr);
+                        k, vp.pos, next_move_dir, lookahead_map);
                     next_access = 0x7FFFFFFF;
                     for (int entity = 0; entity < total_entities; ++entity) {
                         if (next_mask & (1UL << entity)) continue;
                         if ((entity < cached_level.box_count) ? !needs_box : !needs_target) continue;
                         for (int view = 0; view < entity_views[entity].size(); ++view) {
                             const ViewPose& next_view = entity_views[entity][view];
-                            if ((next_view.mask[k] & ~next_mask) == 0u) continue;
+                            const uint32_t next_newly_visible =
+                                next_view.mask[k] & ~next_mask;
+                            const uint32_t next_newly_seen =
+                                trim_new_observation_mask(
+                                    next_newly_visible,
+                                    next_remain_boxes,
+                                    next_remain_targets);
+                            if (next_newly_seen == 0u) continue;
                             const uint16_t next_dist = lookahead_map[next_view.pos.y][next_view.pos.x];
                             if (next_dist == COST_INFINITY) continue;
                             const int estimate = OBSERVE_ACTION_COST + next_dist +
@@ -1054,14 +1407,24 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
 
             if (best_entity >= 0) {
                 const ViewPose& vp = entity_views[best_entity][best_view];
-                uint32_t newly_seen = vp.mask[k] & ~mask;
-                uint16_t dist = dist_map[vp.pos.y][vp.pos.x];
-                int next_move_dir = ws.seed_final_dir_map[vp.pos.y][vp.pos.x];
-                if (next_move_dir < 0 || next_move_dir >= 4) next_move_dir = curr_move_dir;
-                MacroAction act = make_observe_macro_action(vp, vp.mask[k]);
+                const uint32_t newly_seen = trim_new_observation_mask(
+                    vp.mask[k] & ~mask, remain_b, remain_t);
+                uint16_t route_move_cost = 0u;
+                if (newly_seen == 0u || !evaluate_observe_access(
+                        multi_maps[k], k, curr_pos, vp,
+                        curr_move_dir, route_move_cost)) {
+                    return;
+                }
+                const uint16_t observe_cost = static_cast<uint16_t>(
+                    OBSERVE_ACTION_COST + route_move_cost +
+                    get_turn_cost(curr_yaw, vp.target_yaw) +
+                    vp.penalty[0]);
+                // 观测动作末尾已经对齐目标朝向，不能把接入路径末段方向带入下一状态
+                const int next_move_dir = yaw_to_move_direction(vp.target_yaw);
+                MacroAction act = make_observe_macro_action(
+                    vp, newly_seen, observe_cost);
                 seed_path.push_back(act);
-                current_cost += OBSERVE_ACTION_COST + dist +
-                    get_turn_cost(curr_yaw, vp.target_yaw) + vp.penalty[k];
+                current_cost += observe_cost;
                 curr_pos = vp.pos;
                 curr_yaw = vp.target_yaw;
                 curr_move_dir = next_move_dir;
@@ -1081,7 +1444,8 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                 }
                 current_cost += get_bomb_action_cost(
                     curr_pos, macro_path, executable_task, curr_move_dir);
-                curr_move_dir = path_last_move_direction(curr_pos, macro_path, curr_move_dir);
+                // 推炸弹动作不改变观测朝向，下一段路径仍从当前观测朝向开始
+                curr_move_dir = yaw_to_move_direction(curr_yaw);
                 curr_pos = macro_path.empty() ? curr_pos : macro_path.back();
                 ++k;
                 continue;
@@ -1107,7 +1471,7 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
         int32_t remaining_bomb_credit = static_cast<int32_t>(B - k) * BONUS_FOR_BOMB;
         if (current_cost - remaining_bomb_credit >= ctx.best_cost) return;
 
-        // 状态压缩：观测掩码 + 位置 + 观测朝向 + 上一段实际移动方向 + 炸弹阶段
+        // 状态压缩：观测掩码 + 位置 + 观测朝向 + 对齐后的初始移动方向 + 炸弹阶段
         int yaw_idx = 0;
         if (curr_yaw >= 0.0f) {
             int int_yaw = (int)(curr_yaw + 0.5f) % 360;
@@ -1130,38 +1494,26 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
         ws.micro_tt_cost[tt_idx] = current_cost;
 
         // 统计当前已经观测到的箱子和目标点数量
-        int box_seen = 0, target_seen = 0;
-        for (int e = 0; e < total_entities; ++e) {
-            if (mask & (1UL << e)) {
-                if (e < cached_level.box_count) box_seen++;
-                else target_seen++;
-            }
-        }
+        const int box_seen = __builtin_popcount(mask & box_entity_mask);
+        const int target_seen = __builtin_popcount(mask & target_entity_mask);
 
         int remain_b = req_boxes - box_seen; if(remain_b < 0) remain_b = 0;
         int remain_t = req_targets - target_seen; if(remain_t < 0) remain_t = 0;
         // 箱子候选一次只提交一个箱子；目标候选最多合并三个目标点。
         // 每个动作都必付停车观测开销，因此这是不会高估的观测次数下界。
-        const int remain_observations = minimum_remaining_observations(mask);
+        const int remain_observations = remain_b +
+            (remain_t + PlanningCommon::ObservationConfig::MAX_TARGETS_PER_OBSERVATION - 1) /
+                PlanningCommon::ObservationConfig::MAX_TARGETS_PER_OBSERVATION;
         auto newly_covers_needed_category = [&](uint32_t newly_seen) -> bool {
-            if (remain_b > 0) {
-                for (int b = 0; b < cached_level.box_count; ++b) {
-                    if (newly_seen & (1UL << b)) return true;
-                }
-            }
-            if (remain_t > 0) {
-                for (int t = 0; t < cached_level.target_count; ++t) {
-                    if (newly_seen & (1UL << (cached_level.box_count + t))) return true;
-                }
-            }
-            return false;
+            return (remain_b > 0 && (newly_seen & box_entity_mask) != 0u) ||
+                   (remain_t > 0 && (newly_seen & target_entity_mask) != 0u);
         };
         if (current_cost + remain_observations * OBSERVE_ACTION_COST - remaining_bomb_credit >=
             ctx.best_cost) {
             return;
         }
         // N-1 观测目标达成后即可收尾，避免为最后一个实体消耗过多时间
-        if (mask_has_required_counts(mask)) {
+        if (remain_b == 0 && remain_t == 0) {
             int32_t final_cost = current_cost;
             if (box_seen < cached_level.box_count || target_seen < cached_level.target_count) {
                 bool near_box = false;
@@ -1177,8 +1529,7 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
         }
 
         uint16_t (&dist_map)[MAP_MAX_HEIGHT][MAP_MAX_WIDTH] = frame.dist_map;
-        build_grid_time_map_cached(
-            k, curr_pos, curr_move_dir, dist_map, frame.final_dir_map);
+        build_grid_time_map_cached(k, curr_pos, curr_move_dir, dist_map);
 
         int unvisited_count = 0;
         uint16_t nearest_observe_extra = COST_INFINITY;
@@ -1190,7 +1541,8 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
             
             for (int i = 0; i < entity_views[e].size(); ++i) {
                 const auto& vp = entity_views[e][i];
-                uint32_t newly_seen = vp.mask[k] & ~mask;
+                uint32_t newly_seen = trim_new_observation_mask(
+                    vp.mask[k] & ~mask, remain_b, remain_t);
                 if (newly_seen == 0) continue;
                 if (!newly_covers_needed_category(newly_seen)) continue;
 
@@ -1199,7 +1551,14 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
 
                 uint16_t cost = dist + get_turn_cost(curr_yaw, vp.target_yaw) + vp.penalty[k];
                 if (cost < best_cost_for_e) best_cost_for_e = cost;
-                if (cost < nearest_observe_extra) nearest_observe_extra = cost;
+                // 网格代价可能高于执行层斜率路线，只用欧氏距离构造安全下界
+                const int dx = static_cast<int>(vp.pos.x) - curr_pos.x;
+                const int dy = static_cast<int>(vp.pos.y) - curr_pos.y;
+                const uint16_t geometric_lb = static_cast<uint16_t>(
+                    std::sqrt(static_cast<float>(dx * dx + dy * dy)));
+                if (geometric_lb < nearest_observe_extra) {
+                    nearest_observe_extra = geometric_lb;
+                }
             }
             frame.ordered_entities[unvisited_count++] = {e, best_cost_for_e};
         }
@@ -1232,12 +1591,13 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
             if (frame.ordered_entities[idx].min_cost == COST_INFINITY) continue; 
 
             for (int i = 0; i < OBS_POSE_BRANCHES; ++i) {
-                frame.top_poses_by_yaw[i] = {-1, COST_INFINITY, 0x7FFFFFFF};
+                frame.top_poses_by_yaw[i] = {-1, 0x7FFFFFFF};
             }
 
             for (int i = 0; i < entity_views[e].size(); ++i) {
                 const auto& vp = entity_views[e][i];
-                uint32_t newly_seen = vp.mask[k] & ~mask;
+                uint32_t newly_seen = trim_new_observation_mask(
+                    vp.mask[k] & ~mask, remain_b, remain_t);
                 if (newly_seen == 0) continue; 
                 if (!newly_covers_needed_category(newly_seen)) continue;
 
@@ -1249,12 +1609,8 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
 
                 // 排序分数保留整数下界，同时补偿本次新增目标的边际收益
                 // 避免两个候选落入同一观测次数桶时，联合观测因局部移动代价略高而落选
-                int newly_target_count = 0;
-                for (int t = 0; t < cached_level.target_count; ++t) {
-                    if (newly_seen & (1UL << (cached_level.box_count + t))) {
-                        ++newly_target_count;
-                    }
-                }
+                const int newly_target_count = __builtin_popcount(
+                    newly_seen & target_entity_mask);
                 const int target_coverage_reward =
                     OBSERVE_ACTION_COST /
                         PlanningCommon::ObservationConfig::MAX_TARGETS_PER_OBSERVATION +
@@ -1276,7 +1632,7 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                         frame.top_poses_by_yaw[yaw_begin + shift] =
                             frame.top_poses_by_yaw[yaw_begin + shift - 1];
                     }
-                    frame.top_poses_by_yaw[slot] = {i, total_cost, score};
+                    frame.top_poses_by_yaw[slot] = {i, score};
                     break;
                 }
             }
@@ -1302,9 +1658,22 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                 const PatrolDynamicEval& eval = frame.sorted_evals[i];
 
                 const ViewPose& vp = entity_views[e][eval.vp_idx];
-                const uint32_t next_mask = mask | vp.mask[k];
-                int next_move_dir = frame.final_dir_map[vp.pos.y][vp.pos.x];
-                if (next_move_dir < 0 || next_move_dir >= 4) next_move_dir = curr_move_dir;
+                const uint32_t newly_seen = trim_new_observation_mask(
+                    vp.mask[k] & ~mask, remain_b, remain_t);
+                if (newly_seen == 0u) continue;
+                uint16_t observe_move_cost = 0u;
+                if (!evaluate_observe_access(
+                        multi_maps[k], k, curr_pos, vp,
+                        curr_move_dir, observe_move_cost)) {
+                    continue;
+                }
+                const uint16_t observe_cost = static_cast<uint16_t>(
+                    OBSERVE_ACTION_COST + observe_move_cost +
+                    get_turn_cost(curr_yaw, vp.target_yaw) +
+                    vp.penalty[0]);
+                const uint32_t next_mask = mask | newly_seen;
+                // 观测后先 ALIGN_YAW，下一段移动方向由观测朝向决定
+                const int next_move_dir = yaw_to_move_direction(vp.target_yaw);
 
                 int int_yaw = static_cast<int>(vp.target_yaw + 0.5f) % 360;
                 if (int_yaw < 0) int_yaw += 360;
@@ -1323,13 +1692,14 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
 
                 // 同一后继只保留更低动作代价，保持原有实体和位姿展开顺序
                 if (frame.observe_successor_keys[slot] == successor_key &&
-                    frame.observe_successor_costs[slot] <= eval.actual_cost) {
+                    frame.observe_successor_costs[slot] <= observe_cost) {
                     continue;
                 }
                 frame.observe_successor_keys[slot] = successor_key;
-                frame.observe_successor_costs[slot] = eval.actual_cost;
+                frame.observe_successor_costs[slot] = observe_cost;
 
-                MacroAction act = make_observe_macro_action(vp, vp.mask[k]);
+                MacroAction act = make_observe_macro_action(
+                    vp, newly_seen, observe_cost);
                 ctx.current_path.push_back(act);
                 self(self,
                      vp.pos,
@@ -1337,7 +1707,7 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                      next_move_dir,
                      k,
                      next_mask,
-                     current_cost + eval.actual_cost,
+                     current_cost + observe_cost,
                      depth + 1);
                 ctx.current_path.pop_back();
             }
@@ -1403,7 +1773,8 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                     if (mask & (1UL << e)) continue;
                     for (int i = 0; i < entity_views[e].size(); ++i) {
                         const ViewPose& vp = entity_views[e][i];
-                        uint32_t newly_seen = vp.mask[k] & ~mask;
+                        uint32_t newly_seen = trim_new_observation_mask(
+                            vp.mask[k] & ~mask, remain_b, remain_t);
                         if (newly_seen == 0) continue;
                         if (!newly_covers_needed_category(newly_seen)) continue;
 
@@ -1475,7 +1846,8 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                 for (int c = 0; c < approach_obs_candidates.size(); ++c) {
                     const PatrolApproachObsCandidate& candidate = approach_obs_candidates[c];
 
-                    MacroAction obs_act = make_observe_macro_action(candidate.vp, candidate.vp.mask[k]);
+                    MacroAction obs_act = make_observe_macro_action(
+                        candidate.vp, candidate.newly_seen);
 
                     if (!append_flat_bomb_actions(ctx.current_path,
                                                   multi_maps[k],
@@ -1488,10 +1860,9 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                     }
 
                     point next_pos_after_obs = macro_path.empty() ? candidate.vp.pos : macro_path.back();
-                    const int next_move_dir = path_last_move_direction(
-                        curr_pos, macro_path, curr_move_dir);
-                    // Movement and push/bomb macros do not reset observe yaw in execution
-                    // Keep DFS yaw consistent so the next observation pays the real turn cost
+                    // 插入观测后会对齐其目标朝向，后续炸弹接入从该朝向计价
+                    const int next_move_dir = yaw_to_move_direction(
+                        candidate.vp.target_yaw);
                     self(self,
                          next_pos_after_obs,
                          candidate.vp.target_yaw,
@@ -1517,9 +1888,8 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                 point next_pos = macro_path.empty() ? curr_pos : macro_path.back();
                 int32_t bomb_cost = get_bomb_action_cost(
                     curr_pos, macro_path, executable_task, curr_move_dir);
-                const int next_move_dir = path_last_move_direction(
-                    curr_pos, macro_path, curr_move_dir);
-                // No observation happened inside this macro branch, so carry the previous observe yaw
+                // 未插入观测时观测朝向保持不变，下一段仍从当前朝向计价
+                const int next_move_dir = yaw_to_move_direction(curr_yaw);
                 self(self,
                      next_pos,
                      curr_yaw,
@@ -1542,7 +1912,12 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
         0,
         0);
 
+
     if (!ctx.best_path.empty() && validate_reference_plan(ctx.best_path)) {
+        if (B == 0) {
+            optimize_observe_sequence_order(
+                multi_maps[0], start_pos, start_yaw, start_mask, ctx.best_path);
+        }
         return ctx.best_path;
     }
 
@@ -1558,14 +1933,8 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
 
     for (int guard = 0; guard < 32; ++guard) {
         const SokobanLevel& stage_lvl = multi_maps[k];
-        int box_seen = 0;
-        int target_seen = 0;
-        for (int e = 0; e < total_entities; ++e) {
-            if (mask & (1UL << e)) {
-                if (e < stage_lvl.box_count) ++box_seen;
-                else ++target_seen;
-            }
-        }
+        const int box_seen = __builtin_popcount(mask & box_entity_mask);
+        const int target_seen = __builtin_popcount(mask & target_entity_mask);
         if (mask_has_required_counts(mask)) break;
 
         int remain_b = req_boxes - box_seen;
@@ -1573,22 +1942,13 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
         if (remain_b < 0) remain_b = 0;
         if (remain_t < 0) remain_t = 0;
         auto newly_covers_needed_category = [&](uint32_t newly_seen) -> bool {
-            if (remain_b > 0) {
-                for (int b = 0; b < stage_lvl.box_count; ++b) {
-                    if (newly_seen & (1UL << b)) return true;
-                }
-            }
-            if (remain_t > 0) {
-                for (int t = 0; t < stage_lvl.target_count; ++t) {
-                    if (newly_seen & (1UL << (stage_lvl.box_count + t))) return true;
-                }
-            }
-            return false;
+            return (remain_b > 0 && (newly_seen & box_entity_mask) != 0u) ||
+                   (remain_t > 0 && (newly_seen & target_entity_mask) != 0u);
         };
 
         uint16_t (&dist_map)[MAP_MAX_HEIGHT][MAP_MAX_WIDTH] = ws.fallback_dist_map;
         PlanningCommon::build_grid_time_map(
-            stage_lvl, curr_pos, dist_map, curr_move_dir, ws.fallback_final_dir_map);
+            stage_lvl, curr_pos, dist_map, curr_move_dir, nullptr);
 
         int best_entity = -1;
         int best_view = -1;
@@ -1601,17 +1961,15 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
             bool entity_reachable = false;
             for (int i = 0; i < entity_views[e].size(); ++i) {
                 const ViewPose& vp = entity_views[e][i];
-                uint32_t newly_seen = vp.mask[k] & ~mask;
+                uint32_t newly_seen = trim_new_observation_mask(
+                    vp.mask[k] & ~mask, remain_b, remain_t);
                 if (newly_seen == 0) continue;
                 if (!newly_covers_needed_category(newly_seen)) continue;
                 uint16_t dist = dist_map[vp.pos.y][vp.pos.x];
                 if (dist == 0xFFFF) continue;
                 entity_reachable = true;
 
-                int pop = 0;
-                for (int bit = 0; bit < 20; ++bit) {
-                    if (newly_seen & (1UL << bit)) ++pop;
-                }
+                const int pop = __builtin_popcount(newly_seen);
                 int score = dist + get_turn_cost(curr_yaw, vp.target_yaw) + vp.penalty[k] +
                     minimum_remaining_observations(mask | newly_seen) * OBSERVE_ACTION_COST;
                 if (score < best_score || (score == best_score && pop > best_newly_seen)) {
@@ -1646,7 +2004,8 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                         fallback_path, stage_lvl, curr_pos, executable_task, -1, nullptr, curr_move_dir)) {
                     break;
                 }
-                curr_move_dir = path_last_move_direction(curr_pos, macro_path, curr_move_dir);
+                // 推炸弹后观测朝向未改变，下一次接入从当前朝向开始
+                curr_move_dir = yaw_to_move_direction(curr_yaw);
                 curr_pos = macro_path.empty() ? curr_pos : macro_path.back();
                 ++k;
                 continue;
@@ -1700,7 +2059,8 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                 bool entity_reachable = false;
                 for (int i = 0; i < entity_views[e].size(); ++i) {
                     const ViewPose& vp = entity_views[e][i];
-                    uint32_t newly_seen = vp.mask[k] & ~mask;
+                    uint32_t newly_seen = trim_new_observation_mask(
+                        vp.mask[k] & ~mask, remain_b, remain_t);
                     if (newly_seen == 0) continue;
                     if (!newly_covers_needed_category(newly_seen)) continue;
                     uint16_t dist = dist_map[vp.pos.y][vp.pos.x];
@@ -1713,7 +2073,8 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
 
                 for (int i = 0; i < entity_views[e].size(); ++i) {
                     const ViewPose& vp = entity_views[e][i];
-                    uint32_t newly_seen = vp.mask[k] & ~mask;
+                    uint32_t newly_seen = trim_new_observation_mask(
+                        vp.mask[k] & ~mask, remain_b, remain_t);
                     if (newly_seen == 0) continue;
                     if (!newly_covers_needed_category(newly_seen)) continue;
                     if (dist_map[vp.pos.y][vp.pos.x] != 0xFFFF) continue;
@@ -1772,7 +2133,8 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                 point probe_player = curr_pos;
                 if (PlanningCommon::append_box_push_path(probe, probe_player, macro_box_task(best_clear.action), clear_path)) {
                     fallback_path.push_back(best_clear.action);
-                    curr_move_dir = path_last_move_direction(curr_pos, clear_path, curr_move_dir);
+                    // 清障推箱不包含观测对齐，保持当前观测朝向的计价状态
+                    curr_move_dir = yaw_to_move_direction(curr_yaw);
                     curr_pos = probe_player;
 
                     for (int s = k; s <= B; ++s) {
@@ -1781,6 +2143,7 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                         }
                     }
                     build_entity_views(multi_maps, B);
+                    reset_observe_route_cache();
                     continue;
                 }
             }
@@ -1788,11 +2151,15 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
 
         if (best_entity != -1) {
             const ViewPose& vp = entity_views[best_entity][best_view];
-            int next_move_dir = ws.fallback_final_dir_map[vp.pos.y][vp.pos.x];
+            const uint32_t newly_seen = trim_new_observation_mask(
+                vp.mask[k] & ~mask, remain_b, remain_t);
+            if (newly_seen == 0u) continue;
+            // 观测动作结束后已对齐目标朝向，不能沿用网格路径末段方向
+            int next_move_dir = yaw_to_move_direction(vp.target_yaw);
             if (next_move_dir < 0 || next_move_dir >= 4) next_move_dir = curr_move_dir;
-            MacroAction act = make_observe_macro_action(vp, vp.mask[k]);
+            MacroAction act = make_observe_macro_action(vp, newly_seen);
             fallback_path.push_back(act);
-            mask |= vp.mask[k];
+            mask |= newly_seen;
             curr_pos = vp.pos;
             curr_yaw = vp.target_yaw;
             curr_move_dir = next_move_dir;
@@ -1818,12 +2185,19 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                 fallback_path, multi_maps[k], curr_pos, executable_task, -1, nullptr, curr_move_dir)) {
             break;
         }
-        curr_move_dir = path_last_move_direction(curr_pos, macro_path, curr_move_dir);
+        // 推炸弹动作不改变观测朝向
+        curr_move_dir = yaw_to_move_direction(curr_yaw);
         curr_pos = macro_path.empty() ? curr_pos : macro_path.back();
         ++k;
     }
 
-    if (mask_has_required_counts(mask) && validate_reference_plan(fallback_path)) return fallback_path;
+    if (mask_has_required_counts(mask) && validate_reference_plan(fallback_path)) {
+        if (B == 0) {
+            optimize_observe_sequence_order(
+                multi_maps[0], start_pos, start_yaw, start_mask, fallback_path);
+        }
+        return fallback_path;
+    }
     return StaticArray<MacroAction, 32>();
 }
 

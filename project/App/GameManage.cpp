@@ -82,11 +82,11 @@ namespace {
     // 路径是否踩到"这次爆炸才会清开的墙格"。只要路径任一格命中捕获的墙格集合即为真。
     // 车绕墙而行、只擦过墙的邻域空地时不命中 → 不需要等(见图示轨迹绕开墙却曾误等 1 秒)。
     [[gnu::always_inline]] inline bool segment_needs_blast(
+        point start,
         const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& seg) {
-        for (int i = 0; i < seg.size(); ++i) {
-            for (int j = 0; j < s_pending_blast_cells.size(); ++j) {
-                if (seg[i] == s_pending_blast_cells[j]) return true;
-            }
+        for (int j = 0; j < s_pending_blast_cells.size(); ++j) {
+            if (PlanningCommon::path_crosses_cell(
+                    start, seg, s_pending_blast_cells[j])) return true;
         }
         return false;
     }
@@ -94,11 +94,12 @@ namespace {
     // 路径加载前调用：刚推的炸弹若炸开的墙挡住即将执行的路径段 seg，则先原地等爆炸。
     // 返回 true = 仍需等待（调用方应保持原地、暂不加载路径）；false = 可放行加载。
     [[gnu::always_inline]] inline bool gate_explosion_before_path(
+        point start,
         const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& seg) {
         if (s_pending_blast_cells.size() == 0) return false;  // 无待处理炸弹
 
         if (!s_explosion_wait_active) {
-            if (!segment_needs_blast(seg)) {
+            if (!segment_needs_blast(start, seg)) {
                 s_pending_blast_cells.clear();         // 路径不靠这次爆炸开路：不等，直奔目标
                 return false;
             }
@@ -412,7 +413,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     BombTask bomb = make_bomb_task(task.param.bomb_push);
                     if (PlanningCommon::get_bomb_push_path(logical_level, logical_level.player_start, bomb, segment)) {
                         // 上一颗炸弹墙若在本段路径上，先原地等爆炸再加载
-                        if (gate_explosion_before_path(segment)) break;
+                        if (gate_explosion_before_path(logical_level.player_start, segment)) break;
                         // 传入真实逻辑起点，避免路径首点缺失时 Tracker 误判第一段方向
                         Algorithm::Tracker::load_bomb_push_path(segment,
                                                                logical_level.player_start,
@@ -431,7 +432,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     BoxPushTask box_push = make_box_push_task(task.param.box_push);
 
                     if (PlanningCommon::append_box_push_path(probe, probe_player, box_push, segment)) {
-                        if (gate_explosion_before_path(segment)) break;
+                        if (gate_explosion_before_path(logical_level.player_start, segment)) break;
                         // 推箱路径可能从下一格开始，逻辑起点用于 Tracker 压缩首段
                         Algorithm::Tracker::load_box_push_path(segment, logical_level.player_start,
                                                                box_push.box_start,
@@ -446,8 +447,10 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 case TaskType::LOAD_PATH_OBS: {
                     StaticArray<point, MAX_PATH_LENGTH> segment;
 
-                    if (PlanningCommon::get_grid_time_path(logical_level, logical_level.player_start, task.param.target_grid, segment)) {
-                        if (gate_explosion_before_path(segment)) break;
+                    if (PlanningCommon::get_optimized_observe_path(
+                            logical_level, logical_level.player_start,
+                            task.param.target_grid, segment)) {
+                        if (gate_explosion_before_path(logical_level.player_start, segment)) break;
                         // 观察移动同样保留逻辑起点，保证第一段航向和视觉校正基准一致
                         Algorithm::Tracker::load_path(segment, logical_level.player_start);
                         // 不再边跑边转：观测目标航向不在路径加载时写入，全程保持出发朝向平移，

@@ -11,12 +11,20 @@ using namespace SystemConfig;
 // ============================================================================
 namespace PlanningCommon {
 
+namespace ObserveRouteConfig {
+// 巡图观测路径总开关，关闭后恢复原始四方向网格路径和原观测点
+inline constexpr bool ENABLE_OBSERVE_ROUTE_OPTIMIZATION = true;
+// 原点直斜线受阻时，允许 Macro 在邻域内寻找可斜向到达的合法终点
+inline constexpr bool ENABLE_OBSERVE_ENDPOINT_ADJUST = true;
+inline constexpr int ENDPOINT_ADJUST_RADIUS = 1;
+}
+
 namespace ObservationConfig {
 // 箱子只允许正前方 1 格或 2 格无遮挡直视；两种距离不设置额外优先级
 inline constexpr bool ENABLE_FACE_TO_FACE = true;
 inline constexpr bool ENABLE_OPTIMAL_DIST = true;
 
-// 单目标点允许正前方 1/2/3 格和前两格斜角观测
+// 单目标点允许正前方 1/2/3 格和 F2 左右斜角观测，F1 斜角仅用于联合观测
 inline constexpr bool ENABLE_DIAGONAL = true;                
 inline constexpr bool ENABLE_TARGET_FAR_FACE_TO_FACE = true;
 
@@ -35,7 +43,7 @@ inline constexpr int TARGET_SLOT_F1_LEFT = 5;   // F1 左侧槽位
 inline constexpr int TARGET_SLOT_F1_RIGHT = 6;  // F1 右侧槽位
 
 inline constexpr uint8_t MAX_TARGETS_PER_OBSERVATION = 3u;   // 一次联合观测最多识别 3 个目标
-inline constexpr int TARGET_SINGLE_SLOT_COUNT = 5;           // 单目标观测槽位数量
+inline constexpr int TARGET_BASE_SLOT_COUNT = 5;             // 基础可见性槽位数量，含 F2 左右斜角
 inline constexpr int TARGET_OBSERVE_SLOT_COUNT = 7;          // 总共记录 7 种相对位置
 inline constexpr uint16_t TARGET_OPTIMAL_PENALTY = 0u;       // 隔一格目标已满足识别距离，不为靠近制造移动
 inline constexpr uint16_t TARGET_FAR_PENALTY = 1u;           // 正前方第 3 格略低于第 1/2 格
@@ -44,7 +52,7 @@ inline constexpr uint16_t TARGET_DIAGONAL_PENALTY = 1u;      // 斜视略低于�
 
 /// \brief 单个目标观测几何槽位的可见实体与代价
 ///
-/// slots 前五项是单目标候选，后两项只用于以 F2 正中目标为核心的联合观测
+/// slots 前五项是单目标候选，后两项是 F1 左右斜角，仅用于联合观测
 struct TargetObserveSlots {
     uint32_t mask[ObservationConfig::TARGET_OBSERVE_SLOT_COUNT] = {};
     uint16_t penalty[ObservationConfig::TARGET_OBSERVE_SLOT_COUNT] = {};
@@ -121,6 +129,46 @@ void build_grid_time_map(const SokobanLevel& lvl,
                          int initial_dir = -1,
                          uint8_t out_final_dir[MAP_MAX_HEIGHT][MAP_MAX_WIDTH] = nullptr);
 uint16_t yaw_turn_time_cost(float from_yaw, float to_yaw);
+
+/// \brief 生成支持任意斜率航点的观测移动路径
+/// \param lvl 当前地图状态
+/// \param start 当前小车格点
+/// \param end 固定观测终点
+/// \param out_path 输出优化后的航点，不包含起点并包含终点
+/// \param initial_dir 进入起点前的 MOVE 下标，负值表示未知
+///
+/// \details 只有候选路径严格减少内部拐点且总代价更低时才替换原网格路径
+bool get_optimized_observe_path(const SokobanLevel& lvl,
+                                point start,
+                                point end,
+                                StaticArray<point, MAX_PATH_LENGTH>& out_path,
+                                int initial_dir = -1);
+
+/// \brief 在原观测点邻域中联合优化终点和移动航点
+/// \param lvl 当前地图状态
+/// \param start 当前小车格点
+/// \param required_mask 新观测点必须完整覆盖的实体集合
+/// \param inout_view 输入参考观测位姿，输出实际采用的观测位姿
+/// \param out_path 输出到新观测点的优化航点
+/// \param initial_dir 进入起点前的 MOVE 下标，负值表示未知
+///
+/// \details 固定终点优先，仅在原点直斜线受阻时尝试改点，且必须保持合法观测模式并减少拐点
+bool optimize_observe_route(const SokobanLevel& lvl,
+                            point start,
+                            uint32_t required_mask,
+                            ViewPose& inout_view,
+                            StaticArray<point, MAX_PATH_LENGTH>& out_path,
+                            int initial_dir = -1);
+
+/// \brief 计算任意斜率观测航点的近似时间代价
+uint16_t observe_route_time_cost(point start,
+                                 const StaticArray<point, MAX_PATH_LENGTH>& path,
+                                 int initial_dir = -1);
+
+/// \brief 判断航点折线是否穿过指定网格
+bool path_crosses_cell(point start,
+                       const StaticArray<point, MAX_PATH_LENGTH>& path,
+                       point cell);
 
 bool can_player_reach(const SokobanLevel& lvl, point start_pos, point target_pos, point ignored_obj, point extra_obs);
 void calc_player_reach(const SokobanLevel& lvl, point start_pos, point ignored_obj, point extra_obs, bool out_visited[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]);

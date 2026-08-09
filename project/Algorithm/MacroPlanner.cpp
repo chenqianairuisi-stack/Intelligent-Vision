@@ -28,19 +28,19 @@ namespace MacroConfig {
     //   + pressure_reward
     //   - player_to_box    * COMPLETION_DISTANCE_WEIGHT
     //   + COMPLETION_PRESSURE_REWARD
-    inline constexpr int COMPLETION_SCORE_THRESHOLD = 0;    // 执行阈值，给镜像地图的路径拐点差异留出余量
-    inline constexpr int COMPLETION_FOLLOW_WEIGHT = 3;      // 推箱后接回下一参考任务的时间收益权重 [调大：更偏好顺路完成]
-    inline constexpr int COMPLETION_RETURN_WEIGHT = 1;      // 未来少一次回到该箱子附近的时间收益权重 [调大：更愿意提前处理远处箱子]
-    inline constexpr int COMPLETION_DISTANCE_WEIGHT = 1;    // 小车到箱子可站位时间代价的惩罚权重 [调大：更偏向离车近的箱子]
-    inline constexpr int COMPLETION_PRESSURE_REWARD = 14;   // 箱子直接落到目标点后，对第二阶段 IDA* 搜索压力下降的基础时间奖励
-    inline constexpr int COMPLETION_MAX_PUSH_PATH = 16;     // 完成式推箱展开路径长度上限
+    inline constexpr int COMPLETION_SCORE_THRESHOLD = 0;     // 执行阈值，给镜像地图的路径拐点差异留出余量
+    inline constexpr int COMPLETION_FOLLOW_WEIGHT   = 3;     // 推箱后接回下一参考任务的时间收益权重 [调大：更偏好顺路完成]
+    inline constexpr int COMPLETION_RETURN_WEIGHT   = 1;     // 未来少一次回到该箱子附近的时间收益权重 [调大：更愿意提前处理远处箱子]
+    inline constexpr int COMPLETION_DISTANCE_WEIGHT = 1;     // 小车到箱子可站位时间代价的惩罚权重 [调大：更偏向离车近的箱子]
+    inline constexpr int COMPLETION_PRESSURE_REWARD = 14;    // 箱子直接落到目标点后，对第二阶段 IDA* 搜索压力下降的基础时间奖励
+    inline constexpr int COMPLETION_MAX_PUSH_PATH   = 16;    // 完成式推箱展开路径长度上限
 
     // ------------------------------------------------------------------------
     // 参考候选位清障
     // ------------------------------------------------------------------------
-    inline constexpr int REFERENCE_CLEAR_MAX_STEPS = 2;    //沿四方向最多尝试把挡路箱子推开几格
-    inline constexpr int REFERENCE_CLEAR_MAX_PATH = 20;    // 单次清障推箱允许的最大展开路径长度
-    inline constexpr int REFERENCE_MATERIALIZED_CLEAR_BONUS = 950; // Strategy 已验证清障序列的优先级奖励
+    inline constexpr int REFERENCE_CLEAR_MAX_STEPS = 2;      //沿四方向最多尝试把挡路箱子推开几格
+    inline constexpr int REFERENCE_CLEAR_MAX_PATH = 20;      // 单次清障推箱允许的最大展开路径长度
+    inline constexpr int REFERENCE_MATERIALIZED_CLEAR_BONUS = 950;  // Strategy 已验证清障序列的优先级奖励
 
 }
 
@@ -673,15 +673,21 @@ bool MacroPlanner::prepare_reference_action(const MacroPlanContext& ctx, const M
     prepared_action = raw_action;
 
     if (prepared_action.kind == MacroActionKind::OBSERVE) {
+        // 参考序列生成后箱子可能已移动，执行前必须按当前地图重算真实可见掩码
         if (!refresh_observe_action(ctx.level, prepared_action)) return false;
+        const uint32_t required_mask =
+            prepared_action.observe.active_mask;
+        if (required_mask == 0u) return false;
         StaticArray<point, MAX_PATH_LENGTH> path;
         const int initial_dir = yaw_to_move_direction(ctx.yaw);
-        if (!PlanningCommon::get_grid_time_path(
-                ctx.level, ctx.player, prepared_action.observe.view.pos, path, initial_dir)) {
+        if (!PlanningCommon::optimize_observe_route(
+                ctx.level, ctx.player, required_mask,
+                prepared_action.observe.view, path, initial_dir)) {
             return false;
         }
+        prepared_action.observe.active_mask = required_mask;
         prepared_action.real_cost =
-            PlanningCommon::path_time_cost(ctx.player, path, initial_dir) +
+            PlanningCommon::observe_route_time_cost(ctx.player, path, initial_dir) +
             PlanningCommon::yaw_turn_time_cost(ctx.yaw, prepared_action.observe.view.target_yaw) +
             prepared_action.observe.view.penalty[0];
         return true;
@@ -776,7 +782,8 @@ bool MacroPlanner::build_bomb_observe_split(const MacroPlanContext& ctx,
             observe = refreshed_observe;
 
             StaticArray<point, MAX_PATH_LENGTH> observe_path;
-            if (!PlanningCommon::get_grid_time_path(pause_level, prefix_end, observe.observe.view.pos, observe_path)) continue;
+            if (!PlanningCommon::get_optimized_observe_path(
+                    pause_level, prefix_end, observe.observe.view.pos, observe_path)) continue;
 
             BombPushAction suffix_push = make_bomb_push_segment(
                 pause_bomb_pos,
@@ -793,7 +800,7 @@ bool MacroPlanner::build_bomb_observe_split(const MacroPlanContext& ctx,
             prefix.real_cost = PlanningCommon::path_time_cost(
                 ctx.player, prefix_path, yaw_to_move_direction(ctx.yaw));
             observe.real_cost =
-                PlanningCommon::path_time_cost(prefix_end, observe_path) +
+                PlanningCommon::observe_route_time_cost(prefix_end, observe_path) +
                 PlanningCommon::yaw_turn_time_cost(ctx.yaw, observe.observe.view.target_yaw) +
                 observe.observe.view.penalty[0];
             suffix.real_cost = PlanningCommon::path_time_cost(
@@ -1101,8 +1108,9 @@ bool MacroPlanner::simulate_action(const SokobanLevel& level, point player, uint
 
     StaticArray<point, MAX_PATH_LENGTH> path;
     if (action.kind == MacroActionKind::OBSERVE) {
-        if (!PlanningCommon::get_grid_time_path(out_level, out_player, action.observe.view.pos, path)) return false;
-        out_cost = PlanningCommon::path_time_cost(out_player, path);
+        if (!PlanningCommon::get_optimized_observe_path(
+                out_level, out_player, action.observe.view.pos, path)) return false;
+        out_cost = PlanningCommon::observe_route_time_cost(out_player, path);
         out_player = action.observe.view.pos;
         out_observed |= action.observe.active_mask;
         return true;
@@ -1130,12 +1138,18 @@ bool MacroPlanner::simulate_action(const SokobanLevel& level, point player, uint
 int MacroPlanner::reference_access_cost(const SokobanLevel& level, point player, float observe_yaw, const MacroAction& reference_action) const {
     const int initial_dir = yaw_to_move_direction(observe_yaw);
     if (reference_action.kind == MacroActionKind::OBSERVE) {
-        uint16_t d = PlanningCommon::shortest_grid_time_cost(
-            level, player, reference_action.observe.view.pos, initial_dir);
-        if (d == 65535) return kInfScore;
-        return d + PlanningCommon::yaw_turn_time_cost(
-                   observe_yaw, reference_action.observe.view.target_yaw) +
-               reference_action.observe.view.penalty[0];
+        const uint32_t required_mask =
+            reference_action.observe.active_mask & ~knowledge_state.observed_mask;
+        if (required_mask == 0u) return 0;
+        ViewPose view = reference_action.observe.view;
+        StaticArray<point, MAX_PATH_LENGTH> path;
+        if (!PlanningCommon::optimize_observe_route(
+                level, player, required_mask, view, path, initial_dir)) {
+            return kInfScore;
+        }
+        return PlanningCommon::observe_route_time_cost(player, path, initial_dir) +
+               PlanningCommon::yaw_turn_time_cost(observe_yaw, view.target_yaw) +
+               view.penalty[0];
     }
 
     StaticArray<point, MAX_PATH_LENGTH> path;

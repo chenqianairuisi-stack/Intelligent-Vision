@@ -18,9 +18,9 @@ namespace MotionCost {
     // 路径方向发生变化时的停车和再启动惩罚，麦轮拐点停顿明显时应显著大于 GRID_MOVE
     inline constexpr uint16_t CORNER_STOP = 3;
     // 推箱宏层切换发力方向时的额外惩罚，避免等步数路径产生多余折线
-    inline constexpr uint16_t PUSH_DIRECTION_CHANGE = 4;
+    inline constexpr uint16_t PUSH_DIRECTION_CHANGE = 3;
     // 到达观测位后为了对准目标朝向产生的额外代价，不参与普通路径拐点统计
-    inline constexpr uint16_t OBSERVE_YAW = 6;
+    inline constexpr uint16_t OBSERVE_YAW = 5;
     // uint16_t 对外接口的饱和值，和旧 BFS 不可达返回值保持一致
     inline constexpr uint16_t INF = 65535;
 }
@@ -38,6 +38,7 @@ struct TimeHeapNode {
     int8_t x;      // 当前格子 x
     int8_t y;      // 当前格子 y
     uint8_t dir;   // 当前行进方向
+    uint8_t turns; // 不含起点方向变化的中间停顿次数
 };
 
 // 时间代价堆容量，16x16 地图下按状态数预留 8 倍冗余
@@ -46,6 +47,7 @@ static constexpr int TIME_HEAP_CAPACITY = MAP_CELL_COUNT * 8;
 /// \brief 带转向代价的网格搜索共享工作区
 struct TimeSearchWorkspace {
     uint32_t dist[MAP_MAX_HEIGHT][MAP_MAX_WIDTH][4]; // 每格每方向的最小代价
+    uint8_t turns[MAP_MAX_HEIGHT][MAP_MAX_WIDTH][4]; // 同代价状态优先保留更少停顿
     bool used[MAP_MAX_HEIGHT][MAP_MAX_WIDTH][4];     // Dijkstra 已确定状态标记
     bool blocked[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];     // 墙体和动态物体占用表
     TimeHeapNode heap[TIME_HEAP_CAPACITY];           // 固定容量最小堆
@@ -139,20 +141,29 @@ static void init_time_map(uint16_t out_cost[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]) {
 /// \param out_cost 输出每个格子的最小时间代价
 /// \param parent 可选输出每格每方向的父节点，用于回溯路径
 /// \param out_final_dir 可选输出到达每个格子的最短路径末段方向
+/// \param stop_at 可选固定终点，找到最优代价后提前结束
+/// \param out_stop_dir 可选输出固定终点的最优末段方向
 /// \return 搜索成功完成时返回 true，堆容量不足或起点非法时返回 false
 static bool run_grid_time_search(const SokobanLevel& lvl,
                                 point start,
                                 uint16_t out_cost[MAP_MAX_HEIGHT][MAP_MAX_WIDTH],
                                 TimeParent parent[MAP_MAX_HEIGHT][MAP_MAX_WIDTH][4],
                                 int initial_dir,
-                                uint8_t out_final_dir[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]) {
+                                uint8_t out_final_dir[MAP_MAX_HEIGHT][MAP_MAX_WIDTH],
+                                point stop_at = {-1, -1},
+                                int* out_stop_dir = nullptr) {
     TimeSearchWorkspace& ws = time_ws;
     build_blocked_map(lvl, ws.blocked);
     int heap_size = 0;
     bool heap_overflow = false;
+    const bool has_stop = in_bounds(stop_at) && parent && out_stop_dir;
+    uint32_t best_stop_cost = 0xFFFFFFFFu;
+    int best_stop_turns = 0x7FFFFFFF;
+    if (out_stop_dir) *out_stop_dir = -1;
 
     auto heap_less = [](const TimeHeapNode& a, const TimeHeapNode& b) {
-        return a.cost < b.cost;
+        return a.cost < b.cost ||
+               (a.cost == b.cost && a.turns < b.turns);
     };
     auto heap_push = [&](TimeHeapNode node) {
         if (heap_size >= TIME_HEAP_CAPACITY) {
@@ -198,6 +209,7 @@ static bool run_grid_time_search(const SokobanLevel& lvl,
         for (int x = 0; x < MAP_MAX_WIDTH; ++x) {
             for (int d = 0; d < 4; ++d) {
                 ws.dist[y][x][d] = 0xFFFFFFFFU;
+                ws.turns[y][x][d] = 255u;
                 ws.used[y][x][d] = false;
                 if (parent) parent[y][x][d] = {-1, -1, 255};
             }
@@ -215,18 +227,31 @@ static bool run_grid_time_search(const SokobanLevel& lvl,
             first_cost += MotionCost::CORNER_STOP;
         }
         ws.dist[np.y][np.x][d] = first_cost;
+        ws.turns[np.y][np.x][d] = 0u;
         out_cost[np.y][np.x] = clamp_time_cost(first_cost);
         if (parent) parent[np.y][np.x][d] = {start.x, start.y, 255};
-        heap_push({first_cost, np.x, np.y, static_cast<uint8_t>(d)});
+        heap_push({first_cost, np.x, np.y, static_cast<uint8_t>(d), 0u});
     }
 
     while (heap_size > 0) {
         TimeHeapNode node = heap_pop();
+        if (has_stop && node.cost > best_stop_cost) break;
         point cur{node.x, node.y};
         int cur_dir = node.dir;
         if (ws.used[cur.y][cur.x][cur_dir]) continue;
         if (node.cost != ws.dist[cur.y][cur.x][cur_dir]) continue;
+        if (node.turns != ws.turns[cur.y][cur.x][cur_dir]) continue;
         ws.used[cur.y][cur.x][cur_dir] = true;
+
+        if (has_stop && cur == stop_at) {
+            if (node.cost < best_stop_cost ||
+                (node.cost == best_stop_cost && node.turns < best_stop_turns)) {
+                best_stop_cost = node.cost;
+                best_stop_turns = node.turns;
+                *out_stop_dir = cur_dir;
+            }
+            continue;
+        }
 
         for (int nd = 0; nd < 4; ++nd) {
             point np = cur + MOVE[nd];
@@ -234,13 +259,21 @@ static bool run_grid_time_search(const SokobanLevel& lvl,
 
             uint32_t next_cost = node.cost + MotionCost::GRID_MOVE;
             if (nd != cur_dir) next_cost += MotionCost::CORNER_STOP;
-            if (next_cost >= ws.dist[np.y][np.x][nd]) continue;
+            const uint8_t next_turns = static_cast<uint8_t>(
+                node.turns + (nd != cur_dir ? 1u : 0u));
+            if (next_cost > ws.dist[np.y][np.x][nd]) continue;
+            if (next_cost == ws.dist[np.y][np.x][nd] &&
+                next_turns >= ws.turns[np.y][np.x][nd]) {
+                continue;
+            }
 
             ws.dist[np.y][np.x][nd] = next_cost;
+            ws.turns[np.y][np.x][nd] = next_turns;
             uint16_t clamped = clamp_time_cost(next_cost);
             if (clamped < out_cost[np.y][np.x]) out_cost[np.y][np.x] = clamped;
             if (parent) parent[np.y][np.x][nd] = {cur.x, cur.y, static_cast<uint8_t>(cur_dir)};
-            heap_push({next_cost, np.x, np.y, static_cast<uint8_t>(nd)});
+            heap_push({next_cost, np.x, np.y,
+                       static_cast<uint8_t>(nd), next_turns});
         }
     }
 
@@ -259,10 +292,14 @@ static bool run_grid_time_search(const SokobanLevel& lvl,
         for (int y = 0; y < MAP_MAX_HEIGHT; ++y) {
             for (int x = 0; x < MAP_MAX_WIDTH; ++x) {
                 uint32_t best = 0xFFFFFFFFU;
+                uint8_t best_turns = 255u;
                 uint8_t best_dir = 255;
                 for (int d = 0; d < 4; ++d) {
-                    if (ws.dist[y][x][d] < best) {
+                    if (ws.dist[y][x][d] < best ||
+                        (ws.dist[y][x][d] == best &&
+                         ws.turns[y][x][d] < best_turns)) {
                         best = ws.dist[y][x][d];
+                        best_turns = ws.turns[y][x][d];
                         best_dir = static_cast<uint8_t>(d);
                     }
                 }
@@ -352,7 +389,7 @@ bool has_entity(const SokobanLevel& lvl, int x, int y, int ignored_bomb) {
     return has_bomb(lvl, p, ignored_bomb);
 }
 
-// 生成目标点单槽位可见性，前五项是单目标候选，F1 斜角只允许参与联合观测
+// 生成目标点各几何槽位可见性，F1 斜角槽位由上层仅用于联合观测
 static void collect_target_observe_slots(const SokobanLevel& lvl,
                                          point view_pos,
                                          point f,
@@ -397,16 +434,27 @@ static void collect_target_observe_slots(const SokobanLevel& lvl,
         if (slot == ObservationConfig::TARGET_SLOT_F3) {
             return blocks_los(front) || blocks_los(front + f);
         }
+        if (slot == ObservationConfig::TARGET_SLOT_F1_LEFT ||
+            slot == ObservationConfig::TARGET_SLOT_F1_RIGHT) {
+            // 斜前方目标仍经过车头正前方，前方实体会遮挡目标点
+            return blocks_los(front);
+        }
         return false;
     };
-    auto far_target_has_joint_side_target = [&](point far_target) {
-        // F3 目标的左右目标可与其从更近的 F2 位姿联合观测时，不再保留单独 F3 候选
-        const point two_steps_front = view_pos + f + f;
-        const point side_targets[2] = {far_target + left, far_target + right};
-        const point side_rays[2] = {two_steps_front + left, two_steps_front + right};
+    auto far_target_has_visible_side_entity = [&](point far_target) {
+        // 检查 F1/F2/F3 左右六格，侧方存在无遮挡目标或箱子时淘汰 F3 候选
+        const point side_dirs[2] = {left, right};
         for (int side = 0; side < 2; ++side) {
-            if (target_id_at(side_targets[side]) < 0) continue;
-            if (!blocks_los(side_rays[side])) return true;
+            const point side_f1 = view_pos + f + side_dirs[side];
+            const point side_f2 = view_pos + f + f + side_dirs[side];
+            const point side_f3 = far_target + side_dirs[side];
+            auto has_observe_entity = [&](point p) {
+                return target_id_at(p) >= 0 || has_box(lvl, p);
+            };
+
+            if (has_observe_entity(side_f1)) return true;
+            if (has_observe_entity(side_f2) && !blocks_los(side_f1)) return true;
+            if (has_observe_entity(side_f3) && !blocks_los(side_f2)) return true;
         }
         return false;
     };
@@ -418,7 +466,7 @@ static void collect_target_observe_slots(const SokobanLevel& lvl,
         if (target_id < 0) continue;
         if (slot == ObservationConfig::TARGET_SLOT_F3 &&
             ObservationConfig::ENABLE_TARGET_JOINT_F2_DIAGONAL &&
-            far_target_has_joint_side_target(candidate.pos)) {
+            far_target_has_visible_side_entity(candidate.pos)) {
             continue;
         }
 
@@ -489,7 +537,7 @@ bool evaluate_observe_pose(const SokobanLevel& lvl,
 
     const int target_slot_count = ObservationConfig::ENABLE_TARGET_JOINT_F1_DIAGONAL
         ? ObservationConfig::TARGET_OBSERVE_SLOT_COUNT
-        : ObservationConfig::TARGET_SINGLE_SLOT_COUNT;
+        : ObservationConfig::TARGET_BASE_SLOT_COUNT;
     uint16_t max_penalty = 0u;
     bool has_target = false;
     for (int slot = 0; slot < target_slot_count; ++slot) {
@@ -502,6 +550,97 @@ bool evaluate_observe_pose(const SokobanLevel& lvl,
     if (out_mask == 0u) return false;
     out_penalty = has_target ? max_penalty : 0u;
     return true;
+}
+
+/// \brief 验证观测位姿是否存在覆盖请求实体的合法观测模式
+/// \param lvl 当前地图
+/// \param view_pos 候选观测位置
+/// \param target_yaw 候选观测朝向
+/// \param required_mask 本次动作必须覆盖的实体集合
+/// \param out_pattern_mask 实际支持请求的完整观测模式
+/// \param out_penalty 该模式的目标几何惩罚
+///
+/// \details
+/// F2 斜角可以单独观测，F1 斜角必须和 F2 正中目标组成联合观测
+/// required_mask 可以是完整模式的子集，用于兼容 N-1 裁剪和已观测目标
+static bool evaluate_legal_observe_pose(const SokobanLevel& lvl,
+                                        point view_pos,
+                                        float target_yaw,
+                                        uint32_t required_mask,
+                                        uint32_t& out_pattern_mask,
+                                        uint16_t& out_penalty) {
+    out_pattern_mask = 0u;
+    out_penalty = MotionCost::INF;
+    if (required_mask == 0u) return false;
+
+    uint32_t visible_mask = 0u;
+    uint16_t visible_penalty = 0u;
+    TargetObserveSlots target_slots{};
+    if (!evaluate_observe_pose(
+            lvl, view_pos, target_yaw,
+            visible_mask, visible_penalty, &target_slots)) {
+        return false;
+    }
+
+    const uint32_t box_mask = lvl.box_count == 0u
+        ? 0u
+        : (uint32_t{1u} << lvl.box_count) - 1u;
+    const uint32_t required_boxes = required_mask & box_mask;
+    const uint32_t required_targets = required_mask & ~box_mask;
+    if (required_boxes != 0u) {
+        if (required_targets != 0u ||
+            (visible_mask & required_boxes) != required_boxes) {
+            return false;
+        }
+        out_pattern_mask = required_boxes;
+        out_penalty = 0u;
+        return true;
+    }
+
+    auto consider_pattern = [&](int slot0, int slot1, int slot2) {
+        const int slots[3] = {slot0, slot1, slot2};
+        uint32_t pattern_mask = 0u;
+        uint16_t pattern_penalty = 0u;
+        for (int member = 0; member < 3; ++member) {
+            const int slot = slots[member];
+            if (slot < 0) continue;
+            if (target_slots.mask[slot] == 0u) return;
+            pattern_mask |= target_slots.mask[slot];
+            pattern_penalty = std::max(
+                pattern_penalty, target_slots.penalty[slot]);
+        }
+        if ((pattern_mask & required_targets) != required_targets) return;
+        if (out_pattern_mask == 0u || pattern_penalty < out_penalty) {
+            out_pattern_mask = pattern_mask;
+            out_penalty = pattern_penalty;
+        }
+    };
+
+    for (int slot = 0; slot < ObservationConfig::TARGET_BASE_SLOT_COUNT; ++slot) {
+        consider_pattern(slot, -1, -1);
+    }
+
+    const int core = ObservationConfig::TARGET_SLOT_F2_CORE;
+    const int f2_left = ObservationConfig::TARGET_SLOT_F2_LEFT;
+    const int f2_right = ObservationConfig::TARGET_SLOT_F2_RIGHT;
+    const int f1_left = ObservationConfig::TARGET_SLOT_F1_LEFT;
+    const int f1_right = ObservationConfig::TARGET_SLOT_F1_RIGHT;
+    if constexpr (ObservationConfig::ENABLE_TARGET_JOINT_F2_DIAGONAL) {
+        consider_pattern(core, f2_left, -1);
+        consider_pattern(core, f2_right, -1);
+        consider_pattern(core, f2_left, f2_right);
+    }
+    if constexpr (ObservationConfig::ENABLE_TARGET_JOINT_F1_DIAGONAL) {
+        consider_pattern(core, f1_left, -1);
+        consider_pattern(core, f1_right, -1);
+        consider_pattern(core, f1_left, f1_right);
+    }
+    if constexpr (ObservationConfig::ENABLE_TARGET_JOINT_F2_DIAGONAL &&
+                  ObservationConfig::ENABLE_TARGET_JOINT_F1_DIAGONAL) {
+        consider_pattern(core, f2_left, f1_right);
+        consider_pattern(core, f2_right, f1_left);
+    }
+    return out_pattern_mask != 0u;
 }
 
 // 判断格子是否为墙体或动态障碍，可临时忽略一个物体
@@ -859,41 +998,12 @@ bool get_grid_time_path(const SokobanLevel& lvl,
 
     uint16_t cost_map[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
     OCRAM_BSS static TimeParent parent[MAP_MAX_HEIGHT][MAP_MAX_WIDTH][4];
-    if (!run_grid_time_search(lvl, start, cost_map, parent, initial_dir, nullptr)) return false;
-    if (cost_map[end.y][end.x] == MotionCost::INF) return false;
-
     int best_dir = -1;
-    uint32_t best = 0xFFFFFFFFU;
-    for (int d = 0; d < 4; ++d) {
-        TimeParent p = parent[end.y][end.x][d];
-        if (p.x == -1) continue;
-
-        StaticArray<point, MAX_PATH_LENGTH> probe;
-        point curr = end;
-        int curr_dir = d;
-        bool ok = true;
-        while (!(curr == start)) {
-            probe.push_back(curr);
-            TimeParent pp = parent[curr.y][curr.x][curr_dir];
-            if (pp.x == -1) {
-                ok = false;
-                break;
-            }
-            curr = {pp.x, pp.y};
-            if (pp.dir == 255) break;
-            curr_dir = pp.dir;
-        }
-        if (!ok) continue;
-
-        std::reverse(probe.begin(), probe.end());
-        uint32_t c = path_time_cost(start, probe, initial_dir);
-        if (c < best) {
-            best = c;
-            best_dir = d;
-        }
+    if (!run_grid_time_search(
+            lvl, start, cost_map, parent, initial_dir, nullptr, end, &best_dir)) {
+        return false;
     }
-
-    if (best_dir < 0) return false;
+    if (cost_map[end.y][end.x] == MotionCost::INF || best_dir < 0) return false;
 
     point curr = end;
     int curr_dir = best_dir;
@@ -911,6 +1021,542 @@ bool get_grid_time_path(const SokobanLevel& lvl,
 
     std::reverse(out_path.begin(), out_path.end());
     return true;
+}
+
+// ============================================================================
+// 观测路径任意斜率优化
+// ============================================================================
+
+namespace {
+    inline constexpr int OBS_ROUTE_MAX_CORNERS = 64;
+    inline constexpr int OBS_ROUTE_CANDIDATES_PER_CORNER = 5;
+    inline constexpr int OBS_ROUTE_MAX_NODES =
+        OBS_ROUTE_MAX_CORNERS * OBS_ROUTE_CANDIDATES_PER_CORNER;
+    inline constexpr int OBS_ROUTE_MAX_OBSTACLES =
+        MAP_MAX_WIDTH * MAP_MAX_HEIGHT + MAX_BOXES + MAX_BOMBS;
+    inline constexpr uint32_t OBS_ROUTE_COST_SCALE = 100u;
+    // 障碍格半宽 0.5，再预留约 0.46 格车体扫掠范围
+    inline constexpr float OBS_ROUTE_BLOCK_HALF_EXTENT = 0.96f;
+
+    struct ObserveRouteNode {
+        point pos;
+        uint8_t layer;
+    };
+
+    struct ObserveRouteLayer {
+        uint16_t begin;
+        uint16_t count;
+    };
+
+    struct ObserveRouteWorkspace {
+        point corners[OBS_ROUTE_MAX_CORNERS];
+        ObserveRouteNode nodes[OBS_ROUTE_MAX_NODES];
+        ObserveRouteLayer layers[OBS_ROUTE_MAX_CORNERS];
+        uint32_t dist[OBS_ROUTE_MAX_NODES];
+        int16_t parent[OBS_ROUTE_MAX_NODES];
+        point reversed[OBS_ROUTE_MAX_NODES];
+        point obstacles[OBS_ROUTE_MAX_OBSTACLES];
+        uint16_t obstacle_count;
+    };
+
+    // 路径后处理工作区只在观测动作落地时使用，放 OCRAM 避免占用主循环栈和 DTCM
+    OCRAM_BSS static ObserveRouteWorkspace observe_route_ws;
+
+    static bool same_move_heading(point a, point b) {
+        const int cross = static_cast<int>(a.x) * b.y - static_cast<int>(a.y) * b.x;
+        const int dot = static_cast<int>(a.x) * b.x + static_cast<int>(a.y) * b.y;
+        return cross == 0 && dot > 0;
+    }
+
+    // 只统计移动折线内部的方向变化，不计当前车头朝向
+    static int observe_route_turn_count(
+        point start,
+        const StaticArray<point, MAX_PATH_LENGTH>& path) {
+        int turns = 0;
+        point previous = start;
+        point previous_delta{0, 0};
+        bool has_previous_delta = false;
+        for (int i = 0; i < path.size(); ++i) {
+            const point current = path[i];
+            const point delta = current - previous;
+            if (delta.x == 0 && delta.y == 0) continue;
+            if (has_previous_delta && !same_move_heading(previous_delta, delta)) {
+                ++turns;
+            }
+            previous = current;
+            previous_delta = delta;
+            has_previous_delta = true;
+        }
+        return turns;
+    }
+
+    // 判断航点折线是否实际使用了非水平、非垂直移动
+    static bool observe_route_has_diagonal_segment(
+        point start,
+        const StaticArray<point, MAX_PATH_LENGTH>& path) {
+        point previous = start;
+        for (int i = 0; i < path.size(); ++i) {
+            const point current = path[i];
+            if (current.x != previous.x && current.y != previous.y) return true;
+            previous = current;
+        }
+        return false;
+    }
+
+    static uint32_t observe_segment_cost(point from, point to) {
+        const int dx = static_cast<int>(to.x) - from.x;
+        const int dy = static_cast<int>(to.y) - from.y;
+        const float length = std::sqrt(static_cast<float>(dx * dx + dy * dy));
+        return static_cast<uint32_t>(length * OBS_ROUTE_COST_SCALE + 0.5f);
+    }
+
+    static uint32_t observe_route_precise_cost(
+        point start,
+        const StaticArray<point, MAX_PATH_LENGTH>& path,
+        int initial_dir) {
+        uint32_t cost = 0u;
+        point previous = start;
+        point previous_delta{0, 0};
+        bool has_previous_delta = false;
+        if (initial_dir >= 0 && initial_dir < 4) {
+            previous_delta = MOVE[initial_dir];
+            has_previous_delta = true;
+        }
+
+        for (int i = 0; i < path.size(); ++i) {
+            const point current = path[i];
+            const point delta = current - previous;
+            if (delta.x == 0 && delta.y == 0) continue;
+
+            cost += observe_segment_cost(previous, current);
+            if (has_previous_delta && !same_move_heading(previous_delta, delta)) {
+                cost += static_cast<uint32_t>(MotionCost::CORNER_STOP) *
+                        OBS_ROUTE_COST_SCALE;
+            }
+            previous = current;
+            previous_delta = delta;
+            has_previous_delta = true;
+        }
+        return cost;
+    }
+
+    static bool clip_segment_axis(float p, float q, float& t_min, float& t_max) {
+        constexpr float EPS = 1.0e-6f;
+        if (std::abs(p) < EPS) return q >= 0.0f;
+        const float r = q / p;
+        if (p < 0.0f) {
+            if (r > t_max) return false;
+            if (r > t_min) t_min = r;
+        } else {
+            if (r < t_min) return false;
+            if (r < t_max) t_max = r;
+        }
+        return true;
+    }
+
+    // 用线段和扩张后的障碍格 AABB 相交测试近似车体扫掠范围
+    static bool segment_intersects_cell(point from, point to, point cell, float half_extent) {
+        const float x0 = static_cast<float>(from.x);
+        const float y0 = static_cast<float>(from.y);
+        const float dx = static_cast<float>(to.x - from.x);
+        const float dy = static_cast<float>(to.y - from.y);
+        const float min_x = static_cast<float>(cell.x) - half_extent;
+        const float max_x = static_cast<float>(cell.x) + half_extent;
+        const float min_y = static_cast<float>(cell.y) - half_extent;
+        const float max_y = static_cast<float>(cell.y) + half_extent;
+        float t_min = 0.0f;
+        float t_max = 1.0f;
+
+        return clip_segment_axis(-dx, x0 - min_x, t_min, t_max) &&
+               clip_segment_axis( dx, max_x - x0, t_min, t_max) &&
+               clip_segment_axis(-dy, y0 - min_y, t_min, t_max) &&
+               clip_segment_axis( dy, max_y - y0, t_min, t_max) &&
+               t_min <= t_max;
+    }
+
+    // 每条路线只构建一次障碍列表，供后续所有可见边碰撞检测复用
+    static void prepare_observe_route_obstacles(const SokobanLevel& lvl) {
+        ObserveRouteWorkspace& ws = observe_route_ws;
+        ws.obstacle_count = 0u;
+        for (int y = 0; y < MAP_MAX_HEIGHT; ++y) {
+            for (int x = 0; x < MAP_MAX_WIDTH; ++x) {
+                if (lvl.map[y][x] != 1) continue;
+                ws.obstacles[ws.obstacle_count++] = {
+                    static_cast<int8_t>(x), static_cast<int8_t>(y)};
+            }
+        }
+        for (int b = 0; b < lvl.box_count; ++b) {
+            ws.obstacles[ws.obstacle_count++] = lvl.boxes[b];
+        }
+        for (int b = 0; b < lvl.bomb_count; ++b) {
+            if (lvl.bombs[b].x == -1) continue;
+            ws.obstacles[ws.obstacle_count++] = lvl.bombs[b];
+        }
+    }
+
+    static bool observe_segment_clear(point from, point to) {
+        if (!in_bounds(from) || !in_bounds(to)) return false;
+        if (from == to) return true;
+
+        const ObserveRouteWorkspace& ws = observe_route_ws;
+        for (int i = 0; i < ws.obstacle_count; ++i) {
+            if (segment_intersects_cell(
+                    from, to, ws.obstacles[i], OBS_ROUTE_BLOCK_HALF_EXTENT)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static bool build_observe_route_corners(
+        point start,
+        const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
+        int& out_count) {
+        ObserveRouteWorkspace& ws = observe_route_ws;
+        out_count = 0;
+        ws.corners[out_count++] = start;
+
+        point last = start;
+        point previous_delta{0, 0};
+        bool has_direction = false;
+        for (int i = 0; i < raw_path.size(); ++i) {
+            const point current = raw_path[i];
+            if (current == last) continue;
+            const point delta = current - last;
+            if (has_direction && !same_move_heading(previous_delta, delta)) {
+                if (out_count >= OBS_ROUTE_MAX_CORNERS) return false;
+                ws.corners[out_count++] = last;
+            }
+            last = current;
+            previous_delta = delta;
+            has_direction = true;
+        }
+
+        if (last != ws.corners[out_count - 1]) {
+            if (out_count >= OBS_ROUTE_MAX_CORNERS) return false;
+            ws.corners[out_count++] = last;
+        }
+        return true;
+    }
+
+    static bool append_route_node(int layer,
+                                  point candidate,
+                                  const SokobanLevel& lvl,
+                                  int& node_count) {
+        ObserveRouteWorkspace& ws = observe_route_ws;
+        if (!in_bounds(candidate) || is_obstacle(lvl, candidate)) return false;
+        const ObserveRouteLayer& route_layer = ws.layers[layer];
+        for (int i = route_layer.begin; i < node_count; ++i) {
+            if (ws.nodes[i].pos == candidate) return false;
+        }
+        if (node_count >= OBS_ROUTE_MAX_NODES) return false;
+        ws.nodes[node_count++] = {candidate, static_cast<uint8_t>(layer)};
+        return true;
+    }
+
+    /// \brief 在原网格路径附近搜索任意斜率观测航点
+    ///
+    /// \details
+    /// 先压缩原路径拐点，再为每个中间拐点加入上下左右候选
+    /// 分层 DAG 只允许向原路径后方连边，因此删除或移动航点后仍会接回固定后缀
+    static bool optimize_observe_waypoints(
+        const SokobanLevel& lvl,
+        point start,
+        const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
+        StaticArray<point, MAX_PATH_LENGTH>& out_path,
+        int initial_dir) {
+        out_path.clear();
+        if (raw_path.empty()) return true;
+
+        ObserveRouteWorkspace& ws = observe_route_ws;
+        int corner_count = 0;
+        if (!build_observe_route_corners(start, raw_path, corner_count) ||
+            corner_count < 2) {
+            out_path = raw_path;
+            return true;
+        }
+
+        int node_count = 0;
+        for (int layer = 0; layer < corner_count; ++layer) {
+            ws.layers[layer] = {static_cast<uint16_t>(node_count), 0u};
+            const point original = ws.corners[layer];
+            if (layer == 0 || layer == corner_count - 1) {
+                append_route_node(layer, original, lvl, node_count);
+            } else {
+                append_route_node(layer, original, lvl, node_count);
+                for (int d = 0; d < 4; ++d) {
+                    append_route_node(layer, original + MOVE[d], lvl, node_count);
+                }
+            }
+            ws.layers[layer].count = static_cast<uint16_t>(
+                node_count - ws.layers[layer].begin);
+            if (ws.layers[layer].count == 0u) {
+                out_path = raw_path;
+                return true;
+            }
+        }
+
+        for (int i = 0; i < node_count; ++i) {
+            ws.dist[i] = 0xFFFFFFFFu;
+            ws.parent[i] = -1;
+        }
+        const int start_node = ws.layers[0].begin;
+        ws.dist[start_node] = 0u;
+
+        // 分层图天然是 DAG，只允许向原路径后方连边，移动航点不会破坏后续拓扑
+        for (int layer = 0; layer + 1 < corner_count; ++layer) {
+            const ObserveRouteLayer& from_layer = ws.layers[layer];
+            for (int local = 0; local < from_layer.count; ++local) {
+                const int from_idx = from_layer.begin + local;
+                if (ws.dist[from_idx] == 0xFFFFFFFFu) continue;
+
+                for (int next_layer = layer + 1;
+                     next_layer < corner_count;
+                     ++next_layer) {
+                    const ObserveRouteLayer& to_layer = ws.layers[next_layer];
+                    for (int next_local = 0; next_local < to_layer.count; ++next_local) {
+                        const int to_idx = to_layer.begin + next_local;
+                        const point from = ws.nodes[from_idx].pos;
+                        const point to = ws.nodes[to_idx].pos;
+                        if (from == to || !observe_segment_clear(from, to)) continue;
+
+                        uint32_t edge_cost = observe_segment_cost(from, to);
+                        if (next_layer + 1 < corner_count) {
+                            edge_cost += static_cast<uint32_t>(MotionCost::CORNER_STOP) *
+                                         OBS_ROUTE_COST_SCALE;
+                        }
+                        if (layer == 0 && initial_dir >= 0 && initial_dir < 4 &&
+                            !same_move_heading(MOVE[initial_dir], to - from)) {
+                            edge_cost += static_cast<uint32_t>(MotionCost::CORNER_STOP) *
+                                         OBS_ROUTE_COST_SCALE;
+                        }
+
+                        const uint32_t next_cost = ws.dist[from_idx] + edge_cost;
+                        if (next_cost >= ws.dist[to_idx]) continue;
+                        ws.dist[to_idx] = next_cost;
+                        ws.parent[to_idx] = static_cast<int16_t>(from_idx);
+                    }
+                }
+            }
+        }
+
+        const int end_node = ws.layers[corner_count - 1].begin;
+        if (ws.dist[end_node] == 0xFFFFFFFFu) {
+            out_path = raw_path;
+            return true;
+        }
+
+        int reverse_count = 0;
+        for (int node = end_node; node != start_node; node = ws.parent[node]) {
+            if (node < 0 || reverse_count >= OBS_ROUTE_MAX_NODES) {
+                out_path = raw_path;
+                return true;
+            }
+            ws.reversed[reverse_count++] = ws.nodes[node].pos;
+        }
+        for (int i = reverse_count - 1; i >= 0; --i) {
+            if (out_path.size() >= MAX_PATH_LENGTH) {
+                out_path = raw_path;
+                return true;
+            }
+            out_path.push_back(ws.reversed[i]);
+        }
+
+        // 拐点数不严格减少时保留原路径，避免只为微小距离收益改变路线
+        const int raw_turns = observe_route_turn_count(start, raw_path);
+        const int optimized_turns = observe_route_turn_count(start, out_path);
+        const uint32_t raw_cost = observe_route_precise_cost(
+            start, raw_path, initial_dir);
+        const uint32_t optimized_cost = observe_route_precise_cost(
+            start, out_path, initial_dir);
+        if (optimized_turns >= raw_turns || optimized_cost >= raw_cost) {
+            out_path = raw_path;
+        }
+        return true;
+    }
+}
+
+/// \brief 生成固定终点的任意斜率观测路径
+bool get_optimized_observe_path(const SokobanLevel& lvl,
+                                point start,
+                                point end,
+                                StaticArray<point, MAX_PATH_LENGTH>& out_path,
+                                int initial_dir) {
+    out_path.clear();
+    if (start == end) return true;
+    // 无碰撞直线已达到欧氏距离下界，无需先运行网格寻路
+    if (ObserveRouteConfig::ENABLE_OBSERVE_ROUTE_OPTIMIZATION) {
+        prepare_observe_route_obstacles(lvl);
+        if (observe_segment_clear(start, end)) {
+            out_path.push_back(end);
+            return true;
+        }
+    }
+
+    // 基准路径必须包含转向代价，否则普通 BFS 的同长折线可能虚增拐点
+    StaticArray<point, MAX_PATH_LENGTH> raw_path;
+    if (!get_grid_time_path(lvl, start, end, raw_path, initial_dir)) return false;
+    if (!ObserveRouteConfig::ENABLE_OBSERVE_ROUTE_OPTIMIZATION) {
+        out_path = raw_path;
+        return true;
+    }
+    return optimize_observe_waypoints(lvl, start, raw_path, out_path, initial_dir);
+}
+
+/// \brief 在参考观测点邻域中联合选择终点和任意斜率路径
+bool optimize_observe_route(const SokobanLevel& lvl,
+                            point start,
+                            uint32_t required_mask,
+                            ViewPose& inout_view,
+                            StaticArray<point, MAX_PATH_LENGTH>& out_path,
+                            int initial_dir) {
+    out_path.clear();
+    if (required_mask == 0u) return false;
+
+    const ViewPose original_view = inout_view;
+    StaticArray<point, MAX_PATH_LENGTH> baseline_path;
+    uint32_t baseline_pattern_mask = 0u;
+    uint16_t baseline_observe_penalty = 0u;
+    const bool baseline_pose_valid = evaluate_legal_observe_pose(
+        lvl, original_view.pos, original_view.target_yaw,
+        required_mask, baseline_pattern_mask, baseline_observe_penalty);
+    const bool baseline_valid = baseline_pose_valid && get_grid_time_path(
+        lvl, start, original_view.pos, baseline_path, initial_dir);
+
+    int baseline_turns = 0;
+    uint32_t baseline_score = 0u;
+    bool found = false;
+    uint32_t best_score = 0xFFFFFFFFu;
+    ViewPose best_view = original_view;
+    StaticArray<point, MAX_PATH_LENGTH> best_path;
+    if (baseline_valid) {
+        baseline_turns = observe_route_turn_count(start, baseline_path);
+        baseline_score = observe_route_precise_cost(
+            start, baseline_path, initial_dir) +
+            static_cast<uint32_t>(baseline_observe_penalty) *
+                OBS_ROUTE_COST_SCALE;
+        found = true;
+        best_score = baseline_score;
+        best_view.mask[0] = baseline_pattern_mask & required_mask;
+        best_view.penalty[0] = baseline_observe_penalty;
+        best_path = baseline_path;
+    }
+
+    StaticArray<point, 16> endpoint_candidates;
+    bool fixed_endpoint_diagonal_improved = false;
+    if (baseline_valid && ObserveRouteConfig::ENABLE_OBSERVE_ROUTE_OPTIMIZATION) {
+        StaticArray<point, MAX_PATH_LENGTH> fixed_path;
+        if (get_optimized_observe_path(
+                lvl, start, original_view.pos, fixed_path, initial_dir)) {
+            const uint32_t fixed_score = observe_route_precise_cost(
+                start, fixed_path, initial_dir) +
+                static_cast<uint32_t>(baseline_observe_penalty) *
+                    OBS_ROUTE_COST_SCALE;
+            const int fixed_turns = observe_route_turn_count(start, fixed_path);
+            if (fixed_turns < baseline_turns && fixed_score < baseline_score) {
+                fixed_endpoint_diagonal_improved =
+                    observe_route_has_diagonal_segment(start, fixed_path);
+                best_score = fixed_score;
+                best_view = original_view;
+                best_view.mask[0] = baseline_pattern_mask & required_mask;
+                best_view.penalty[0] = baseline_observe_penalty;
+                best_path = fixed_path;
+            }
+        }
+    }
+
+    const int original_dx = static_cast<int>(original_view.pos.x) - start.x;
+    const int original_dy = static_cast<int>(original_view.pos.y) - start.y;
+    const bool original_requires_diagonal = original_dx != 0 && original_dy != 0;
+    bool original_direct_diagonal_blocked = false;
+    if (baseline_valid && original_requires_diagonal &&
+        ObserveRouteConfig::ENABLE_OBSERVE_ROUTE_OPTIMIZATION) {
+        prepare_observe_route_obstacles(lvl);
+        original_direct_diagonal_blocked =
+            !observe_segment_clear(start, original_view.pos);
+    }
+
+    // 邻域改点只用于原点直斜线受阻且固定终点斜向优化也无法减少停顿的情况
+    if (baseline_valid &&
+        ObserveRouteConfig::ENABLE_OBSERVE_ROUTE_OPTIMIZATION &&
+        ObserveRouteConfig::ENABLE_OBSERVE_ENDPOINT_ADJUST &&
+        original_direct_diagonal_blocked &&
+        !fixed_endpoint_diagonal_improved) {
+        const int radius = ObserveRouteConfig::ENDPOINT_ADJUST_RADIUS;
+        for (int dy = -radius; dy <= radius; ++dy) {
+            for (int dx = -radius; dx <= radius; ++dx) {
+                if (dx == 0 && dy == 0) continue;
+                if (std::abs(dx) + std::abs(dy) > radius) continue;
+                endpoint_candidates.push_back({
+                    static_cast<int8_t>(original_view.pos.x + dx),
+                    static_cast<int8_t>(original_view.pos.y + dy)
+                });
+            }
+        }
+    }
+
+    for (int i = 0; i < endpoint_candidates.size(); ++i) {
+        const point endpoint = endpoint_candidates[i];
+        uint32_t pattern_mask = 0u;
+        uint16_t observe_penalty = 0u;
+        if (!evaluate_legal_observe_pose(
+                lvl, endpoint, original_view.target_yaw,
+                required_mask, pattern_mask, observe_penalty)) {
+            continue;
+        }
+
+        StaticArray<point, MAX_PATH_LENGTH> candidate_path;
+        if (!get_optimized_observe_path(
+                lvl, start, endpoint, candidate_path, initial_dir)) {
+            continue;
+        }
+        if (!observe_route_has_diagonal_segment(start, candidate_path)) continue;
+        const uint32_t score = observe_route_precise_cost(
+            start, candidate_path, initial_dir) +
+            static_cast<uint32_t>(observe_penalty) * OBS_ROUTE_COST_SCALE;
+        const int candidate_turns = observe_route_turn_count(start, candidate_path);
+        if (baseline_valid &&
+            (candidate_turns >= baseline_turns || score >= baseline_score)) {
+            continue;
+        }
+        if (found && score >= best_score) continue;
+
+        found = true;
+        best_score = score;
+        best_view = original_view;
+        best_view.pos = endpoint;
+        best_view.mask[0] = pattern_mask & required_mask;
+        best_view.penalty[0] = observe_penalty;
+        best_path = candidate_path;
+    }
+
+    if (!found) return false;
+    inout_view = best_view;
+    out_path = best_path;
+    return true;
+}
+
+uint16_t observe_route_time_cost(point start,
+                                 const StaticArray<point, MAX_PATH_LENGTH>& path,
+                                 int initial_dir) {
+    const uint32_t precise = observe_route_precise_cost(start, path, initial_dir);
+    return clamp_time_cost(
+        (precise + OBS_ROUTE_COST_SCALE / 2u) / OBS_ROUTE_COST_SCALE);
+}
+
+bool path_crosses_cell(point start,
+                       const StaticArray<point, MAX_PATH_LENGTH>& path,
+                       point cell) {
+    point previous = start;
+    if (previous == cell) return true;
+    for (int i = 0; i < path.size(); ++i) {
+        const point current = path[i];
+        if (current == cell || segment_intersects_cell(previous, current, cell, 0.5f)) {
+            return true;
+        }
+        previous = current;
+    }
+    return false;
 }
 
 /// \brief 计算两次观测朝向之间的转向代价

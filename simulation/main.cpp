@@ -681,7 +681,7 @@ int main() {
                 StaticArray<point, MAX_PATH_LENGTH> segment;
                 switch (task.type) {
                     case TaskType::LOAD_PATH_OBS:
-                        task_done = PlanningCommon::get_grid_time_path(
+                        task_done = PlanningCommon::get_optimized_observe_path(
                             logical_level, logical_level.player_start, task.param.target_grid, segment);
                         if (task_done) {
                             append_path_strings(segment, patrol_out);

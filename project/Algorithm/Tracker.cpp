@@ -51,22 +51,13 @@ namespace {
     DTCM_DATA uint32_t s_vision_restart_tick = 0U;    // 上次从保持态解冻的时刻，供黑窗计时
     DTCM_DATA bool s_vision_blackout_active = false;  // 解冻后取新帧黑窗是否生效中
 
-    [[gnu::always_inline]] inline int sign_delta(int delta) {
-        return (delta > 0) - (delta < 0);
-    }
-
     [[gnu::always_inline]] inline bool same_direction(point a, point b, point c) {
-        // 只比较方向符号，连续走多格仍然算同向直线
-        return sign_delta(b.x - a.x) == sign_delta(c.x - b.x) &&
-                sign_delta(b.y - a.y) == sign_delta(c.y - b.y);
-    }
-
-    [[gnu::always_inline]] inline int manhattan(point a, point b) {
-        int dx = a.x - b.x;
-        int dy = a.y - b.y;
-        if (dx < 0) dx = -dx;
-        if (dy < 0) dy = -dy;
-        return dx + dy;
+        const int abx = static_cast<int>(b.x) - a.x;
+        const int aby = static_cast<int>(b.y) - a.y;
+        const int bcx = static_cast<int>(c.x) - b.x;
+        const int bcy = static_cast<int>(c.y) - b.y;
+        // 任意斜率必须同时满足共线和同向，不能只比较 X/Y 符号
+        return abx * bcy == aby * bcx && abx * bcx + aby * bcy > 0;
     }
 
     [[gnu::always_inline]] inline float clamp_float(float v, float lo, float hi) {
@@ -381,26 +372,19 @@ namespace {
         const Pose2D pose = Subsystem::PoseEstimator::get_encoder_pose();
         float sx = target.x - segment_start.x;
         float sy = target.y - segment_start.y;
-        float abs_sx = std::abs(sx);
-        float abs_sy = std::abs(sy);
+        float length_sq = sx * sx + sy * sy;
+        if (length_sq <= 0.001f) return false;
+        float inv_length = 1.0f / std::sqrt(length_sq);
+        float unit_x = sx * inv_length;
+        float unit_y = sy * inv_length;
         float switch_window = corner_switch_window();
         float line_tolerance = corner_line_tolerance();
-
-        if (abs_sx >= abs_sy && abs_sx > 0.001f) {
-            float dir = sx >= 0.0f ? 1.0f : -1.0f;
-            float remaining = (target.x - pose.x) * dir;
-            float lateral_err = std::abs(target.y - pose.y);
-            return remaining <= switch_window && lateral_err <= line_tolerance;
-        }
-
-        if (abs_sy > 0.001f) {
-            float dir = sy >= 0.0f ? 1.0f : -1.0f;
-            float remaining = (target.y - pose.y) * dir;
-            float lateral_err = std::abs(target.x - pose.x);
-            return remaining <= switch_window && lateral_err <= line_tolerance;
-        }
-
-        return false;
+        float remaining = (target.x - pose.x) * unit_x +
+                          (target.y - pose.y) * unit_y;
+        float rel_x = pose.x - segment_start.x;
+        float rel_y = pose.y - segment_start.y;
+        float lateral_err = std::abs(rel_x * unit_y - rel_y * unit_x);
+        return remaining <= switch_window && lateral_err <= line_tolerance;
     }
 
     // 没有可信逻辑起点时，沿用原路径首点作为压缩起点
@@ -451,9 +435,9 @@ static void load_path_impl(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
     bool can_use_start = false;
     bool raw_includes_start = false;
     if (has_start_grid && valid_grid(start_grid)) {
-        // 路径有时从当前位置开始，有时从下一格开始，两种都允许用逻辑起点做压缩参考
+        // 观测优化路径首航点可以跨多格，仍用真实逻辑起点做共线和视觉基准
         raw_includes_start = (raw_path[0] == start_grid);
-        can_use_start = raw_includes_start || manhattan(start_grid, raw_path[0]) == 1;
+        can_use_start = true;
     }
 
     if (can_use_start) {
