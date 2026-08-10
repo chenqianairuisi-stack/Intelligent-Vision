@@ -11,6 +11,7 @@ from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QP
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QCheckBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -38,6 +39,17 @@ MAP_INPUT_PATH = os.path.join(VISUALIZER_DIR, "map_input.txt")
 PATH_OUTPUT_PATH = os.path.join(VISUALIZER_DIR, "path_output.txt")
 SETTINGS_PATH = os.path.join(VISUALIZER_DIR, "visualizer_settings.json")
 DEFAULT_MAP_DIR = os.path.join(PROJECT_DIR, "map", "map_game")
+
+MOVE_STEP_COST = 1
+STOP_NODE_COST = 2
+OBSERVE_EXTRA_COST = 1
+TURN_EXTRA_COST = 2
+DEFAULT_COST_MODEL = (
+    MOVE_STEP_COST,
+    STOP_NODE_COST,
+    OBSERVE_EXTRA_COST,
+    TURN_EXTRA_COST,
+)
 
 BOMB_COLORS = ["#e67e22", "#1abc9c", "#e74c3c", "#f39c12", "#8e44ad"]
 PLAYBACK_SPEEDS = [1.0, 2.0, 4.0, 0.5]
@@ -77,15 +89,19 @@ class SolverThread(QThread):
     finished_ok = Signal()
     failed = Signal(str)
 
-    def __init__(self, solver_path, cwd, parent=None):
+    def __init__(self, solver_path, solver_args, cwd, parent=None):
         super().__init__(parent)
         self.solver_path = solver_path
+        self.solver_args = solver_args
         self.cwd = cwd
         self.process = None
 
     def run(self):
         try:
-            self.process = subprocess.Popen([self.solver_path], cwd=self.cwd)
+            self.process = subprocess.Popen(
+                [self.solver_path, *self.solver_args],
+                cwd=self.cwd,
+            )
             self.process.wait()
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -151,6 +167,7 @@ class SokobanVisualizerQt(QMainWindow):
         self.current_phase = 1
         self.discovered_entities = set()
         self.build_info = ""
+        self.cost_model = DEFAULT_COST_MODEL
         self.anim_step = 0
         self.playback_paused = False
         self.animation_finished = True
@@ -213,6 +230,7 @@ class SokobanVisualizerQt(QMainWindow):
         self.map_name_label.setObjectName("mapName")
         sidebar_layout.addWidget(self.build_section("地图", self.build_map_controls(), title_extra=self.map_name_label))
         sidebar_layout.addWidget(self.build_section(None, self.build_semantic_controls()))
+        sidebar_layout.addWidget(self.build_section("仿真参数", self.build_simulation_controls()))
         playback_controls = self.build_playback_controls()
         sidebar_layout.addWidget(self.build_section(
             "播放",
@@ -425,6 +443,27 @@ class SokobanVisualizerQt(QMainWindow):
         row.addWidget(edit)
         return row
 
+    def build_simulation_controls(self):
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(5)
+
+        self.diagonal_move_checkbox = QCheckBox("斜向移动")
+        self.box_extra_observe_checkbox = QCheckBox("箱子额外观测位")
+        self.target_extra_observe_checkbox = QCheckBox("目标点额外观测位")
+        switches = [
+            (self.diagonal_move_checkbox, "simulation_diagonal_move"),
+            (self.box_extra_observe_checkbox, "simulation_box_extra_observe"),
+            (self.target_extra_observe_checkbox, "simulation_target_extra_observe"),
+        ]
+        for checkbox, setting_key in switches:
+            checkbox.setChecked(bool(self.user_settings.get(setting_key, True)))
+            checkbox.setToolTip("仅影响仿真求解器进程")
+            checkbox.toggled.connect(self.save_simulation_switches)
+            layout.addWidget(checkbox)
+        return wrapper
+
     def build_playback_controls(self):
         wrapper = QWidget()
         layout = QVBoxLayout(wrapper)
@@ -507,7 +546,7 @@ class SokobanVisualizerQt(QMainWindow):
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(6)
-        headers = ["", "步数", "拐点", "旋转", "总代价"]
+        headers = ["", "步数", "拐点", "观测", "转向", "总代价"]
         for col, text in enumerate(headers):
             label = QLabel(text)
             label.setObjectName("tableHeader")
@@ -521,7 +560,7 @@ class SokobanVisualizerQt(QMainWindow):
             label.setMinimumHeight(24)
             grid.addWidget(label, row, 0)
             self.cost_value_labels[name] = []
-            for col in range(1, 5):
+            for col in range(1, 6):
                 value = QLabel("--")
                 value.setObjectName("tableValue")
                 value.setAlignment(Qt.AlignRight)
@@ -739,6 +778,12 @@ class SokobanVisualizerQt(QMainWindow):
                 json.dump(self.user_settings, f, ensure_ascii=False, indent=2)
         except OSError:
             pass
+
+    def save_simulation_switches(self, _checked=False):
+        self.user_settings["simulation_diagonal_move"] = self.diagonal_move_checkbox.isChecked()
+        self.user_settings["simulation_box_extra_observe"] = self.box_extra_observe_checkbox.isChecked()
+        self.user_settings["simulation_target_extra_observe"] = self.target_extra_observe_checkbox.isChecked()
+        self.save_user_settings()
 
     def save_current_car_start(self):
         try:
@@ -980,9 +1025,9 @@ class SokobanVisualizerQt(QMainWindow):
 
     def update_cost_table(self, patrol=None, sokoban=None, total=None):
         data = {
-            "寻图": patrol or ("--", "--", "--", "--"),
-            "推箱": sokoban or ("--", "--", "--", "--"),
-            "总计": total or ("--", "--", "--", "--"),
+            "寻图": patrol or ("--", "--", "--", "--", "--"),
+            "推箱": sokoban or ("--", "--", "--", "--", "--"),
+            "总计": total or ("--", "--", "--", "--", "--"),
         }
         for name, values in data.items():
             for label, value in zip(self.cost_value_labels[name], values):
@@ -994,6 +1039,12 @@ class SokobanVisualizerQt(QMainWindow):
         self.pause_btn.setText("Resume" if self.playback_paused else "Pause")
         self.step_btn.setEnabled(can_control)
         self.solve_btn.setEnabled(not self.is_solver_running)
+        for checkbox in [
+            self.diagonal_move_checkbox,
+            self.box_extra_observe_checkbox,
+            self.target_extra_observe_checkbox,
+        ]:
+            checkbox.setEnabled(not self.is_solver_running)
         self.update_title_button_icons()
 
     def playback_speed_label(self):
@@ -1137,7 +1188,12 @@ class SokobanVisualizerQt(QMainWindow):
 
         self.is_solver_running = True
         self.update_playback_controls()
-        self.solver_thread = SolverThread(SOLVER_PATH, VISUALIZER_DIR, self)
+        solver_args = [
+            f"--diagonal-move={int(self.diagonal_move_checkbox.isChecked())}",
+            f"--box-extra-observe={int(self.box_extra_observe_checkbox.isChecked())}",
+            f"--target-extra-observe={int(self.target_extra_observe_checkbox.isChecked())}",
+        ]
+        self.solver_thread = SolverThread(SOLVER_PATH, solver_args, VISUALIZER_DIR, self)
         self.solver_thread.finished_ok.connect(self.parse_and_play)
         self.solver_thread.failed.connect(self.on_solver_failed)
         self.solver_thread.finished.connect(self.on_solver_thread_finished)
@@ -1162,6 +1218,7 @@ class SokobanVisualizerQt(QMainWindow):
         self.sokoban_failed = False
         self.sokoban_invalid_path = False
         self.build_info = ""
+        self.cost_model = DEFAULT_COST_MODEL
         self.output_semantics = []
         self.box_ids = list(range(len(self.boxes)))
 
@@ -1199,6 +1256,10 @@ class SokobanVisualizerQt(QMainWindow):
                 self.update_time_stats(t[1:5])
             elif line.startswith("BUILD"):
                 self.build_info = line[len("BUILD"):].strip()
+            elif line.startswith("COST_MODEL"):
+                values = [int(v) for v in line.split()[1:5]]
+                if len(values) == 4:
+                    self.cost_model = tuple(values)
             elif line.startswith("SEMANTICS"):
                 self.output_semantics = [int(v) for v in line.split()[1:]]
             elif line.startswith("MATCHED_IDS"):
@@ -1426,21 +1487,37 @@ class SokobanVisualizerQt(QMainWindow):
 
         patrol_steps = path_length(patrol_path)
         sokoban_steps = len(self.sokoban_path)
+        patrol_observations = len(self.chosen_obs)
+        sokoban_observations = 0
         total_steps = patrol_steps + sokoban_steps
+        total_observations = patrol_observations + sokoban_observations
         sokoban_rotations = 0
         total_turns = patrol_turns + sokoban_turns
         total_rotations = patrol_rotations + sokoban_rotations
 
-        def calc_cost(steps, turns, rotations):
-            return steps + turns * 4 + rotations * 4
+        def calc_cost(steps, turns, observations, rotations):
+            move_cost, stop_cost, observe_extra, turn_extra = self.cost_model
+            observe_cost = stop_cost + observe_extra
+            return (
+                steps * move_cost
+                + turns * stop_cost
+                + observations * observe_cost
+                + rotations * turn_extra
+            )
 
-        patrol_cost = calc_cost(patrol_steps, patrol_turns, patrol_rotations)
-        sokoban_cost = calc_cost(sokoban_steps, sokoban_turns, sokoban_rotations)
-        total_cost = calc_cost(total_steps, total_turns, total_rotations)
+        patrol_cost = calc_cost(
+            patrol_steps, patrol_turns, patrol_observations, patrol_rotations
+        )
+        sokoban_cost = calc_cost(
+            sokoban_steps, sokoban_turns, sokoban_observations, sokoban_rotations
+        )
+        total_cost = calc_cost(
+            total_steps, total_turns, total_observations, total_rotations
+        )
         self.update_cost_table(
-            (patrol_steps, patrol_turns, patrol_rotations, patrol_cost),
-            (sokoban_steps, sokoban_turns, sokoban_rotations, sokoban_cost),
-            (total_steps, total_turns, total_rotations, total_cost),
+            (patrol_steps, patrol_turns, patrol_observations, patrol_rotations, patrol_cost),
+            (sokoban_steps, sokoban_turns, sokoban_observations, sokoban_rotations, sokoban_cost),
+            (total_steps, total_turns, total_observations, total_rotations, total_cost),
         )
 
     def animate_next_step(self, manual=False):

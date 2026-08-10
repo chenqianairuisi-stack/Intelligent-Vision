@@ -3,6 +3,7 @@
 
 #include "Exploration.h"
 #include "Strategy.h"
+#include "tuning_config.h"
 #include <cmath>
 #include <cstring>
 #include <algorithm>
@@ -17,7 +18,6 @@ namespace ExplorationConfig {
     // ------------------------------------------------------------------------
     // 巡图 DFS 代价参数
     // ------------------------------------------------------------------------
-    inline constexpr uint16_t OBSERVE_ACTION_COST = 32;          // 一次观测约等于跨图移动，优先合并可同时识别的实体
     inline constexpr int32_t BONUS_FOR_BOMB = 8;                 // 完成必推炸弹的固定收益，避免把解锁动作无限推迟
     inline constexpr uint16_t BOMB_ROUTE_COST_DIVISOR = 100;     // 推炸弹本体路径按摊销代价参与观测顺序排序
     inline constexpr uint16_t FIRST_BOMB_LOCALITY_WEIGHT = 8;    // 巡图炸弹排序：优先处理当前附近的炸弹
@@ -374,7 +374,7 @@ static void optimize_observe_sequence_order(
                 yaw_to_move_direction(from_yaw), route_cost)) {
             return COST_INFINITY;
         }
-        const uint32_t total = static_cast<uint32_t>(OBSERVE_ACTION_COST) +
+        const uint32_t total = static_cast<uint32_t>(PlanningCommon::MotionCostConfig::OBSERVE_ACTION) +
             route_cost +
             PlanningCommon::yaw_turn_time_cost(from_yaw, next_view.target_yaw) +
             next_view.penalty[0];
@@ -667,34 +667,38 @@ void Exploration::build_entity_views(const SokobanLevel* multi_maps, int B) {
                         append_category_views(target_mask, false, pattern_masks, pattern_pens);
                     };
 
-                    const int core = PlanningCommon::ObservationConfig::TARGET_SLOT_F2_CORE;
-                    const int f2_left = PlanningCommon::ObservationConfig::TARGET_SLOT_F2_LEFT;
-                    const int f2_right = PlanningCommon::ObservationConfig::TARGET_SLOT_F2_RIGHT;
-                    const int f1_left = PlanningCommon::ObservationConfig::TARGET_SLOT_F1_LEFT;
-                    const int f1_right = PlanningCommon::ObservationConfig::TARGET_SLOT_F1_RIGHT;
+                    const int core = PlanningCommon::TargetObservationConfig::TARGET_SLOT_F2_CORE;
+                    const int f2_left = PlanningCommon::TargetObservationConfig::TARGET_SLOT_F2_LEFT;
+                    const int f2_right = PlanningCommon::TargetObservationConfig::TARGET_SLOT_F2_RIGHT;
+                    const int f1_left = PlanningCommon::TargetObservationConfig::TARGET_SLOT_F1_LEFT;
+                    const int f1_right = PlanningCommon::TargetObservationConfig::TARGET_SLOT_F1_RIGHT;
 
                     // 单目标允许基础五种位置，只有 F1 斜角必须和 F2 正中组成联合观测
                     for (int slot = 0;
-                         slot < PlanningCommon::ObservationConfig::TARGET_BASE_SLOT_COUNT;
+                         slot < PlanningCommon::TargetObservationConfig::TARGET_BASE_SLOT_COUNT;
                          ++slot) {
                         append_target_pattern(slot, -1, -1);
                     }
 
-                    if constexpr (PlanningCommon::ObservationConfig::ENABLE_TARGET_JOINT_F2_DIAGONAL) {
+                    const bool extra_enabled =
+                        tune.planning_extra.target_extra_observe_enable >= 0.5f;
+                    const bool joint_f2_enabled = extra_enabled &&
+                        PlanningCommon::TargetObservationConfig::ENABLE_JOINT_F2_DIAGONAL;
+                    const bool joint_f1_enabled = extra_enabled &&
+                        PlanningCommon::TargetObservationConfig::ENABLE_JOINT_F1_DIAGONAL;
+                    if (joint_f2_enabled) {
                         // F2 斜角开关控制两个双目标模式和同排三目标模式
                         append_target_pattern(core, f2_left, -1);
                         append_target_pattern(core, f2_right, -1);
                         append_target_pattern(core, f2_left, f2_right);
                     }
-                    if constexpr (PlanningCommon::ObservationConfig::ENABLE_TARGET_JOINT_F1_DIAGONAL) {
+                    if (joint_f1_enabled) {
                         // F1 斜角开关控制两个双目标模式和近排三目标模式
                         append_target_pattern(core, f1_left, -1);
                         append_target_pattern(core, f1_right, -1);
                         append_target_pattern(core, f1_left, f1_right);
                     }
-                    if constexpr (
-                        PlanningCommon::ObservationConfig::ENABLE_TARGET_JOINT_F2_DIAGONAL &&
-                        PlanningCommon::ObservationConfig::ENABLE_TARGET_JOINT_F1_DIAGONAL) {
+                    if (joint_f2_enabled && joint_f1_enabled) {
                         // 混合三目标只允许左右交叉组合，对应图中的另外两种情况
                         append_target_pattern(core, f2_left, f1_right);
                         append_target_pattern(core, f2_right, f1_left);
@@ -1205,8 +1209,8 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
         const int remain_boxes = std::max(0, req_boxes - seen_boxes);
         const int remain_targets = std::max(0, req_targets - seen_targets);
         return remain_boxes +
-            (remain_targets + PlanningCommon::ObservationConfig::MAX_TARGETS_PER_OBSERVATION - 1) /
-                PlanningCommon::ObservationConfig::MAX_TARGETS_PER_OBSERVATION;
+            (remain_targets + PlanningCommon::TargetObservationConfig::MAX_TARGETS_PER_OBSERVATION - 1) /
+                PlanningCommon::TargetObservationConfig::MAX_TARGETS_PER_OBSERVATION;
     };
 
     auto seed_greedy_upper_bound = [&]() -> void {
@@ -1324,7 +1328,7 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                             curr_move_dir, route_move_cost)) {
                         continue;
                     }
-                    const int access_cost = OBSERVE_ACTION_COST + route_move_cost +
+                    const int access_cost = PlanningCommon::MotionCostConfig::OBSERVE_ACTION + route_move_cost +
                         get_turn_cost(curr_yaw, vp.target_yaw) +
                         vp.penalty[0];
                     const int pop = __builtin_popcount(newly_seen);
@@ -1332,7 +1336,8 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                     const PatrolSeedCandidate candidate{
                         e,
                         i,
-                        access_cost + minimum_remaining_observations(mask | newly_seen) * OBSERVE_ACTION_COST,
+                        access_cost + minimum_remaining_observations(mask | newly_seen) *
+                            PlanningCommon::MotionCostConfig::OBSERVE_ACTION,
                         access_cost,
                         static_cast<uint8_t>(pop)
                     };
@@ -1387,7 +1392,7 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                             if (next_newly_seen == 0u) continue;
                             const uint16_t next_dist = lookahead_map[next_view.pos.y][next_view.pos.x];
                             if (next_dist == COST_INFINITY) continue;
-                            const int estimate = OBSERVE_ACTION_COST + next_dist +
+                            const int estimate = PlanningCommon::MotionCostConfig::OBSERVE_ACTION + next_dist +
                                 get_turn_cost(vp.target_yaw, next_view.target_yaw) +
                                 next_view.penalty[k];
                             if (estimate < next_access) next_access = estimate;
@@ -1416,7 +1421,7 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                     return;
                 }
                 const uint16_t observe_cost = static_cast<uint16_t>(
-                    OBSERVE_ACTION_COST + route_move_cost +
+                    PlanningCommon::MotionCostConfig::OBSERVE_ACTION + route_move_cost +
                     get_turn_cost(curr_yaw, vp.target_yaw) +
                     vp.penalty[0]);
                 // 观测动作末尾已经对齐目标朝向，不能把接入路径末段方向带入下一状态
@@ -1502,13 +1507,14 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
         // 箱子候选一次只提交一个箱子；目标候选最多合并三个目标点。
         // 每个动作都必付停车观测开销，因此这是不会高估的观测次数下界。
         const int remain_observations = remain_b +
-            (remain_t + PlanningCommon::ObservationConfig::MAX_TARGETS_PER_OBSERVATION - 1) /
-                PlanningCommon::ObservationConfig::MAX_TARGETS_PER_OBSERVATION;
+            (remain_t + PlanningCommon::TargetObservationConfig::MAX_TARGETS_PER_OBSERVATION - 1) /
+                PlanningCommon::TargetObservationConfig::MAX_TARGETS_PER_OBSERVATION;
         auto newly_covers_needed_category = [&](uint32_t newly_seen) -> bool {
             return (remain_b > 0 && (newly_seen & box_entity_mask) != 0u) ||
                    (remain_t > 0 && (newly_seen & target_entity_mask) != 0u);
         };
-        if (current_cost + remain_observations * OBSERVE_ACTION_COST - remaining_bomb_credit >=
+        if (current_cost + remain_observations * PlanningCommon::MotionCostConfig::OBSERVE_ACTION -
+                remaining_bomb_credit >=
             ctx.best_cost) {
             return;
         }
@@ -1567,7 +1573,8 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
         if (k == B) {
             if (nearest_observe_extra == COST_INFINITY) return;
             const int32_t final_stage_lower_bound = current_cost +
-                remain_observations * OBSERVE_ACTION_COST + nearest_observe_extra;
+                remain_observations * PlanningCommon::MotionCostConfig::OBSERVE_ACTION +
+                nearest_observe_extra;
             if (final_stage_lower_bound >= ctx.best_cost) return;
         }
 
@@ -1605,18 +1612,20 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                 if (dist == 0xFFFF) continue;
 
                 uint16_t turn_cost = get_turn_cost(curr_yaw, vp.target_yaw);
-                uint16_t total_cost = OBSERVE_ACTION_COST + dist + turn_cost + vp.penalty[k];
+                uint16_t total_cost = PlanningCommon::MotionCostConfig::OBSERVE_ACTION +
+                    dist + turn_cost + vp.penalty[k];
 
                 // 排序分数保留整数下界，同时补偿本次新增目标的边际收益
                 // 避免两个候选落入同一观测次数桶时，联合观测因局部移动代价略高而落选
                 const int newly_target_count = __builtin_popcount(
                     newly_seen & target_entity_mask);
                 const int target_coverage_reward =
-                    OBSERVE_ACTION_COST /
-                        PlanningCommon::ObservationConfig::MAX_TARGETS_PER_OBSERVATION +
+                    PlanningCommon::MotionCostConfig::OBSERVE_ACTION /
+                        PlanningCommon::TargetObservationConfig::MAX_TARGETS_PER_OBSERVATION +
                     1;
                 int32_t score = total_cost +
-                    minimum_remaining_observations(mask | newly_seen) * OBSERVE_ACTION_COST -
+                    minimum_remaining_observations(mask | newly_seen) *
+                        PlanningCommon::MotionCostConfig::OBSERVE_ACTION -
                     newly_target_count * target_coverage_reward;
 
                 int vp_yaw_idx = 0;
@@ -1668,7 +1677,7 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                     continue;
                 }
                 const uint16_t observe_cost = static_cast<uint16_t>(
-                    OBSERVE_ACTION_COST + observe_move_cost +
+                    PlanningCommon::MotionCostConfig::OBSERVE_ACTION + observe_move_cost +
                     get_turn_cost(curr_yaw, vp.target_yaw) +
                     vp.penalty[0]);
                 const uint32_t next_mask = mask | newly_seen;
@@ -1791,7 +1800,7 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                         for (int si = order; si < macro_path.size(); ++si) suffix.push_back(macro_path[si]);
                         uint32_t prefix_cost = PlanningCommon::path_time_cost(
                             curr_pos, prefix, curr_move_dir);
-                        uint32_t observe_turn_cost = OBSERVE_ACTION_COST +
+                        uint32_t observe_turn_cost = PlanningCommon::MotionCostConfig::OBSERVE_ACTION +
                             get_turn_cost(curr_yaw, vp.target_yaw) + vp.penalty[k];
                         uint32_t combined_bomb_route_cost =
                             prefix_cost + get_bomb_route_cost(
@@ -1815,7 +1824,8 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                         if (duplicated) continue;
 
                         int32_t score = combined_cost +
-                            minimum_remaining_observations(mask | newly_seen) * OBSERVE_ACTION_COST;
+                            minimum_remaining_observations(mask | newly_seen) *
+                                PlanningCommon::MotionCostConfig::OBSERVE_ACTION;
                         PatrolApproachObsCandidate candidate{
                             vp,
                             newly_seen,
@@ -1971,7 +1981,8 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
 
                 const int pop = __builtin_popcount(newly_seen);
                 int score = dist + get_turn_cost(curr_yaw, vp.target_yaw) + vp.penalty[k] +
-                    minimum_remaining_observations(mask | newly_seen) * OBSERVE_ACTION_COST;
+                    minimum_remaining_observations(mask | newly_seen) *
+                        PlanningCommon::MotionCostConfig::OBSERVE_ACTION;
                 if (score < best_score || (score == best_score && pop > best_newly_seen)) {
                     best_score = score;
                     best_entity = e;
@@ -2110,7 +2121,7 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                             int score = static_cast<int>(push_cost) +
                                 static_cast<int>(after_direct) / 2 + vp.penalty[k] +
                                 minimum_remaining_observations(mask | newly_seen) *
-                                    OBSERVE_ACTION_COST;
+                                    PlanningCommon::MotionCostConfig::OBSERVE_ACTION;
 
                             if (!best_clear.valid || score < best_clear.score) {
                                 best_clear.valid = true;

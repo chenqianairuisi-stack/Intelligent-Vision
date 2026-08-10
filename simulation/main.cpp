@@ -11,6 +11,7 @@
 #include "Sokoban.h"
 #include "Strategy.h"
 #include "RobotTask.h"
+#include "tuning_config.h"
 
 using namespace SystemConfig;
 
@@ -18,6 +19,29 @@ static const char* SOLVER_BUILD_TAG = __DATE__ " " __TIME__;
 // PC 地图从文本顶部向下读取，规划坐标原点在左下角，入场方向为正 Y
 
 namespace {
+
+bool parse_switch_arg(const std::string& arg, const char* option, float& target) {
+    const std::string prefix = std::string(option) + "=";
+    if (arg.rfind(prefix, 0) != 0) return false;
+
+    const std::string value = arg.substr(prefix.size());
+    if (value == "0") {
+        target = 0.0f;
+        return true;
+    }
+    if (value == "1") {
+        target = 1.0f;
+        return true;
+    }
+    return false;
+}
+
+bool apply_simulation_switch(const std::string& arg) {
+    // 命令行开关只覆盖当前仿真进程中的运行时参数
+    return parse_switch_arg(arg, "--diagonal-move", tune.planning_extra.diagonal_move_enable) ||
+           parse_switch_arg(arg, "--box-extra-observe", tune.planning_extra.box_extra_observe_enable) ||
+           parse_switch_arg(arg, "--target-extra-observe", tune.planning_extra.target_extra_observe_enable);
+}
 
 long long elapsed_ms(std::chrono::high_resolution_clock::time_point begin,
                      std::chrono::high_resolution_clock::time_point end) {
@@ -493,7 +517,11 @@ bool load_semantic_solver(SokobanLevel& level,
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        if (!apply_simulation_switch(argv[i])) return -4;
+    }
+
     std::ifstream map_file("map_input.txt");
     if (!map_file.is_open()) return -1;
 
@@ -792,6 +820,11 @@ int main() {
 
     out_file << "TIMES " << time1 << " " << time2 << " " << time3 << " " << time4 << "\n";
     out_file << "BUILD " << SOLVER_BUILD_TAG << "\n";
+    out_file << "COST_MODEL "
+             << PlanningCommon::MotionCostConfig::MOVE_STEP << " "
+             << PlanningCommon::MotionCostConfig::STOP_NODE << " "
+             << PlanningCommon::MotionCostConfig::OBSERVE_EXTRA << " "
+             << PlanningCommon::MotionCostConfig::TURN_EXTRA << "\n";
     out_file << "SEMANTICS";
     for (int i = 0; i < logical_level.box_count + logical_level.target_count; ++i) {
         int label = has_planner_matching ? planner_semantic_labels[i] : truth_semantic_labels[i];

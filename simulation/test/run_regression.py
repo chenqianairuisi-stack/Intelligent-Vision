@@ -27,6 +27,10 @@ PLAN_START_X = 4
 PLAN_START_Y = 1
 TIMEOUT_SECONDS = 1.0
 STAGE_TIMEOUT_MS = 50
+MOVE_STEP_COST = 1
+STOP_NODE_COST = 2
+OBSERVE_EXTRA_COST = 1
+TURN_EXTRA_COST = 2
 
 # 重点观察地图只在 --focus-regression 模式下生效，普通批量回归不读取这组护栏
 FOCUS_REGRESSION_CHECKS = {
@@ -384,6 +388,15 @@ def count_turns(path_coords):
     return turn_count
 
 
+def path_length(path_coords):
+    total = 0.0
+    for i in range(1, len(path_coords)):
+        dx = path_coords[i][0] - path_coords[i - 1][0]
+        dy = path_coords[i][1] - path_coords[i - 1][1]
+        total += (dx * dx + dy * dy) ** 0.5
+    return int(round(total))
+
+
 def count_patrol_rotations(patrol_events, map_info):
     rotations = 0
     current_yaw = 90
@@ -465,12 +478,27 @@ def count_patrol_rotations(patrol_events, map_info):
 def parse_path_sections(lines, map_info):
     patrol_events = []
     sokoban_path = []
+    patrol_observations = 0
+    cost_model = (
+        MOVE_STEP_COST,
+        STOP_NODE_COST,
+        OBSERVE_EXTRA_COST,
+        TURN_EXTRA_COST,
+    )
     failed = False
 
     i = 0
     while i < len(lines):
         line = lines[i]
-        if line == "PATROL":
+        if line.startswith("CHOSEN_OBS "):
+            parts = line.split()
+            if len(parts) >= 2:
+                patrol_observations = int(parts[1])
+        elif line.startswith("COST_MODEL "):
+            values = [int(v) for v in line.split()[1:5]]
+            if len(values) == 4:
+                cost_model = tuple(values)
+        elif line == "PATROL":
             i += 1
             while i < len(lines) and lines[i] not in ("SOKOBAN", "SOKOBAN_REPLAY_BEGIN", "FAILED", "MCU_TRACE"):
                 parts = lines[i].split()
@@ -510,16 +538,24 @@ def parse_path_sections(lines, map_info):
 
     sokoban_start = patrol_path[-1] if patrol_path else start_ui
     full_sokoban_path = [sokoban_start] + sokoban_path
-    patrol_steps = sum(1 for event in patrol_events if event[0] == "MOVE")
+    patrol_steps = path_length(patrol_path)
     sokoban_steps = len(sokoban_path)
     patrol_turns = count_turns(patrol_path)
     sokoban_turns = count_turns(full_sokoban_path)
     patrol_rotations = count_patrol_rotations(patrol_events, map_info)
     sokoban_rotations = 0
+    sokoban_observations = 0
     total_steps = patrol_steps + sokoban_steps
     total_turns = patrol_turns + sokoban_turns
     total_rotations = patrol_rotations + sokoban_rotations
-    total_cost = total_steps + total_turns * 4 + total_rotations * 4
+    total_observations = patrol_observations + sokoban_observations
+    move_cost, stop_cost, observe_extra, turn_extra = cost_model
+    total_cost = (
+        total_steps * move_cost
+        + total_turns * stop_cost
+        + total_observations * (stop_cost + observe_extra)
+        + total_rotations * turn_extra
+    )
 
     return {
         "patrol_steps": patrol_steps,
@@ -531,6 +567,9 @@ def parse_path_sections(lines, map_info):
         "patrol_rotations": patrol_rotations,
         "sokoban_rotations": sokoban_rotations,
         "total_rotations": total_rotations,
+        "patrol_observations": patrol_observations,
+        "sokoban_observations": sokoban_observations,
+        "total_observations": total_observations,
         "total_cost": total_cost,
         "failed": failed,
     }
@@ -565,6 +604,9 @@ def parse_output(path, map_info):
             "patrol_rotations": "",
             "sokoban_rotations": "",
             "total_rotations": "",
+            "patrol_observations": "",
+            "sokoban_observations": "",
+            "total_observations": "",
             "total_cost": "",
             "pushes": "",
             "completed": "",
@@ -621,6 +663,9 @@ def parse_output(path, map_info):
         "patrol_rotations": str(path_stats["patrol_rotations"]),
         "sokoban_rotations": str(path_stats["sokoban_rotations"]),
         "total_rotations": str(path_stats["total_rotations"]),
+        "patrol_observations": str(path_stats["patrol_observations"]),
+        "sokoban_observations": str(path_stats["sokoban_observations"]),
+        "total_observations": str(path_stats["total_observations"]),
         "total_cost": str(path_stats["total_cost"]),
         "pushes": pushes,
         "completed": completed,
@@ -813,6 +858,7 @@ def render_markdown_report(
         "sokoban_ms",
         "total_steps",
         "total_turns",
+        "total_observations",
         "total_rotations",
         "total_cost",
     ]
@@ -841,6 +887,7 @@ def render_markdown_report(
         "sokoban_ms": "推箱ms",
         "total_steps": "总步数",
         "total_turns": "总拐弯",
+        "total_observations": "总观测",
         "total_rotations": "总旋转",
         "total_cost": "总代价",
         "chosen_obs": "观测点",
@@ -1018,6 +1065,9 @@ def main():
                 "patrol_rotations": "",
                 "sokoban_rotations": "",
                 "total_rotations": "",
+                "patrol_observations": "",
+                "sokoban_observations": "",
+                "total_observations": "",
                 "total_cost": "",
                 "pushes": "",
                 "completed": "",
@@ -1079,6 +1129,9 @@ def main():
                 "patrol_rotations": parsed["patrol_rotations"],
                 "sokoban_rotations": parsed["sokoban_rotations"],
                 "total_rotations": parsed["total_rotations"],
+                "patrol_observations": parsed["patrol_observations"],
+                "sokoban_observations": parsed["sokoban_observations"],
+                "total_observations": parsed["total_observations"],
                 "total_cost": parsed["total_cost"],
                 "pushes": parsed["pushes"],
                 "completed_targets": parsed["completed"],

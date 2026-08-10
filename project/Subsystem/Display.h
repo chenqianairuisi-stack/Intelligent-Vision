@@ -14,7 +14,8 @@ enum class MenuPage {
     ODOMETRY_DATA,      // 里程计+硬件监控 (全局位姿、编码器速度、IMU)
 
     // --- 参数调节组 (可编辑) ---
-    TUNE_PARAMS
+    TUNE_PARAMS,
+    GLOBAL_CONFIG      // 全局规划功能开关
 };
 
 namespace Subsystem::Display {

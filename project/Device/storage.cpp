@@ -15,7 +15,7 @@ namespace {
 constexpr std::uint32_t FLASH_SECTION_INDEX = 127u;
 constexpr flash_page_enum FLASH_PAGE_INDEX = FLASH_PAGE_7;
 constexpr std::uint32_t CONFIG_MAGIC = 0x49565444u; // IVTC
-constexpr std::uint16_t CONFIG_VERSION = 1u;
+constexpr std::uint16_t CONFIG_VERSION = 3u;
 
 struct ConfigHeader {
     std::uint32_t magic;

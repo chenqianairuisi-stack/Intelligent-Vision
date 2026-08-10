@@ -155,18 +155,24 @@ struct TuningConfig {
         float reject_dist_cm;         // 纵向粗差闸 cm：超过判为视觉异常本帧不修。必须大于待治的
                                       // 打滑累积量级（1~3cm），不能沿用横向的 vision_reject_dist
                                       // （默认 1cm），否则要修的误差全被判成误检、修正恒为 0
-        float scale_learn_enable;      // 视觉里程比例在线学习开关，0 关闭，1 开启
-        float scale_learn_alpha;       // 比例低通更新系数，越大适应越快
-        float scale_sample_min_cm;     // 单次比例样本要求的最小直线位移 cm
-        float scale_min;               // 学习比例下限，防止异常视觉把里程拉坏
-        float scale_max;               // 学习比例上限，防止异常视觉把里程拉坏
+        float scale_learn_enable;     // 视觉里程比例在线学习开关，0 关闭，1 开启
+        float scale_learn_alpha;      // 比例低通更新系数，越大适应越快
+        float scale_sample_min_cm;    // 单次比例样本要求的最小直线位移 cm
+        float scale_min;              // 学习比例下限，防止异常视觉把里程拉坏
+        float scale_max;              // 学习比例上限，防止异常视觉把里程拉坏
     } vision_long;
 
     // 横向视觉修正独立调参，避免和纵向末端冻结及里程学习互相影响
     struct {
-        float max_step_cm;             // 普通视觉帧沿段法向最多修正多少 cm
-        float gain;                    // 横向误差本帧采用比例，1.0 表示限步后全部采用
+        float max_step_cm;            // 普通视觉帧沿段法向最多修正多少 cm
+        float gain;                   // 横向误差本帧采用比例，1.0 表示限步后全部采用
     } vision_lateral;
+
+    struct {
+        float diagonal_move_enable;         // 斜向移动总开关，0 关闭，1 开启
+        float box_extra_observe_enable;     // 箱子额外观测位总开关，0 关闭，1 开启
+        float target_extra_observe_enable;  // 目标点额外观测位总开关，0 关闭，1 开启
+    } planning_extra;
 };
 
 inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
@@ -257,6 +263,11 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
     {
         1.5f,     // vision_lateral.max_step_cm
         1.0f,     // vision_lateral.gain
+    },
+    {
+        1.0f,     // planning_extra.diagonal_move_enable
+        1.0f,     // planning_extra.box_extra_observe_enable
+        1.0f,     // planning_extra.target_extra_observe_enable
     },
 };
 
@@ -350,6 +361,9 @@ inline ParamItem params[] = {
     {"ALL Ka  ", "KA", &tune.wheels[0].ka, 0.001f, 0.0f, 1.0f, ScreenEditGroup::WHEEL_KA},
     {"ALL Kb  ", "KB", &tune.wheels[0].kb, 0.001f, 0.0f, 1.0f, ScreenEditGroup::WHEEL_KB},
     {"ALL Ks  ", "KS", &tune.wheels[0].ks, 0.1f, 0.0f, 30.0f, ScreenEditGroup::WHEEL_KS},
+    {"DiagMove", "DM", &tune.planning_extra.diagonal_move_enable, 1.0f, 0.0f, 1.0f, ScreenEditGroup::SINGLE, false},
+    {"BoxExtra", "BX", &tune.planning_extra.box_extra_observe_enable, 1.0f, 0.0f, 1.0f, ScreenEditGroup::SINGLE, false},
+    {"TgtExtra", "TX", &tune.planning_extra.target_extra_observe_enable, 1.0f, 0.0f, 1.0f, ScreenEditGroup::SINGLE, false},
 };
 
 // 单轮键由 0=LF、1=LB、2=RF、3=RB 组成，屏幕只显示上面的 ALL 项

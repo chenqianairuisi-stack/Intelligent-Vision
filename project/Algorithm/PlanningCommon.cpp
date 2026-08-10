@@ -2,6 +2,7 @@
 /// \brief 规划层通用地图查询、路径搜索和动作效果展开实现
 
 #include "PlanningCommon.h"
+#include "tuning_config.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -14,13 +15,13 @@ namespace PlanningCommon {
 
 namespace MotionCost {
     // 单格平移的基础时间单位，建议先按实测直线走一格耗时缩放到整数
-    inline constexpr uint16_t GRID_MOVE = 1;
-    // 路径方向发生变化时的停车和再启动惩罚，麦轮拐点停顿明显时应显著大于 GRID_MOVE
-    inline constexpr uint16_t CORNER_STOP = 3;
+    inline constexpr uint16_t GRID_MOVE = MotionCostConfig::MOVE_STEP;
+    // 路径方向发生变化时增加一个停车节点
+    inline constexpr uint16_t CORNER_STOP = MotionCostConfig::STOP_NODE;
     // 推箱宏层切换发力方向时的额外惩罚，避免等步数路径产生多余折线
-    inline constexpr uint16_t PUSH_DIRECTION_CHANGE = 3;
+    inline constexpr uint16_t PUSH_DIRECTION_CHANGE = MotionCostConfig::STOP_NODE;
     // 到达观测位后为了对准目标朝向产生的额外代价，不参与普通路径拐点统计
-    inline constexpr uint16_t OBSERVE_YAW = 5;
+    inline constexpr uint16_t OBSERVE_YAW = MotionCostConfig::TURN_EXTRA;
     // uint16_t 对外接口的饱和值，和旧 BFS 不可达返回值保持一致
     inline constexpr uint16_t INF = 65535;
 }
@@ -402,14 +403,21 @@ static void collect_target_observe_slots(const SokobanLevel& lvl,
         bool enabled;
     };
 
-    const TargetViewGrid target_candidates[ObservationConfig::TARGET_OBSERVE_SLOT_COUNT] = {
-        {view_pos + f, 0u, ObservationConfig::ENABLE_FACE_TO_FACE},
-        {view_pos + f + f, ObservationConfig::TARGET_OPTIMAL_PENALTY, ObservationConfig::ENABLE_OPTIMAL_DIST},
-        {view_pos + f + f + left, ObservationConfig::TARGET_DIAGONAL_PENALTY, ObservationConfig::ENABLE_DIAGONAL},
-        {view_pos + f + f + right, ObservationConfig::TARGET_DIAGONAL_PENALTY, ObservationConfig::ENABLE_DIAGONAL},
-        {view_pos + f + f + f, ObservationConfig::TARGET_FAR_PENALTY, ObservationConfig::ENABLE_TARGET_FAR_FACE_TO_FACE},
-        {view_pos + f + left, ObservationConfig::TARGET_DIAGONAL_PENALTY, ObservationConfig::ENABLE_TARGET_JOINT_F1_DIAGONAL},
-        {view_pos + f + right, ObservationConfig::TARGET_DIAGONAL_PENALTY, ObservationConfig::ENABLE_TARGET_JOINT_F1_DIAGONAL},
+    const bool extra_enabled = tune.planning_extra.target_extra_observe_enable >= 0.5f;
+    const TargetViewGrid target_candidates[TargetObservationConfig::TARGET_OBSERVE_SLOT_COUNT] = {
+        {view_pos + f, 0u, true},
+        {view_pos + f + f, TargetObservationConfig::TARGET_OPTIMAL_PENALTY,
+            extra_enabled && TargetObservationConfig::ENABLE_F2},
+        {view_pos + f + f + left, TargetObservationConfig::TARGET_DIAGONAL_PENALTY,
+            extra_enabled && TargetObservationConfig::ENABLE_F2_DIAGONAL},
+        {view_pos + f + f + right, TargetObservationConfig::TARGET_DIAGONAL_PENALTY,
+            extra_enabled && TargetObservationConfig::ENABLE_F2_DIAGONAL},
+        {view_pos + f + f + f, TargetObservationConfig::TARGET_FAR_PENALTY,
+            extra_enabled && TargetObservationConfig::ENABLE_F3},
+        {view_pos + f + left, TargetObservationConfig::TARGET_DIAGONAL_PENALTY,
+            extra_enabled && TargetObservationConfig::ENABLE_JOINT_F1_DIAGONAL},
+        {view_pos + f + right, TargetObservationConfig::TARGET_DIAGONAL_PENALTY,
+            extra_enabled && TargetObservationConfig::ENABLE_JOINT_F1_DIAGONAL},
     };
 
     auto blocks_los = [&](point p) {
@@ -424,18 +432,18 @@ static void collect_target_observe_slots(const SokobanLevel& lvl,
     };
     auto target_candidate_blocked = [&](int slot) {
         const point front = view_pos + f;
-        if (slot == ObservationConfig::TARGET_SLOT_F2_CORE) return blocks_los(front);
-        if (slot == ObservationConfig::TARGET_SLOT_F2_LEFT) {
+        if (slot == TargetObservationConfig::TARGET_SLOT_F2_CORE) return blocks_los(front);
+        if (slot == TargetObservationConfig::TARGET_SLOT_F2_LEFT) {
             return blocks_los(front) || blocks_los(front + left);
         }
-        if (slot == ObservationConfig::TARGET_SLOT_F2_RIGHT) {
+        if (slot == TargetObservationConfig::TARGET_SLOT_F2_RIGHT) {
             return blocks_los(front) || blocks_los(front + right);
         }
-        if (slot == ObservationConfig::TARGET_SLOT_F3) {
+        if (slot == TargetObservationConfig::TARGET_SLOT_F3) {
             return blocks_los(front) || blocks_los(front + f);
         }
-        if (slot == ObservationConfig::TARGET_SLOT_F1_LEFT ||
-            slot == ObservationConfig::TARGET_SLOT_F1_RIGHT) {
+        if (slot == TargetObservationConfig::TARGET_SLOT_F1_LEFT ||
+            slot == TargetObservationConfig::TARGET_SLOT_F1_RIGHT) {
             // 斜前方目标仍经过车头正前方，前方实体会遮挡目标点
             return blocks_los(front);
         }
@@ -459,13 +467,13 @@ static void collect_target_observe_slots(const SokobanLevel& lvl,
         return false;
     };
 
-    for (int slot = 0; slot < ObservationConfig::TARGET_OBSERVE_SLOT_COUNT; ++slot) {
+    for (int slot = 0; slot < TargetObservationConfig::TARGET_OBSERVE_SLOT_COUNT; ++slot) {
         const TargetViewGrid& candidate = target_candidates[slot];
         if (!candidate.enabled || target_candidate_blocked(slot)) continue;
         const int target_id = target_id_at(candidate.pos);
         if (target_id < 0) continue;
-        if (slot == ObservationConfig::TARGET_SLOT_F3 &&
-            ObservationConfig::ENABLE_TARGET_JOINT_F2_DIAGONAL &&
+        if (slot == TargetObservationConfig::TARGET_SLOT_F3 && extra_enabled &&
+            TargetObservationConfig::ENABLE_JOINT_F2_DIAGONAL &&
             far_target_has_visible_side_entity(candidate.pos)) {
             continue;
         }
@@ -495,7 +503,7 @@ bool evaluate_observe_pose(const SokobanLevel& lvl,
 
     TargetObserveSlots local_slots{};
     TargetObserveSlots& target_slots = out_target_slots ? *out_target_slots : local_slots;
-    for (int slot = 0; slot < ObservationConfig::TARGET_OBSERVE_SLOT_COUNT; ++slot) {
+    for (int slot = 0; slot < TargetObservationConfig::TARGET_OBSERVE_SLOT_COUNT; ++slot) {
         target_slots.mask[slot] = 0u;
         target_slots.penalty[slot] = MotionCost::INF;
     }
@@ -522,9 +530,9 @@ bool evaluate_observe_pose(const SokobanLevel& lvl,
     };
     const point box_candidates[2] = {view_pos + f, view_pos + f + f};
     for (int i = 0; i < 2; ++i) {
-        const bool enabled = i == 0
-            ? ObservationConfig::ENABLE_FACE_TO_FACE
-            : ObservationConfig::ENABLE_OPTIMAL_DIST;
+        const bool enabled = i == 0 ||
+            (tune.planning_extra.box_extra_observe_enable >= 0.5f &&
+             BoxObservationConfig::ENABLE_F2);
         if (!enabled || (i == 1 && blocks_los(view_pos + f))) continue;
 
         for (int box_id = 0; box_id < lvl.box_count; ++box_id) {
@@ -535,9 +543,12 @@ bool evaluate_observe_pose(const SokobanLevel& lvl,
         }
     }
 
-    const int target_slot_count = ObservationConfig::ENABLE_TARGET_JOINT_F1_DIAGONAL
-        ? ObservationConfig::TARGET_OBSERVE_SLOT_COUNT
-        : ObservationConfig::TARGET_BASE_SLOT_COUNT;
+    const bool target_joint_f1_enabled =
+        tune.planning_extra.target_extra_observe_enable >= 0.5f &&
+        TargetObservationConfig::ENABLE_JOINT_F1_DIAGONAL;
+    const int target_slot_count = target_joint_f1_enabled
+        ? TargetObservationConfig::TARGET_OBSERVE_SLOT_COUNT
+        : TargetObservationConfig::TARGET_BASE_SLOT_COUNT;
     uint16_t max_penalty = 0u;
     bool has_target = false;
     for (int slot = 0; slot < target_slot_count; ++slot) {
@@ -616,27 +627,31 @@ static bool evaluate_legal_observe_pose(const SokobanLevel& lvl,
         }
     };
 
-    for (int slot = 0; slot < ObservationConfig::TARGET_BASE_SLOT_COUNT; ++slot) {
+    for (int slot = 0; slot < TargetObservationConfig::TARGET_BASE_SLOT_COUNT; ++slot) {
         consider_pattern(slot, -1, -1);
     }
 
-    const int core = ObservationConfig::TARGET_SLOT_F2_CORE;
-    const int f2_left = ObservationConfig::TARGET_SLOT_F2_LEFT;
-    const int f2_right = ObservationConfig::TARGET_SLOT_F2_RIGHT;
-    const int f1_left = ObservationConfig::TARGET_SLOT_F1_LEFT;
-    const int f1_right = ObservationConfig::TARGET_SLOT_F1_RIGHT;
-    if constexpr (ObservationConfig::ENABLE_TARGET_JOINT_F2_DIAGONAL) {
+    const int core = TargetObservationConfig::TARGET_SLOT_F2_CORE;
+    const int f2_left = TargetObservationConfig::TARGET_SLOT_F2_LEFT;
+    const int f2_right = TargetObservationConfig::TARGET_SLOT_F2_RIGHT;
+    const int f1_left = TargetObservationConfig::TARGET_SLOT_F1_LEFT;
+    const int f1_right = TargetObservationConfig::TARGET_SLOT_F1_RIGHT;
+    const bool extra_enabled = tune.planning_extra.target_extra_observe_enable >= 0.5f;
+    const bool joint_f2_enabled =
+        extra_enabled && TargetObservationConfig::ENABLE_JOINT_F2_DIAGONAL;
+    const bool joint_f1_enabled =
+        extra_enabled && TargetObservationConfig::ENABLE_JOINT_F1_DIAGONAL;
+    if (joint_f2_enabled) {
         consider_pattern(core, f2_left, -1);
         consider_pattern(core, f2_right, -1);
         consider_pattern(core, f2_left, f2_right);
     }
-    if constexpr (ObservationConfig::ENABLE_TARGET_JOINT_F1_DIAGONAL) {
+    if (joint_f1_enabled) {
         consider_pattern(core, f1_left, -1);
         consider_pattern(core, f1_right, -1);
         consider_pattern(core, f1_left, f1_right);
     }
-    if constexpr (ObservationConfig::ENABLE_TARGET_JOINT_F2_DIAGONAL &&
-                  ObservationConfig::ENABLE_TARGET_JOINT_F1_DIAGONAL) {
+    if (joint_f2_enabled && joint_f1_enabled) {
         consider_pattern(core, f2_left, f1_right);
         consider_pattern(core, f2_right, f1_left);
     }
@@ -1107,7 +1122,8 @@ namespace {
         const int dx = static_cast<int>(to.x) - from.x;
         const int dy = static_cast<int>(to.y) - from.y;
         const float length = std::sqrt(static_cast<float>(dx * dx + dy * dy));
-        return static_cast<uint32_t>(length * OBS_ROUTE_COST_SCALE + 0.5f);
+        return static_cast<uint32_t>(
+            length * MotionCost::GRID_MOVE * OBS_ROUTE_COST_SCALE + 0.5f);
     }
 
     static uint32_t observe_route_precise_cost(
@@ -1384,8 +1400,11 @@ bool get_optimized_observe_path(const SokobanLevel& lvl,
                                 int initial_dir) {
     out_path.clear();
     if (start == end) return true;
+    const bool optimization_enabled =
+        tune.planning_extra.diagonal_move_enable >= 0.5f &&
+        ObserveRouteConfig::ENABLE_OBSERVE_ROUTE_OPTIMIZATION;
     // 无碰撞直线已达到欧氏距离下界，无需先运行网格寻路
-    if (ObserveRouteConfig::ENABLE_OBSERVE_ROUTE_OPTIMIZATION) {
+    if (optimization_enabled) {
         prepare_observe_route_obstacles(lvl);
         if (observe_segment_clear(start, end)) {
             out_path.push_back(end);
@@ -1396,7 +1415,7 @@ bool get_optimized_observe_path(const SokobanLevel& lvl,
     // 基准路径必须包含转向代价，否则普通 BFS 的同长折线可能虚增拐点
     StaticArray<point, MAX_PATH_LENGTH> raw_path;
     if (!get_grid_time_path(lvl, start, end, raw_path, initial_dir)) return false;
-    if (!ObserveRouteConfig::ENABLE_OBSERVE_ROUTE_OPTIMIZATION) {
+    if (!optimization_enabled) {
         out_path = raw_path;
         return true;
     }
@@ -1412,6 +1431,9 @@ bool optimize_observe_route(const SokobanLevel& lvl,
                             int initial_dir) {
     out_path.clear();
     if (required_mask == 0u) return false;
+    const bool optimization_enabled =
+        tune.planning_extra.diagonal_move_enable >= 0.5f &&
+        ObserveRouteConfig::ENABLE_OBSERVE_ROUTE_OPTIMIZATION;
 
     const ViewPose original_view = inout_view;
     StaticArray<point, MAX_PATH_LENGTH> baseline_path;
@@ -1444,7 +1466,7 @@ bool optimize_observe_route(const SokobanLevel& lvl,
 
     StaticArray<point, 16> endpoint_candidates;
     bool fixed_endpoint_diagonal_improved = false;
-    if (baseline_valid && ObserveRouteConfig::ENABLE_OBSERVE_ROUTE_OPTIMIZATION) {
+    if (baseline_valid && optimization_enabled) {
         StaticArray<point, MAX_PATH_LENGTH> fixed_path;
         if (get_optimized_observe_path(
                 lvl, start, original_view.pos, fixed_path, initial_dir)) {
@@ -1470,7 +1492,7 @@ bool optimize_observe_route(const SokobanLevel& lvl,
     const bool original_requires_diagonal = original_dx != 0 && original_dy != 0;
     bool original_direct_diagonal_blocked = false;
     if (baseline_valid && original_requires_diagonal &&
-        ObserveRouteConfig::ENABLE_OBSERVE_ROUTE_OPTIMIZATION) {
+        optimization_enabled) {
         prepare_observe_route_obstacles(lvl);
         original_direct_diagonal_blocked =
             !observe_segment_clear(start, original_view.pos);
@@ -1478,7 +1500,7 @@ bool optimize_observe_route(const SokobanLevel& lvl,
 
     // 邻域改点只用于原点直斜线受阻且固定终点斜向优化也无法减少停顿的情况
     if (baseline_valid &&
-        ObserveRouteConfig::ENABLE_OBSERVE_ROUTE_OPTIMIZATION &&
+        optimization_enabled &&
         ObserveRouteConfig::ENABLE_OBSERVE_ENDPOINT_ADJUST &&
         original_direct_diagonal_blocked &&
         !fixed_endpoint_diagonal_improved) {
@@ -2073,7 +2095,8 @@ bool append_box_push_optimized_path(
             if (!passable(stand)) continue;
             int walk = micro_distance(stand);
             if (walk == 9999) continue;
-            int cost = walk + ((initial_dir >= 0 && initial_dir != d) ? MotionCost::PUSH_DIRECTION_CHANGE : 0);
+            int cost = walk * MotionCost::GRID_MOVE +
+                ((initial_dir >= 0 && initial_dir != d) ? MotionCost::PUSH_DIRECTION_CHANGE : 0);
             keep_state(task.box_start, d, static_cast<uint16_t>(cost), 65535);
         }
     }
@@ -2095,7 +2118,8 @@ bool append_box_push_optimized_path(
 
         point forward = box_pos + MOVE[curr.p_dir];
         if (passable(forward)) {
-            uint32_t next_cost = static_cast<uint32_t>(b_ws.node_cost[idx]) + 1;
+            uint32_t next_cost = static_cast<uint32_t>(b_ws.node_cost[idx]) +
+                MotionCost::GRID_MOVE;
             if (next_cost < 65535) keep_state(forward, curr.p_dir, static_cast<uint16_t>(next_cost), static_cast<uint16_t>(idx));
         }
 
@@ -2115,7 +2139,8 @@ bool append_box_push_optimized_path(
             int walk = micro_distance(next_face);
             if (walk == 9999) continue;
             uint32_t next_cost = static_cast<uint32_t>(b_ws.node_cost[idx]) +
-                                 static_cast<uint32_t>(walk) + MotionCost::PUSH_DIRECTION_CHANGE;
+                                 static_cast<uint32_t>(walk) * MotionCost::GRID_MOVE +
+                                 MotionCost::PUSH_DIRECTION_CHANGE;
             if (next_cost < 65535) keep_state(box_pos, d, static_cast<uint16_t>(next_cost), static_cast<uint16_t>(idx));
         }
     }

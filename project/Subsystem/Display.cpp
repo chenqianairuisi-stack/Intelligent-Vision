@@ -31,8 +31,6 @@ namespace { // 匿名命名空间，确保这些数据只在本文件可见
         bool     is_editing = false;                   // 是否处于编辑模式
         bool     need_full_redraw = true;              // 是否需要全屏重绘 
         bool     ui_dirty = true;                      // UI 是否需要更新
-        bool     is_closed = false;                    // 息屏标志位
-
         // 按键状态
         bool key_up_pressed = false; bool key_down_pressed = false;
         bool key_enter_pressed = false; bool key_back_pressed = false;
@@ -65,6 +63,7 @@ static void draw_dashboard();
 static void draw_map_select();
 static void draw_odometry_data();
 static void draw_tune_params();
+static void draw_global_config();
 static void draw_item(uint8_t row, const char* name, bool is_selected);
 static void draw_float_item(uint8_t row, const char* name, float val, bool is_selected, bool is_editing, uint8_t decimals);
 static void format_plan_time_line(char* out, size_t size, const char* label, uint32_t ms);
@@ -96,21 +95,9 @@ void init() {
 ///
 /// \details
 /// 先扫描按键，再执行页面状态机和渲染
-/// 息屏时只保留返回键唤醒逻辑，避免后台持续刷新 TFT
 ///
 void run() { 
     scan_keys(); 
-    if (ctx.is_closed) {
-        if (ctx.key_back_pressed) {     // 按返回键唤醒
-            ctx.is_closed = false;
-            ctx.need_full_redraw = true;
-            ctx.current_page = MenuPage::MAIN_MENU;
-            ctx.cursor_idx = 0;
-            ctx.ui_dirty = true;
-        }
-        return;  // 拦截后续逻辑与渲染
-    }
-    
     process_logic(); 
     render_ui(); 
 }
@@ -148,7 +135,7 @@ void scan_keys() {
 /// \brief UI 页面状态机
 ///
 /// \details
-/// 负责主菜单、仪表盘、参数调节、Mock/Demo 选图等页面跳转
+/// 负责主菜单、仪表盘、参数调节、全局配置、Mock/Demo 选图等页面跳转
 /// 参数页通过 TuningRegistry 与上位机共享参数定义和范围
 ///
 void process_logic() {
@@ -161,39 +148,31 @@ void process_logic() {
 
     switch (ctx.current_page) {
         case MenuPage::MAIN_MENU:
-            if (ctx.key_down_pressed) ctx.cursor_idx = (ctx.cursor_idx + 1) % 8;    // 8个主菜单项
-            if (ctx.key_up_pressed)   ctx.cursor_idx = (ctx.cursor_idx == 0) ? 7 : ctx.cursor_idx - 1;
+            if (ctx.key_down_pressed) ctx.cursor_idx = (ctx.cursor_idx + 1) % 6;
+            if (ctx.key_up_pressed)   ctx.cursor_idx = (ctx.cursor_idx == 0) ? 5 : ctx.cursor_idx - 1;
 
             if (ctx.key_enter_pressed) {
                 if (ctx.cursor_idx == 0) { ctx.current_page = MenuPage::DASHBOARD;  App::g_state.debug.need_bg_redraw = true;}
                 if (ctx.cursor_idx == 1) { ctx.current_page = MenuPage::ODOMETRY_DATA; }
                 if (ctx.cursor_idx == 2) { ctx.current_page = MenuPage::TUNE_PARAMS; ctx.cursor_idx = 0; ctx.scroll_offset = 0; }
+                if (ctx.cursor_idx == 3) { ctx.current_page = MenuPage::GLOBAL_CONFIG; ctx.cursor_idx = 0; }
 
                 // --- Flash 存储触发 ---
-                if (ctx.cursor_idx == 3) {
+                if (ctx.cursor_idx == 4) {
                     const bool saved = Storage::save_params();
-                    tft180_show_string(15 * UI_COL_W, 5 * UI_ROW_H,
+                    tft180_show_string(15 * UI_COL_W, 6 * UI_ROW_H,
                                        saved ? "[OK]" : "[ERR]");
                     system_delay_ms(300);
                 }
-                if (ctx.cursor_idx == 4) {
+                if (ctx.cursor_idx == 5) {
                     const bool loaded = Storage::load_params();
-                    tft180_show_string(15 * UI_COL_W, 6 * UI_ROW_H,
+                    tft180_show_string(15 * UI_COL_W, 7 * UI_ROW_H,
                                        loaded ? "[OK]" : "[ERR]");
                     system_delay_ms(300);
                 }
-                // --- 息屏模式 ---
-                if (ctx.cursor_idx == 5) {
-                    ctx.is_closed = true;
-                    tft180_full(RGB565_WHITE); 
-                    return;
-                }
-                // --- 其他测试功能占位 ---
-                if (ctx.cursor_idx == 6) { App::g_state.control.current_target.y += 100;}
-                if (ctx.cursor_idx == 7) { App::g_state.control.current_target.x += 40;}
 
                 // 页面跳转后触发重绘
-                if (ctx.cursor_idx < 3) {ctx.need_full_redraw = true; ctx.cursor_idx = 0; ctx.ui_dirty = true;} 
+                if (ctx.cursor_idx < 4) {ctx.need_full_redraw = true; ctx.cursor_idx = 0; ctx.ui_dirty = true;}
                 else { ctx.ui_dirty = true;}
             }
             break;
@@ -216,6 +195,29 @@ void process_logic() {
                 if (ctx.key_up_pressed) TuningRegistry::adjust_from_screen(item, item.step);
                 if (ctx.key_down_pressed) TuningRegistry::adjust_from_screen(item, -item.step);
                 if (ctx.key_enter_pressed || ctx.key_back_pressed) ctx.is_editing = false;
+            }
+            break;
+
+        case MenuPage::GLOBAL_CONFIG:
+            if (ctx.key_down_pressed) ctx.cursor_idx = (ctx.cursor_idx + 1) % 3;
+            if (ctx.key_up_pressed) ctx.cursor_idx = ctx.cursor_idx == 0 ? 2 : ctx.cursor_idx - 1;
+            if (ctx.key_enter_pressed) {
+                if (ctx.cursor_idx == 0) {
+                    tune.planning_extra.diagonal_move_enable =
+                        tune.planning_extra.diagonal_move_enable >= 0.5f ? 0.0f : 1.0f;
+                } else if (ctx.cursor_idx == 1) {
+                    tune.planning_extra.box_extra_observe_enable =
+                        tune.planning_extra.box_extra_observe_enable >= 0.5f ? 0.0f : 1.0f;
+                } else {
+                    tune.planning_extra.target_extra_observe_enable =
+                        tune.planning_extra.target_extra_observe_enable >= 0.5f ? 0.0f : 1.0f;
+                }
+            }
+            if (ctx.key_back_pressed) {
+                ctx.current_page = MenuPage::MAIN_MENU;
+                ctx.cursor_idx = 3;
+                ctx.need_full_redraw = true;
+                ctx.ui_dirty = true;
             }
             break;
 
@@ -334,6 +336,7 @@ void render_ui() {
         case MenuPage::DASHBOARD:      draw_dashboard(); break;
         case MenuPage::ODOMETRY_DATA:  draw_odometry_data(); break;
         case MenuPage::TUNE_PARAMS:    draw_tune_params(); break;
+        case MenuPage::GLOBAL_CONFIG:  draw_global_config(); break;
         case MenuPage::MODE_SELECT:    draw_mode_select(); break;
         case MenuPage::MAP_SELECT:     draw_map_select(); break;
     }
@@ -346,11 +349,29 @@ void draw_main_menu() {
     draw_item(2, "Dashboard",  ctx.cursor_idx == 0);
     draw_item(3, "Odometry",   ctx.cursor_idx == 1);
     draw_item(4, "Tuning",     ctx.cursor_idx == 2);
-    draw_item(5, "Save Config",ctx.cursor_idx == 3);
-    draw_item(6, "Load Config",ctx.cursor_idx == 4);
-    draw_item(7, "Close Menu", ctx.cursor_idx == 5); 
-    draw_item(8, "forward",ctx.cursor_idx == 6);
-    draw_item(9, "right", ctx.cursor_idx == 7); 
+    draw_item(5, "Global Config", ctx.cursor_idx == 3);
+    draw_item(6, "Save Config",ctx.cursor_idx == 4);
+    draw_item(7, "Load Config",ctx.cursor_idx == 5);
+}
+
+/// \brief 绘制全局规划配置页面
+void draw_global_config() {
+    tft180_show_string(0, 0, "-- GLOBAL CONFIG --");
+    draw_item(2,
+        tune.planning_extra.diagonal_move_enable >= 0.5f
+            ? "Diagonal Move [ON]"
+            : "Diagonal Move [OFF]",
+        ctx.cursor_idx == 0);
+    draw_item(3,
+        tune.planning_extra.box_extra_observe_enable >= 0.5f
+            ? "Box Extra [ON]"
+            : "Box Extra [OFF]",
+        ctx.cursor_idx == 1);
+    draw_item(4,
+        tune.planning_extra.target_extra_observe_enable >= 0.5f
+            ? "Target Extra [ON]"
+            : "Target Extra [OFF]",
+        ctx.cursor_idx == 2);
 }
 
 /// \brief 绘制 Mock/Demo 模式选择页面

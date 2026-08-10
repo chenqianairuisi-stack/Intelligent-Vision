@@ -687,6 +687,7 @@ bool MacroPlanner::prepare_reference_action(const MacroPlanContext& ctx, const M
         }
         prepared_action.observe.active_mask = required_mask;
         prepared_action.real_cost =
+            PlanningCommon::MotionCostConfig::OBSERVE_ACTION +
             PlanningCommon::observe_route_time_cost(ctx.player, path, initial_dir) +
             PlanningCommon::yaw_turn_time_cost(ctx.yaw, prepared_action.observe.view.target_yaw) +
             prepared_action.observe.view.penalty[0];
@@ -800,6 +801,7 @@ bool MacroPlanner::build_bomb_observe_split(const MacroPlanContext& ctx,
             prefix.real_cost = PlanningCommon::path_time_cost(
                 ctx.player, prefix_path, yaw_to_move_direction(ctx.yaw));
             observe.real_cost =
+                PlanningCommon::MotionCostConfig::OBSERVE_ACTION +
                 PlanningCommon::observe_route_time_cost(prefix_end, observe_path) +
                 PlanningCommon::yaw_turn_time_cost(ctx.yaw, observe.observe.view.target_yaw) +
                 observe.observe.view.penalty[0];
@@ -1110,7 +1112,8 @@ bool MacroPlanner::simulate_action(const SokobanLevel& level, point player, uint
     if (action.kind == MacroActionKind::OBSERVE) {
         if (!PlanningCommon::get_optimized_observe_path(
                 out_level, out_player, action.observe.view.pos, path)) return false;
-        out_cost = PlanningCommon::observe_route_time_cost(out_player, path);
+        out_cost = PlanningCommon::MotionCostConfig::OBSERVE_ACTION +
+            PlanningCommon::observe_route_time_cost(out_player, path);
         out_player = action.observe.view.pos;
         out_observed |= action.observe.active_mask;
         return true;
@@ -1147,7 +1150,8 @@ int MacroPlanner::reference_access_cost(const SokobanLevel& level, point player,
                 level, player, required_mask, view, path, initial_dir)) {
             return kInfScore;
         }
-        return PlanningCommon::observe_route_time_cost(player, path, initial_dir) +
+        return PlanningCommon::MotionCostConfig::OBSERVE_ACTION +
+               PlanningCommon::observe_route_time_cost(player, path, initial_dir) +
                PlanningCommon::yaw_turn_time_cost(observe_yaw, view.target_yaw) +
                view.penalty[0];
     }

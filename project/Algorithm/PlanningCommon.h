@@ -11,52 +11,63 @@ using namespace SystemConfig;
 // ============================================================================
 namespace PlanningCommon {
 
+// 规划器与仿真统计共用的动作代价模型
+namespace MotionCostConfig {
+inline constexpr uint16_t MOVE_STEP = 1u;       // 普通移动每格代价
+inline constexpr uint16_t STOP_NODE = 2u;       // 停止节点代价（包括拐点、反向和观测点）
+inline constexpr uint16_t OBSERVE_EXTRA = 1u;   // 完成一次识别的额外代价
+inline constexpr uint16_t TURN_EXTRA = 3u;      // 原地对齐观测朝向的额外代价
+inline constexpr uint16_t OBSERVE_ACTION = STOP_NODE + OBSERVE_EXTRA;
+} // namespace MotionCostConfig
+
+// 斜向移动配置
 namespace ObserveRouteConfig {
-// 巡图观测路径总开关，关闭后恢复原始四方向网格路径和原观测点
-inline constexpr bool ENABLE_OBSERVE_ROUTE_OPTIMIZATION = true;
-// 原点直斜线受阻时，允许 Macro 在邻域内寻找可斜向到达的合法终点
-inline constexpr bool ENABLE_OBSERVE_ENDPOINT_ADJUST = true;
-inline constexpr int ENDPOINT_ADJUST_RADIUS = 1;
-}
+inline constexpr bool ENABLE_OBSERVE_ROUTE_OPTIMIZATION = true;   // 启用观测路径斜向优化
+inline constexpr bool ENABLE_OBSERVE_ENDPOINT_ADJUST = true;      // 启用观测路径终点微调
+inline constexpr int ENDPOINT_ADJUST_RADIUS = 1;                  // 邻域半径，1 表示 3x3，2 表示 5x5
+} // namespace ObserveRouteConfig
 
-namespace ObservationConfig {
-// 箱子只允许正前方 1 格或 2 格无遮挡直视；两种距离不设置额外优先级
-inline constexpr bool ENABLE_FACE_TO_FACE = true;
-inline constexpr bool ENABLE_OPTIMAL_DIST = true;
+// 箱子额外观测位配置
+namespace BoxObservationConfig {
+inline constexpr bool ENABLE_F2 = true;   // F2 正前方
+} // namespace BoxObservationConfig
 
-// 单目标点允许正前方 1/2/3 格和 F2 左右斜角观测，F1 斜角仅用于联合观测
-inline constexpr bool ENABLE_DIAGONAL = true;                
-inline constexpr bool ENABLE_TARGET_FAR_FACE_TO_FACE = true;
+// 目标点额外观测位配置
+namespace TargetObservationConfig {
+// 单个目标观测槽位
+inline constexpr bool ENABLE_F2 = true;             // F2 正前方
+inline constexpr bool ENABLE_F2_DIAGONAL = true;    // F2 左右斜角
+inline constexpr bool ENABLE_F3 = true;             // F3 正前方
 
-// 开启以 F2 正中目标为核心、组合 F2 左右斜角目标的联合观测
-inline constexpr bool ENABLE_TARGET_JOINT_F2_DIAGONAL = true;
-// 开启以 F2 正中目标为核心、组合 F1 左右斜角目标的联合观测
-inline constexpr bool ENABLE_TARGET_JOINT_F1_DIAGONAL = true;
+// 联合观测槽位
+inline constexpr bool ENABLE_JOINT_F2_DIAGONAL = true;   // F2 左右斜角联合观测
+inline constexpr bool ENABLE_JOINT_F1_DIAGONAL = true;   // F1 左右斜角联合观测
 
 // 定义各个观测槽位的索引
-inline constexpr int TARGET_SLOT_F1 = 0;        // F1 正前1格槽位
-inline constexpr int TARGET_SLOT_F2_CORE = 1;   // F2 正前2格槽位
-inline constexpr int TARGET_SLOT_F2_LEFT = 2;   // F2 左侧斜角槽位
-inline constexpr int TARGET_SLOT_F2_RIGHT = 3;  // F2 右侧斜角槽位
-inline constexpr int TARGET_SLOT_F3 = 4;        // F3 正前3格槽位
-inline constexpr int TARGET_SLOT_F1_LEFT = 5;   // F1 左侧槽位
-inline constexpr int TARGET_SLOT_F1_RIGHT = 6;  // F1 右侧槽位
+inline constexpr int TARGET_SLOT_F1 = 0;         // F1 正前1格槽位
+inline constexpr int TARGET_SLOT_F2_CORE = 1;    // F2 正前2格槽位
+inline constexpr int TARGET_SLOT_F2_LEFT = 2;    // F2 左侧斜角槽位
+inline constexpr int TARGET_SLOT_F2_RIGHT = 3;   // F2 右侧斜角槽位
+inline constexpr int TARGET_SLOT_F3 = 4;         // F3 正前3格槽位
+inline constexpr int TARGET_SLOT_F1_LEFT = 5;    // F1 左侧槽位
+inline constexpr int TARGET_SLOT_F1_RIGHT = 6;   // F1 右侧槽位
 
 inline constexpr uint8_t MAX_TARGETS_PER_OBSERVATION = 3u;   // 一次联合观测最多识别 3 个目标
 inline constexpr int TARGET_BASE_SLOT_COUNT = 5;             // 基础可见性槽位数量，含 F2 左右斜角
 inline constexpr int TARGET_OBSERVE_SLOT_COUNT = 7;          // 总共记录 7 种相对位置
 inline constexpr uint16_t TARGET_OPTIMAL_PENALTY = 0u;       // 隔一格目标已满足识别距离，不为靠近制造移动
-inline constexpr uint16_t TARGET_FAR_PENALTY = 1u;           // 正前方第 3 格略低于第 1/2 格
+inline constexpr uint16_t TARGET_FAR_PENALTY = 2u;           // 正前方第 3 格略低于第 1/2 格
 inline constexpr uint16_t TARGET_DIAGONAL_PENALTY = 1u;      // 斜视略低于同距离正视
-}
+} // namespace TargetObservationConfig
 
 /// \brief 单个目标观测几何槽位的可见实体与代价
 ///
 /// slots 前五项是单目标候选，后两项是 F1 左右斜角，仅用于联合观测
 struct TargetObserveSlots {
-    uint32_t mask[ObservationConfig::TARGET_OBSERVE_SLOT_COUNT] = {};
-    uint16_t penalty[ObservationConfig::TARGET_OBSERVE_SLOT_COUNT] = {};
+    uint32_t mask[TargetObservationConfig::TARGET_OBSERVE_SLOT_COUNT] = {};
+    uint16_t penalty[TargetObservationConfig::TARGET_OBSERVE_SLOT_COUNT] = {};
 };
+
 
 // --- 地图与实体查询 ---
 bool in_bounds(point p);
@@ -109,7 +120,7 @@ bool get_grid_path(const SokobanLevel& lvl, point start, point end, StaticArray<
 // 说明：
 // - 原 bfs_shortest_path / get_grid_path 仍只负责拓扑可达性和传统最短步数路径
 // - 下列接口只用于第一阶段评分、排序和普通巡图移动，避免把拐点代价误注入推箱可达性判断
-// - 时间模型参数在 PlanningCommon.cpp 的 MotionCost 命名空间中调整，全部使用 inline constexpr
+// - 时间模型参数统一在 MotionCostConfig 中调整
 // initial_dir 为进入 start 前的 MOVE 下标；-1 表示没有历史方向，不计首步拐点。
 uint16_t path_time_cost(point start,
                         const StaticArray<point, MAX_PATH_LENGTH>& path,

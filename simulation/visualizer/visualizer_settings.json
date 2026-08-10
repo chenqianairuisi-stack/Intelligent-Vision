@@ -3,5 +3,8 @@
     6,
     2
   ],
-  "dark_mode": false
+  "dark_mode": false,
+  "simulation_diagonal_move": true,
+  "simulation_box_extra_observe": true,
+  "simulation_target_extra_observe": true
 }
