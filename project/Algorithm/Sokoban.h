@@ -316,6 +316,8 @@ private:
     void precompute_target_distances();
     // 预计算单箱推到目标的乐观总代价下界
     void precompute_box_target_costs();
+    // 解出忽略其他动态实体的单箱参考路径
+    void precompute_box_reference_paths();
     // 预计算每个炸弹到目标墙的反向推动距离
     void precompute_bomb_distances();
     void precompute_bomb_macro_costs();

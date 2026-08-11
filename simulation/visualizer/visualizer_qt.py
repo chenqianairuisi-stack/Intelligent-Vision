@@ -39,6 +39,7 @@ MAP_INPUT_PATH = os.path.join(VISUALIZER_DIR, "map_input.txt")
 PATH_OUTPUT_PATH = os.path.join(VISUALIZER_DIR, "path_output.txt")
 SETTINGS_PATH = os.path.join(VISUALIZER_DIR, "visualizer_settings.json")
 DEFAULT_MAP_DIR = os.path.join(PROJECT_DIR, "map", "map_game")
+SOLVER_TIMEOUT_SECONDS = 4.0
 
 MOVE_STEP_COST = 1
 STOP_NODE_COST = 2
@@ -88,32 +89,62 @@ def append_patrol_move_events(events, current_pos, target):
 class SolverThread(QThread):
     finished_ok = Signal()
     failed = Signal(str)
+    timed_out = Signal()
 
-    def __init__(self, solver_path, solver_args, cwd, parent=None):
+    def __init__(self, solver_path, solver_args, cwd, parent=None, timeout_seconds=SOLVER_TIMEOUT_SECONDS):
         super().__init__(parent)
         self.solver_path = solver_path
         self.solver_args = solver_args
         self.cwd = cwd
+        self.timeout_seconds = timeout_seconds
         self.process = None
+        self.stop_requested = False
+
+    def kill_process(self):
+        process = self.process
+        if process is None or process.poll() is not None:
+            return
+        try:
+            process.kill()
+            process.wait(timeout=1.0)
+        except Exception:
+            pass
 
     def run(self):
         try:
+            if self.stop_requested:
+                return
             self.process = subprocess.Popen(
                 [self.solver_path, *self.solver_args],
                 cwd=self.cwd,
             )
-            self.process.wait()
+            if self.stop_requested:
+                self.kill_process()
+                return
+            try:
+                return_code = self.process.wait(timeout=self.timeout_seconds)
+            except subprocess.TimeoutExpired:
+                self.kill_process()
+                if not self.stop_requested:
+                    self.timed_out.emit()
+                return
         except Exception as exc:
-            self.failed.emit(str(exc))
+            if not self.stop_requested:
+                self.failed.emit(str(exc))
+            return
+        finally:
+            self.process = None
+
+        if self.stop_requested:
+            return
+        if return_code != 0:
+            self.failed.emit(f"求解器异常退出，返回码 {return_code}")
             return
         self.finished_ok.emit()
 
     def stop(self):
-        if self.process and self.process.poll() is None:
-            try:
-                self.process.kill()
-            except Exception:
-                pass
+        self.stop_requested = True
+        self.kill_process()
 
 
 class MapCanvas(QWidget):
@@ -802,11 +833,18 @@ class SokobanVisualizerQt(QMainWindow):
     def closeEvent(self, event):
         self.save_current_car_start()
         self.cancel_animation_timer()
-        if self.solver_thread:
-            self.solver_thread.stop()
-        if os.name == "nt":
-            os.system("taskkill /F /IM solver.exe >nul 2>&1")
+        self.stop_solver_thread()
         super().closeEvent(event)
+
+    def stop_solver_thread(self):
+        thread = self.solver_thread
+        if thread is None:
+            return
+        thread.stop()
+        if thread.isRunning():
+            thread.wait(1000)
+        if self.solver_thread is thread:
+            self.solver_thread = None
 
     def scan_map_directory(self, directory):
         directory = os.path.abspath(directory)
@@ -1181,10 +1219,15 @@ class SokobanVisualizerQt(QMainWindow):
             QMessageBox.critical(self, "错误", f"未找到 {SOLVER_PATH}，请先编译 C++ 代码")
             return
 
-        if self.solver_thread:
-            self.solver_thread.stop()
-        if os.name == "nt":
-            os.system("taskkill /F /IM solver.exe >nul 2>&1")
+        self.stop_solver_thread()
+        try:
+            os.remove(PATH_OUTPUT_PATH)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            self.set_status("无法清理旧求解结果", "error")
+            QMessageBox.critical(self, "错误", str(exc))
+            return
 
         self.is_solver_running = True
         self.update_playback_controls()
@@ -1196,15 +1239,26 @@ class SokobanVisualizerQt(QMainWindow):
         self.solver_thread = SolverThread(SOLVER_PATH, solver_args, VISUALIZER_DIR, self)
         self.solver_thread.finished_ok.connect(self.parse_and_play)
         self.solver_thread.failed.connect(self.on_solver_failed)
+        self.solver_thread.timed_out.connect(self.on_solver_timed_out)
         self.solver_thread.finished.connect(self.on_solver_thread_finished)
         self.solver_thread.start()
 
     def on_solver_failed(self, message):
-        self.set_status("求解器启动失败", "error")
+        self.sokoban_failed = True
+        self.set_status("求解失败", "error")
         QMessageBox.critical(self, "错误", message)
 
+    def on_solver_timed_out(self):
+        self.sokoban_failed = True
+        self.set_status(f"求解超过 {SOLVER_TIMEOUT_SECONDS:g} 秒，判定失败", "error")
+        self.canvas.update()
+
     def on_solver_thread_finished(self):
+        thread = self.sender()
+        if thread is not self.solver_thread:
+            return
         self.is_solver_running = False
+        self.solver_thread = None
         self.update_playback_controls()
 
     def parse_and_play(self):

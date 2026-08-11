@@ -6006,6 +6006,9 @@ static bool phase2_logic_edge_missing_walls(const SokobanLevel& lvl, point box_p
     return out_count > 0;
 }
 
+// Phase2 正反向宽松距离场顺序构建，共用队列避免重复占用 OCRAM
+OCRAM_BSS static point phase2_relaxed_push_q[MAP_CELL_COUNT];
+
 static void phase2_logic_build_reverse_push_reach(
     const SokobanLevel& lvl,
     point target,
@@ -6015,13 +6018,12 @@ static void phase2_logic_build_reverse_push_reach(
     }
     if (!PlanningCommon::in_bounds(target) || phase2_strategy_is_wall(lvl, target)) return;
 
-    OCRAM_BSS static point q[MAP_CELL_COUNT];
     int head = 0, tail = 0;
     out_dist[target.y][target.x] = 0;
-    q[tail++] = target;
+    phase2_relaxed_push_q[tail++] = target;
 
     while (head < tail) {
-        point curr = q[head++];
+        point curr = phase2_relaxed_push_q[head++];
         int16_t curr_dist = out_dist[curr.y][curr.x];
         for (int dir = 0; dir < 4; ++dir) {
             point box_prev = curr - MOVE[dir];
@@ -6030,8 +6032,54 @@ static void phase2_logic_build_reverse_push_reach(
             if (phase2_strategy_is_wall(lvl, box_prev) || phase2_strategy_is_wall(lvl, player_prev)) continue;
             if (out_dist[box_prev.y][box_prev.x] != INF_DIST) continue;
             out_dist[box_prev.y][box_prev.x] = curr_dist + 1;
-            q[tail++] = box_prev;
+            phase2_relaxed_push_q[tail++] = box_prev;
         }
+    }
+}
+
+/// \brief 构建忽略动态实体和玩家绕行的宽松推箱距离场
+/// \param lvl 当前墙体拓扑
+/// \param box_start 箱子起点
+/// \param out_dist 箱子到各格子的估计推动次数
+///
+/// \details
+/// 该距离场只检查箱子落点和发力位是否为静态空地，用于 Phase2 候选评分
+/// 动态箱体冲突和玩家真实可达性统一留到最终任务实体化阶段验证
+static void phase2_build_relaxed_push_distances(
+    const SokobanLevel& lvl,
+    point box_start,
+    int16_t out_dist[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]) {
+    for (int y = 0; y < MAP_MAX_HEIGHT; ++y) {
+        for (int x = 0; x < MAP_MAX_WIDTH; ++x) out_dist[y][x] = INF_DIST;
+    }
+    if (!PlanningCommon::in_bounds(box_start) || phase2_strategy_is_wall(lvl, box_start)) return;
+
+    int head = 0;
+    int tail = 0;
+    out_dist[box_start.y][box_start.x] = 0;
+    phase2_relaxed_push_q[tail++] = box_start;
+
+    while (head < tail) {
+        point curr = phase2_relaxed_push_q[head++];
+        int16_t curr_dist = out_dist[curr.y][curr.x];
+        for (int dir = 0; dir < 4; ++dir) {
+            point box_to = curr + MOVE[dir];
+            point push_from = curr - MOVE[dir];
+            if (!PlanningCommon::in_bounds(box_to) || !PlanningCommon::in_bounds(push_from)) continue;
+            if (phase2_strategy_is_wall(lvl, box_to) || phase2_strategy_is_wall(lvl, push_from)) continue;
+            if (out_dist[box_to.y][box_to.x] != INF_DIST) continue;
+            out_dist[box_to.y][box_to.x] = static_cast<int16_t>(curr_dist + 1);
+            phase2_relaxed_push_q[tail++] = box_to;
+        }
+    }
+}
+
+/// \brief 为 Phase2 语义匹配构建所有箱子的宽松距离场
+static void phase2_build_relaxed_box_distances(
+    const SokobanLevel& lvl,
+    int16_t out_dist[MAX_BOXES][MAP_MAX_HEIGHT][MAP_MAX_WIDTH]) {
+    for (int b = 0; b < lvl.box_count; ++b) {
+        phase2_build_relaxed_push_distances(lvl, lvl.boxes[b], out_dist[b]);
     }
 }
 
@@ -6573,14 +6621,28 @@ StaticArray<BombTask, MAX_BOMBS> StrategicPlanner::plan_phase2_bombs(
             inherited_res.bomb_supply_score = inherited_cost;
             this->record_profile_result(2, inherited_res);
 
-            // Phase2 继承 Phase1 剩余任务；后续 suffix 只在继承后的地图上追加
-            // 只有继承任务已解除语义不可达时才固定为前缀
+            // Phase2 继承 Phase1 剩余任务，essential 序列验证成功后固定为前缀
+            // 后续 suffix 只使用剩余炸弹处理未解除死锁或降低最终推箱距离
+        }
+    }
+
+    bool inherited_is_fixed = inherited_valid;
+    for (int i = 0; i < inherited.size(); ++i) {
+        if (!inherited[i].is_essential) {
+            inherited_is_fixed = false;
+            break;
         }
     }
 
     DFSResult final_res;
     uint8_t selected_profile_pass = 0;
-    run_phase2_search(level, final_res, selected_profile_pass);
+    if (inherited_is_fixed) {
+        // Phase1 的 essential 任务负责解除结构死锁，Phase2 只在其后搜索降推箱代价的 suffix
+        final_res = inherited_res;
+        selected_profile_pass = 2;
+    } else {
+        run_phase2_search(level, final_res, selected_profile_pass);
+    }
 
     if (inherited_valid) {
         if (phase2_result_better_than(inherited_res, final_res)) {
@@ -6676,18 +6738,8 @@ void StrategicPlanner::dfs_phase2_bomb_sequence(
     int current_distance = 0;
     PlanningCommon::calc_player_reach(current_lvl, player_start, {-1, -1}, {-1, -1}, phase2_strategy_ws.dfs_player_vis[depth]);
 
-    // Phase2 只评估箱子到同语义目标的可达性
-    for (int b = 0; b < current_lvl.box_count; ++b) {
-        this->fast_push_bfs(
-            current_lvl,
-            current_lvl.boxes[b],
-            player_start,
-            false,
-            phase2_strategy_ws.dfs_dist_box[depth][b],
-            true,
-            true
-        );
-    }
+    // 评分层复用宽松距离场，真实玩家绕行和动态实体冲突留到最终实体化验证
+    phase2_build_relaxed_box_distances(current_lvl, phase2_strategy_ws.dfs_dist_box[depth]);
     evaluate_phase2_semantic_matching(current_lvl, phase2_strategy_ws.dfs_dist_box[depth], current_deadlocks, current_distance);
 
     bool terminal_node = current_seq.size() == current_bomb_count || depth >= MAX_BOMBS;
@@ -6748,15 +6800,11 @@ void StrategicPlanner::dfs_phase2_bomb_sequence(
     };
 
     auto eval_probe_state = [&](const SokobanLevel& lvl,
-                                point eval_player,
                                 int& out_deadlocks,
                                 int& out_distance) {
         out_deadlocks = 0;
         out_distance = 0;
-        for (int b = 0; b < lvl.box_count; ++b) {
-            this->fast_push_bfs(lvl, lvl.boxes[b], eval_player, false,
-                                probe_box_dist[b], true, true);
-        }
+        phase2_build_relaxed_box_distances(lvl, probe_box_dist);
         evaluate_phase2_semantic_matching(lvl, probe_box_dist, out_deadlocks, out_distance);
     };
 
@@ -6854,21 +6902,7 @@ void StrategicPlanner::dfs_phase2_bomb_sequence(
             point wall = {static_cast<int8_t>(x), static_cast<int8_t>(y)};
             apply_probe_bomb_transition(probe_lvl, m, wall);
 
-            // 用真实推炸弹后的玩家站位评估箱子距离；墙心只是爆心，不能作为车辆位置。
-            point eval_player = wall;
-            BombTask probe_task{};
-            probe_task.bomb_start = current_lvl.bombs[m];
-            probe_task.target_wall = wall;
-            StaticArray<point, MAX_PATH_LENGTH> probe_path;
-            const bool probe_path_ok = PlanningCommon::get_bomb_push_path(
-                    current_lvl, player_start, probe_task, probe_path) &&
-                !probe_path.empty();
-            if (probe_path_ok) {
-                eval_player = probe_path.back();
-            } else if (!structural_defect_active) {
-                return;
-            }
-            eval_probe_state(probe_lvl, eval_player, after_deadlocks, after_distance);
+            eval_probe_state(probe_lvl, after_deadlocks, after_distance);
             phase2_strategy_ws.dfs.probe_valid[depth][y][x] = true;
             phase2_strategy_ws.dfs.probe_bomb_idx[depth][y][x] = static_cast<uint8_t>(m);
             phase2_strategy_ws.dfs.probe_deadlocks[depth][y][x] = after_deadlocks;
@@ -7203,17 +7237,8 @@ void StrategicPlanner::evaluate_phase2_level_matching(
     point player,
     int& out_deadlocks,
     int& out_distance) {
-    for (int b = 0; b < level.box_count; ++b) {
-        this->fast_push_bfs(
-            level,
-            level.boxes[b],
-            player,
-            false,
-            phase2_strategy_ws.probe_box_dist[b],
-            true,
-            true
-        );
-    }
+    (void)player;
+    phase2_build_relaxed_box_distances(level, phase2_strategy_ws.probe_box_dist);
     evaluate_phase2_semantic_matching(level, phase2_strategy_ws.probe_box_dist, out_deadlocks, out_distance);
 }
 
