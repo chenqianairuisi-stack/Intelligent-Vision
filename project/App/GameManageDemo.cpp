@@ -284,7 +284,11 @@ __attribute__((section(".ramfunc"))) void DemoGameManager::update() {
 
                 App::g_state.debug.need_bg_redraw = true;
 
-                if (!solver.load_from_vision(logical_level, bombs.empty() ? nullptr : bombs.data(), bombs.size()) ||
+                if (!solver.load_from_vision(
+                        logical_level,
+                        bombs.empty() ? nullptr : bombs.data(),
+                        bombs.size(),
+                        SokobanHeuristicMode::SEMANTIC) ||
                     !solver.bind_semantics()) {
                     game.error_stage = 2;
                     game.phase = GamePhase::ERROR_OCCURRED;

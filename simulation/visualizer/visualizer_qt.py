@@ -531,6 +531,9 @@ class SokobanVisualizerQt(QMainWindow):
         row = QHBoxLayout(wrapper)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(4)
+        self.advanced_stage_checkbox = QCheckBox("高级赛")
+        self.advanced_stage_checkbox.setChecked(bool(self.user_settings.get("simulation_advanced_stage", True)))
+        self.advanced_stage_checkbox.setToolTip("控制求解器的 is_advanced_stage 比赛模式")
         self.speed_btn = QPushButton(self.playback_speed_label())
         self.overlay_btn = QPushButton()
         self.theme_btn = QPushButton()
@@ -540,9 +543,11 @@ class SokobanVisualizerQt(QMainWindow):
         self.speed_btn.setFixedWidth(44)
         self.overlay_btn.setIconSize(QSize(18, 18))
         self.theme_btn.setIconSize(QSize(18, 18))
+        row.addWidget(self.advanced_stage_checkbox)
         row.addWidget(self.speed_btn)
         row.addWidget(self.overlay_btn)
         row.addWidget(self.theme_btn)
+        self.advanced_stage_checkbox.toggled.connect(self.save_simulation_switches)
         self.speed_btn.clicked.connect(self.toggle_playback_speed)
         self.overlay_btn.clicked.connect(self.toggle_debug_overlays)
         self.theme_btn.clicked.connect(self.toggle_theme_mode)
@@ -811,6 +816,7 @@ class SokobanVisualizerQt(QMainWindow):
             pass
 
     def save_simulation_switches(self, _checked=False):
+        self.user_settings["simulation_advanced_stage"] = self.advanced_stage_checkbox.isChecked()
         self.user_settings["simulation_diagonal_move"] = self.diagonal_move_checkbox.isChecked()
         self.user_settings["simulation_box_extra_observe"] = self.box_extra_observe_checkbox.isChecked()
         self.user_settings["simulation_target_extra_observe"] = self.target_extra_observe_checkbox.isChecked()
@@ -1078,6 +1084,7 @@ class SokobanVisualizerQt(QMainWindow):
         self.step_btn.setEnabled(can_control)
         self.solve_btn.setEnabled(not self.is_solver_running)
         for checkbox in [
+            self.advanced_stage_checkbox,
             self.diagonal_move_checkbox,
             self.box_extra_observe_checkbox,
             self.target_extra_observe_checkbox,
@@ -1232,6 +1239,7 @@ class SokobanVisualizerQt(QMainWindow):
         self.is_solver_running = True
         self.update_playback_controls()
         solver_args = [
+            f"--advanced-stage={int(self.advanced_stage_checkbox.isChecked())}",
             f"--diagonal-move={int(self.diagonal_move_checkbox.isChecked())}",
             f"--box-extra-observe={int(self.box_extra_observe_checkbox.isChecked())}",
             f"--target-extra-observe={int(self.target_extra_observe_checkbox.isChecked())}",

@@ -1067,6 +1067,8 @@ namespace {
         point corners[OBS_ROUTE_MAX_CORNERS];
         ObserveRouteNode nodes[OBS_ROUTE_MAX_NODES];
         ObserveRouteLayer layers[OBS_ROUTE_MAX_CORNERS];
+        uint8_t segment_count[OBS_ROUTE_MAX_NODES];
+        uint8_t diagonal_segment_count[OBS_ROUTE_MAX_NODES];
         uint32_t dist[OBS_ROUTE_MAX_NODES];
         int16_t parent[OBS_ROUTE_MAX_NODES];
         point reversed[OBS_ROUTE_MAX_NODES];
@@ -1313,10 +1315,14 @@ namespace {
         }
 
         for (int i = 0; i < node_count; ++i) {
+            ws.segment_count[i] = 0xFFu;
+            ws.diagonal_segment_count[i] = 0xFFu;
             ws.dist[i] = 0xFFFFFFFFu;
             ws.parent[i] = -1;
         }
         const int start_node = ws.layers[0].begin;
+        ws.segment_count[start_node] = 0u;
+        ws.diagonal_segment_count[start_node] = 0u;
         ws.dist[start_node] = 0u;
 
         // 分层图天然是 DAG，只允许向原路径后方连边，移动航点不会破坏后续拓扑
@@ -1347,8 +1353,27 @@ namespace {
                                          OBS_ROUTE_COST_SCALE;
                         }
 
+                        const uint8_t next_segment_count =
+                            static_cast<uint8_t>(ws.segment_count[from_idx] + 1u);
+                        const uint8_t next_diagonal_segment_count =
+                            static_cast<uint8_t>(
+                                ws.diagonal_segment_count[from_idx] +
+                                (from.x != to.x && from.y != to.y ? 1u : 0u));
                         const uint32_t next_cost = ws.dist[from_idx] + edge_cost;
-                        if (next_cost >= ws.dist[to_idx]) continue;
+                        const bool better_shape =
+                            next_segment_count < ws.segment_count[to_idx] ||
+                            (next_segment_count == ws.segment_count[to_idx] &&
+                             next_diagonal_segment_count <
+                                 ws.diagonal_segment_count[to_idx]);
+                        const bool same_shape_better_cost =
+                            next_segment_count == ws.segment_count[to_idx] &&
+                            next_diagonal_segment_count ==
+                                ws.diagonal_segment_count[to_idx] &&
+                            next_cost < ws.dist[to_idx];
+                        if (!better_shape && !same_shape_better_cost) continue;
+                        ws.segment_count[to_idx] = next_segment_count;
+                        ws.diagonal_segment_count[to_idx] =
+                            next_diagonal_segment_count;
                         ws.dist[to_idx] = next_cost;
                         ws.parent[to_idx] = static_cast<int16_t>(from_idx);
                     }

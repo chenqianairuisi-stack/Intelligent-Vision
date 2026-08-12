@@ -20,6 +20,8 @@ static const char* SOLVER_BUILD_TAG = __DATE__ " " __TIME__;
 
 namespace {
 
+int advanced_stage_override = -1;
+
 bool parse_switch_arg(const std::string& arg, const char* option, float& target) {
     const std::string prefix = std::string(option) + "=";
     if (arg.rfind(prefix, 0) != 0) return false;
@@ -38,6 +40,14 @@ bool parse_switch_arg(const std::string& arg, const char* option, float& target)
 
 bool apply_simulation_switch(const std::string& arg) {
     // 命令行开关只覆盖当前仿真进程中的运行时参数
+    if (arg == "--advanced-stage=0") {
+        advanced_stage_override = 0;
+        return true;
+    }
+    if (arg == "--advanced-stage=1") {
+        advanced_stage_override = 1;
+        return true;
+    }
     return parse_switch_arg(arg, "--diagonal-move", tune.planning_extra.diagonal_move_enable) ||
            parse_switch_arg(arg, "--box-extra-observe", tune.planning_extra.box_extra_observe_enable) ||
            parse_switch_arg(arg, "--target-extra-observe", tune.planning_extra.target_extra_observe_enable);
@@ -510,7 +520,11 @@ bool load_semantic_solver(SokobanLevel& level,
                           const int8_t semantic_labels[MAX_ENTITIES],
                           const StaticArray<BombTask, MAX_BOMBS>& bombs) {
     if (!apply_semantic_labels_to_level(level, semantic_labels)) return false;
-    solver.load_from_vision(level, bombs.size() > 0 ? bombs.begin() : nullptr, bombs.size());
+    solver.load_from_vision(
+        level,
+        bombs.size() > 0 ? bombs.begin() : nullptr,
+        bombs.size(),
+        SokobanHeuristicMode::SEMANTIC);
     if (!solver.bind_semantics()) return false;
     return true;
 }
@@ -530,6 +544,8 @@ int main(int argc, char** argv) {
     int8_t truth_semantic_labels[MAX_ENTITIES];
     if (!read_level_from_file(map_file, logical_level, truth_semantic_labels, is_advanced_stage)) return -2;
     map_file.close();
+    // 界面选择优先于地图尾部格式推导出的比赛模式
+    if (advanced_stage_override >= 0) is_advanced_stage = advanced_stage_override != 0;
 
     int8_t observed_semantic_labels[MAX_ENTITIES];
     for (int i = 0; i < MAX_ENTITIES; ++i) observed_semantic_labels[i] = -1;
@@ -809,7 +825,11 @@ int main(int argc, char** argv) {
     } else {
         set_uniform_semantic_labels(logical_level, truth_semantic_labels, 0);
         if (!apply_semantic_labels_to_level(logical_level, truth_semantic_labels)) return -4;
-        solver.load_from_vision(logical_level, nullptr, 0);
+        solver.load_from_vision(
+            logical_level,
+            nullptr,
+            0,
+            SokobanHeuristicMode::PURE);
         if (!solver.bind_semantics()) return -5;
 
         auto t4_start = std::chrono::high_resolution_clock::now();

@@ -324,7 +324,12 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 if (game.is_advanced_stage) {  
                     game.phase = GamePhase::PLAN_PATROL;       // 进入巡图
                 } else {
-                    if (!solver.load_from_vision(logical_level, nullptr, 0) || !solver.bind_semantics()) {
+                    if (!solver.load_from_vision(
+                            logical_level,
+                            nullptr,
+                            0,
+                            SokobanHeuristicMode::PURE) ||
+                        !solver.bind_semantics()) {
                         game.error_stage = 6;
                         game.phase = GamePhase::ERROR_OCCURRED;
                         break;
@@ -745,7 +750,11 @@ bool GameManager::prepare_phase2_solver(bool dynamic_fallback) {
     auto& bombs = App::g_state.planning.bomb_tasks;
     bombs = strategic_planner.plan_phase2_bombs(logical_level, bombs);
 
-    if (!solver.load_from_vision(logical_level, bombs.empty() ? nullptr : bombs.data(), bombs.size())) return false;
+    if (!solver.load_from_vision(
+            logical_level,
+            bombs.empty() ? nullptr : bombs.data(),
+            bombs.size(),
+            SokobanHeuristicMode::SEMANTIC)) return false;
     if (!solver.bind_semantics()) return false;
     return true;
 }

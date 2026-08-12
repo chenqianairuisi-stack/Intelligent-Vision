@@ -65,11 +65,20 @@ struct SokobanProfile {
     uint16_t final_threshold = 0;         // 搜索结束时的阈值，便于对比启发式强弱
 };
 
+enum class SokobanHeuristicMode : uint8_t {
+    PURE,       // 纯推箱使用保守等权启发
+    SEMANTIC    // 语义推箱按活跃实体数提高权重
+};
+
 class Sokoban {
 public:
     // --- 生命周期与外部输入 ---
-    // 导入当前地图快照和炸弹任务缓存
-    bool load_from_vision(const SokobanLevel& level, const BombTask* tasks, int count);
+    // 导入当前地图快照、炸弹任务和本轮启发式模式
+    bool load_from_vision(
+        const SokobanLevel& level,
+        const BombTask* tasks,
+        int count,
+        SokobanHeuristicMode heuristic_mode);
     // 校验已导入的箱子/目标点语义，移除已落位箱子，并统一完成预计算
     bool bind_semantics();
 
@@ -162,9 +171,11 @@ private:
             return (v >= BOMB_BASE) ? (v - BOMB_BASE) : -1;
         }
     };
-    // --- IDA* 主流程 ---
+    // --- 求解入口与首解修复 ---
     // IDA* 外层驱动：初始化根状态、阈值和置换表，并逐轮加深
     bool solve_internal();
+    // 纯推箱先取任务级宏首解，再按固定节点预算运行严格 IDA* 改进
+    bool try_pure_box_hybrid_solution();
     // 运行一次 IDA*，strict_cost=true 时按真实步数做受限修复搜索
     bool run_ida_search(
         bool strict_cost,
@@ -178,12 +189,30 @@ private:
         uint32_t node_budget);
     // 用快速首解作为上界，尝试在小预算内找真实步数更短的解
     bool try_strict_cost_repair(const StaticArray<point, MAX_PATH_LENGTH>& candidate_path);
-    // 对单条候选路径做完整收尾（严格步数修复 + 转弯后处理），写入 final_path 并返回其面板总代价
-    int finalize_path_candidate(const StaticArray<point, MAX_PATH_LENGTH>& candidate);
-    // 在宏层候选与加权 IDA* 首解间各自收尾后择优；ida_candidate 为空表示 IDA* 未出解
-    void select_cheaper_finalized(
-        const StaticArray<point, MAX_PATH_LENGTH>& macro_candidate,
-        const StaticArray<point, MAX_PATH_LENGTH>* ida_candidate);
+
+    // --- 纯推箱任务级宏搜索 ---
+    // 纯推箱按“完成一个箱子任务”为宏边快速搜索候选解
+    bool try_box_task_candidate(StaticArray<point, MAX_PATH_LENGTH>& out_path) const;
+    // 递归搜索首个可行的箱子完成顺序和目标分配
+    bool search_box_task_candidate(
+        const SokobanLevel& level,
+        point player,
+        uint16_t remaining_targets,
+        const StaticArray<point, MAX_PATH_LENGTH>& path,
+        StaticArray<point, MAX_PATH_LENGTH>& out_path,
+        uint32_t& branch_budget) const;
+    // 回放并校验一条箱子任务宏边符合求解器的落位规则
+    bool validate_box_task_segment(
+        const SokobanLevel& level,
+        point player,
+        int moving_box,
+        uint8_t semantic_id,
+        uint16_t remaining_targets,
+        uint16_t target_bit,
+        int segment_begin,
+        const StaticArray<point, MAX_PATH_LENGTH>& path) const;
+
+    // --- IDA* 搜索热路径 ---
     // 单次阈值内的递归搜索；返回 -1 表示找到解，其它值用于推进下一轮阈值
     int ida_star_search(
         const GameState& state,
@@ -229,41 +258,6 @@ private:
         MacroMove macros[MAX_NODE_MACROS]) const;
     // 把搜索状态还原成临时关卡，供炸弹路径规划复用通用接口
     void build_level_from_state(const GameState& state, SokobanLevel& out_level) const;
-    // 在根部尝试少箱宏层快解，失败或被门控拒绝时回到 IDA*
-    bool try_small_box_macro_solution();
-    // 根部一次性构造“先完成炸弹任务，再完成少箱推箱”的候选路径
-    bool try_bomb_then_small_box_macro_solution(
-        StaticArray<point, MAX_PATH_LENGTH>& out_path) const;
-    // 从任意搜索状态尝试用少箱宏层完成剩余纯推箱任务
-    bool try_small_box_macro_solution_from_state(
-        const GameState& state,
-        StaticArray<point, MAX_PATH_LENGTH>& out_path) const;
-    // 校验单个箱子完成宏没有推到其它箱子或提前命中其它目标
-    bool validate_box_macro_segment(
-        const SokobanLevel& level,
-        point player_pos,
-        int moving_level_idx,
-        uint8_t sem,
-        uint16_t remaining_target_mask,
-        uint16_t target_bit,
-        const StaticArray<point, MAX_PATH_LENGTH>& path,
-        const StaticArray<point, MAX_PATH_LENGTH>& next_path) const;
-    // 递归枚举少量箱子的完成顺序和目标分配，选出最短可展开宏序列
-    bool search_small_box_macro_order(
-        int depth,
-        const GameState& root_state,
-        int box_count,
-        uint16_t remaining_target_mask,
-        bool used[MAX_BOXES],
-        const SokobanLevel& level,
-        point player_pos,
-        const StaticArray<point, MAX_PATH_LENGTH>& path,
-        StaticArray<point, MAX_PATH_LENGTH>& best_path,
-        int& best_len) const;
-    // 宏任务完成后按临时关卡下标移出刚才实际推动的箱子
-    bool remove_macro_completed_box_at_index(SokobanLevel& level, int box_idx, point expected_target) const;
-    // 回放宏层候选路径，确认没有箱子重叠且所有目标真实完成
-    bool validate_macro_solution_path(const StaticArray<point, MAX_PATH_LENGTH>& path) const;
     // 计算某个炸弹宏动作的完整玩家路径，并做长度/合法性检查
     bool build_bomb_macro_path(
         const GameState& state,
@@ -304,8 +298,9 @@ private:
         int task_count) const;
     // 返回箱子到当前仍未完成的同语义目标点的最短反向推动距离
     int nearest_active_target_distance(const GameState& state, uint8_t semantic_id, point box_pos) const;
-    // 小规模最小权匹配，用于同一语义组内的箱子-目标下界
-    template <size_t N> int min_weight_assignment(int cost[N][N], int n) const;
+    // 小规模最小权匹配
+    template <size_t N>
+    int min_weight_assignment(int cost[N][N], int n) const;
     // 按语义规则计算状态哈希，纳入箱子语义、炸弹位置和 blown_mask
     uint32_t compute_hash(const GameState& state) const;
 
@@ -345,7 +340,6 @@ private:
 
     // --- 静态地图、初始状态与求解结果 ---
     std::array<std::array<int8_t, MAP_MAX_WIDTH>, MAP_MAX_HEIGHT> map{}; // 静态地图：0=空地，1=墙
-    point player_start;                                                  // 原始玩家起点
     GameState initial_state;                                             // 搜索根状态，会随语义绑定/炸弹任务更新
     StaticArray<point, MAX_BOXES> initial_targets;                       // 初始目标点列表
     uint8_t target_semantics[MAX_BOXES] = {};                            // 每个目标点的语义编号
@@ -357,8 +351,8 @@ private:
     MacroCostCacheEntry macro_cost_cache[MACRO_COST_CACHE_SIZE] = {};
     uint8_t solid_mask[1 << MAX_BOMBS][MAP_MAX_HEIGHT][MAP_MAX_WIDTH] = {};
     uint16_t current_threshold_iteration = 0;                            // 当前 IDA* 阈值轮次，供硬图后段策略启用
+    SokobanHeuristicMode heuristic_mode = SokobanHeuristicMode::SEMANTIC; // 当前求解使用的启发权重组
     bool strict_cost_search = false;                                     // 当前是否处于真实步数修复搜索
-    bool force_box_target_cost_lb = false;                               // 当前搜索是否强制使用单箱总代价下界
     uint32_t search_node_budget = 0;                                     // 本轮搜索节点预算，0 表示不限制
     uint32_t search_node_count = 0;                                      // 本轮已展开节点数
     bool search_aborted = false;                                         // 节点预算耗尽时中止本轮搜索

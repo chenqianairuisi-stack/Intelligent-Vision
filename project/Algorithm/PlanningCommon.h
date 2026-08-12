@@ -55,8 +55,8 @@ inline constexpr int TARGET_SLOT_F1_RIGHT = 6;   // F1 右侧槽位
 inline constexpr uint8_t MAX_TARGETS_PER_OBSERVATION = 3u;   // 一次联合观测最多识别 3 个目标
 inline constexpr int TARGET_BASE_SLOT_COUNT = 5;             // 基础可见性槽位数量，含 F2 左右斜角
 inline constexpr int TARGET_OBSERVE_SLOT_COUNT = 7;          // 总共记录 7 种相对位置
-inline constexpr uint16_t TARGET_OPTIMAL_PENALTY = 0u;       // 隔一格目标已满足识别距离，不为靠近制造移动
-inline constexpr uint16_t TARGET_FAR_PENALTY = 2u;           // 正前方第 3 格略低于第 1/2 格
+inline constexpr uint16_t TARGET_OPTIMAL_PENALTY = 1u;       // F2 比 F1 多一格观测代价
+inline constexpr uint16_t TARGET_FAR_PENALTY = 2u;           // F3 比 F1 多两格观测代价
 inline constexpr uint16_t TARGET_DIAGONAL_PENALTY = 1u;      // 斜视略低于同距离正视
 } // namespace TargetObservationConfig
 
@@ -148,7 +148,9 @@ uint16_t yaw_turn_time_cost(float from_yaw, float to_yaw);
 /// \param out_path 输出优化后的航点，不包含起点并包含终点
 /// \param initial_dir 进入起点前的 MOVE 下标，负值表示未知
 ///
-/// \details 只有候选路径严格减少内部拐点且总代价更低时才替换原网格路径
+/// \details
+/// 只有候选路径严格减少内部拐点且总代价更低时才替换原网格路径
+/// 同样减少拐点时优先线段更少、斜线段更少的路径，避免连续多段不同斜率
 bool get_optimized_observe_path(const SokobanLevel& lvl,
                                 point start,
                                 point end,
