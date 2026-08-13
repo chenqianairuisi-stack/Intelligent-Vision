@@ -13,66 +13,97 @@
 
 // 搜索功能开关与配置
 namespace SokobanConfig {
+    // ------------------------------------------------------------------------
+    // 诊断与通用开关
+    // ------------------------------------------------------------------------
 #if defined(SOKOBAN_ENABLE_PROFILE)
     inline constexpr bool ENABLE_PROFILE = true;        // 诊断构建记录 expanded/generated/TT 命中等 profile 数据
 #else
     inline constexpr bool ENABLE_PROFILE = false;       // 正式构建关闭高频统计
 #endif
 
-    // 拐点优化
-    inline constexpr bool ENABLE_PATH_POSTOPT = true;   // 是否在成功后进行路径优化
+    inline constexpr bool ENABLE_PATH_POSTOPT = true;   // 求解成功后是否进行拐点和路径质量优化
 
-    // 纯推箱任务级宏搜索累计尝试的候选分支数，0 表示关闭宏搜索
+    // ------------------------------------------------------------------------
+    // 任务级快速首解
+    // ------------------------------------------------------------------------
+    // 高级语义模式仅在未完成箱子数大于该值时启用任务级快速首解，箱子数小于等于该值时保持原来的完整 IDA* 求解流程
+    inline constexpr int SEMANTIC_TASK_FAST_PATH_BOX_THRESHOLD = 6;
+
+    // 高级语义任务级首解的箱子目标分支预算
+    inline constexpr uint32_t SEMANTIC_BOX_TASK_BRANCH_BUDGET = 512;
+    // 高级语义任务级首解的炸弹任务顺序分支预算
+    inline constexpr uint32_t SEMANTIC_BOMB_TASK_BRANCH_BUDGET = 8;
+    // 高级语义快速首解失败后，IDA* 兜底最多展开的节点数
+    inline constexpr uint32_t SEMANTIC_IDA_NODE_BUDGET = 6000;
+
+    // 纯推箱任务级宏搜索累计尝试的箱子任务分支数，0 表示关闭
     inline constexpr uint32_t BOX_TASK_CANDIDATE_BRANCH_BUDGET = 64;
-    // 宏候选成功后严格 IDA* 最多展开的节点数，0 表示不运行改进搜索
+    // 纯推箱宏首解之后，严格 IDA* 最多展开的改进节点数，0 表示不改进
     inline constexpr uint32_t PURE_IMPROVE_NODE_BUDGET = 1000;
 
-    // 搜索入口与首解修复预算
+    // ------------------------------------------------------------------------
+    // 搜索入口与首解修复
+    // ------------------------------------------------------------------------
+    // 保留的宏候选节点预算，供搜索入口的其它候选流程使用
     inline constexpr uint32_t MACRO_CANDIDATE_NODE_BUDGET = 6000;
+    // 是否在首解之后按真实步数进行有限修复搜索
     inline constexpr bool ENABLE_STRICT_COST_REPAIR = true;
+    // 首解修复阶段最多展开的节点数
     inline constexpr uint32_t STRICT_REPAIR_NODE_BUDGET = 1000;
 
-    // 动作排序
+    // ------------------------------------------------------------------------
+    // 动作生成与排序
+    // ------------------------------------------------------------------------
+    // 是否按玩家到推动位置的通行代价对动作排序
     inline constexpr bool ENABLE_TURN_ACCESS_DEBT_SORT = true;
+    // 是否根据动态阻挡关系调整动作顺序
     inline constexpr bool ENABLE_DYNAMIC_BLOCK_SORT = true;
-    
-    // IDA* 阈值与两套启发式权重
+
+    // ------------------------------------------------------------------------
+    // IDA* 阈值与启发式
+    // ------------------------------------------------------------------------
+    // 不同活跃实体数量对应的启发式权重
     struct HeuristicWeightSet {
-        int base;
-        int ge_4;
-        int ge_5;
-        int ge_6;
-        int ge_8;
+        int base;                // 基础权重
+        int ge_4;                // 活跃实体数至少为 4
+        int ge_5;                // 活跃实体数至少为 5
+        int ge_6;                // 活跃实体数至少为 6
+        int ge_8;                // 活跃实体数至少为 8
     };
 
-    inline constexpr int INITIAL_THRESHOLD_BOOST = 0;   // 初始 threshold 额外增量；默认交给启发式本身决定
-    inline constexpr int HEURISTIC_WEIGHT_DEN = 10;     // f = g + h * weight / denominator
+    inline constexpr int INITIAL_THRESHOLD_BOOST = 0;   // IDA* 初始 threshold 的额外增量
+    inline constexpr int HEURISTIC_WEIGHT_DEN = 10;     // 启发式计算为 f = g + h * weight / denominator
+    // 高级语义模式的启发式权重，偏向尽快得到可行首解
     inline constexpr HeuristicWeightSet SEMANTIC_HEURISTIC_WEIGHTS = {
-        10, 12, 15, 20, 30
+        10, 12, 15, 20, 35
     };
+    // 纯推箱模式的保守启发式权重
     inline constexpr HeuristicWeightSet PURE_HEURISTIC_WEIGHTS = {
         10, 10, 10, 10, 20
     };
 
-    // 多轮失败后的阈值推进
-    inline constexpr bool ENABLE_LATE_THRESHOLD_ACCEL = true;      // 是否启用快速阈值推进
-    inline constexpr int LATE_THRESHOLD_ACCEL_MIN_ITERATION = 2;   // 首轮收集真实边界后减少小步长重复展开
-    inline constexpr int LATE_THRESHOLD_ACCEL_STEP = 3;            // 每轮最多跨过两个整数阈值，限制首解质量波动
+    // 多轮失败后的 threshold 推进
+    inline constexpr bool ENABLE_LATE_THRESHOLD_ACCEL = true;      // 是否启用快速 threshold 推进
+    inline constexpr int LATE_THRESHOLD_ACCEL_MIN_ITERATION = 2;   // 从第几轮开始允许跨步推进
+    inline constexpr int LATE_THRESHOLD_ACCEL_STEP = 3;            // 每轮最多跨过的 threshold 步长
 
-    // 等价玩家位置 TT
-    inline constexpr bool ENABLE_CANONICAL_TT = true;              // 是否将归一化玩家位置写入 TT
-    inline constexpr int CANONICAL_TT_MIN_THRESHOLD = 120;         // 高阈值后才用玩家可达区近似去重
+    // ------------------------------------------------------------------------
+    // 置换表与下界剪枝
+    // ------------------------------------------------------------------------
+    inline constexpr bool ENABLE_CANONICAL_TT = true;              // 是否将等价玩家位置归一化后写入置换表
+    inline constexpr int CANONICAL_TT_MIN_THRESHOLD = 120;         // threshold 达到该值后才启用归一化去重
+    inline constexpr bool ENABLE_BOX_TARGET_COST_LB = true;        // 是否启用单箱到目标总代价下界
+    inline constexpr int BOX_REFERENCE_SORT_MIN_BOXES = 5;         // 箱子数达到该值后启用单箱参考方向排序
 
-    // 单箱到目标总代价下界
-    inline constexpr bool ENABLE_BOX_TARGET_COST_LB = true;        // 统一使用预计算单箱总代价做下界和动作排序
-    inline constexpr int BOX_REFERENCE_SORT_MIN_BOXES = 5;         // 5 箱起启用当前可执行的单箱参考方向
-
+    // ------------------------------------------------------------------------
     // 炸弹宏动作
-    inline constexpr bool ENABLE_BOMB_MACRO = true;                // 是否将推炸弹宏动作加入搜索
-    inline constexpr int BOMB_MACRO_MAX_PATH = 80;                 // 宏动作真实展开路径长度上限
-    inline constexpr int BOMB_MACRO_THRESHOLD_MARGIN = 32;         // 过滤贴近阈值、通常会被真实路径立即剪掉的宏动作
-    inline constexpr int BOMB_MACRO_SORT_BONUS = 120;              // 动作排序中给予宏动作的优先级补偿
-    inline constexpr int BOMB_MACRO_MIN_BENEFIT = -9999;           // 宏动作启发式收益门槛；默认只做合法性过
+    // ------------------------------------------------------------------------
+    inline constexpr bool ENABLE_BOMB_MACRO = true;                // 是否把完整推炸弹过程折叠为宏动作
+    inline constexpr int BOMB_MACRO_MAX_PATH = 80;                 // 单个炸弹宏动作允许展开的最大步数
+    inline constexpr int BOMB_MACRO_THRESHOLD_MARGIN = 32;         // 距离 threshold 小于该余量时过滤宏动作
+    inline constexpr int BOMB_MACRO_SORT_BONUS = 120;              // 炸弹宏动作排序优先级补偿
+    inline constexpr int BOMB_MACRO_MIN_BENEFIT = -9999;           // 炸弹宏动作的最小启发式收益门槛
 }
 
 // ============================================================================
@@ -439,11 +470,47 @@ bool Sokoban::solve_internal() {
 
     if (try_pure_box_hybrid_solution()) return true;
 
+    const bool use_semantic_task_fast_path =
+        heuristic_mode == SokobanHeuristicMode::SEMANTIC &&
+        initial_state.num_boxes > SokobanConfig::SEMANTIC_TASK_FAST_PATH_BOX_THRESHOLD;
+    if (use_semantic_task_fast_path && try_semantic_task_solution()) return true;
+
     StaticArray<point, MAX_PATH_LENGTH> candidate_path;
-    if (!run_ida_search(false, MAX_PATH_LENGTH, candidate_path)) return false;
+    uint32_t node_budget = use_semantic_task_fast_path
+        ? SokobanConfig::SEMANTIC_IDA_NODE_BUDGET
+        : 0;
+    if (!run_ida_search(false, MAX_PATH_LENGTH, candidate_path, node_budget)) return false;
 
     final_path = candidate_path;
     try_strict_cost_repair(candidate_path);
+    if constexpr (SokobanConfig::ENABLE_PATH_POSTOPT) {
+        optimize_final_path_turns();
+    }
+    return true;
+}
+
+/// \brief 尝试高级语义任务级首解
+/// \return 在固定任务分支预算内找到完整路径时返回 true
+///
+/// \details
+/// 先有界枚举阶段二炸弹任务顺序，再复用逐箱完成搜索生成可执行路径
+/// 失败后由带节点预算的 IDA* 补充，保证困难局面不会进入无界搜索
+bool Sokoban::try_semantic_task_solution() {
+    if (heuristic_mode != SokobanHeuristicMode::SEMANTIC) return false;
+
+    StaticArray<point, MAX_PATH_LENGTH> root_path;
+    root_path.push_back(initial_state.player);
+    StaticArray<point, MAX_PATH_LENGTH> candidate_path;
+    uint32_t bomb_branch_budget = SokobanConfig::SEMANTIC_BOMB_TASK_BRANCH_BUDGET;
+    if (!search_semantic_task_candidate(
+            initial_state,
+            root_path,
+            bomb_branch_budget,
+            candidate_path)) {
+        return false;
+    }
+
+    final_path = candidate_path;
     if constexpr (SokobanConfig::ENABLE_PATH_POSTOPT) {
         optimize_final_path_turns();
     }
@@ -2003,23 +2070,112 @@ void Sokoban::build_level_from_state(const GameState& state, SokobanLevel& out_l
 /// 这里只负责快速找解，失败后由完整 IDA* 继续搜索
 bool Sokoban::try_box_task_candidate(
     StaticArray<point, MAX_PATH_LENGTH>& out_path) const {
+    return try_box_task_candidate_from_state(
+        initial_state,
+        SokobanConfig::BOX_TASK_CANDIDATE_BRANCH_BUDGET,
+        out_path);
+}
+
+/// \brief 从任意无炸弹任务状态构造箱子任务级首解
+/// \param state 搜索起始状态
+/// \param branch_budget 最多尝试的箱子目标分支数
+/// \param out_path 输出包含起点的完整路径
+/// \return 在分支预算内找到完整路径时返回 true
+bool Sokoban::try_box_task_candidate_from_state(
+    const GameState& state,
+    uint32_t branch_budget,
+    StaticArray<point, MAX_PATH_LENGTH>& out_path) const {
     out_path.clear();
-    if (initial_state.num_boxes == 0 || count_active_bomb_tasks(initial_state) != 0) {
-        return false;
+    if (state.num_boxes == 0) {
+        out_path.push_back(state.player);
+        return true;
     }
+    if (count_active_bomb_tasks(state) != 0 || branch_budget == 0) return false;
 
     SokobanLevel level;
-    build_level_from_state(initial_state, level);
+    build_level_from_state(state, level);
     StaticArray<point, MAX_PATH_LENGTH> path;
-    path.push_back(initial_state.player);
-    uint32_t branch_budget = SokobanConfig::BOX_TASK_CANDIDATE_BRANCH_BUDGET;
+    path.push_back(state.player);
     return search_box_task_candidate(
         level,
-        initial_state.player,
-        initial_state.target_mask,
+        state.player,
+        state.target_mask,
         path,
         out_path,
         branch_budget);
+}
+
+/// \brief 有界搜索高级语义任务序列
+/// \param state 当前炸弹和箱子状态
+/// \param path 已完成任务对应的完整路径
+/// \param bomb_branch_budget 剩余炸弹顺序分支预算
+/// \param out_path 输出完整任务路径
+/// \return 找到可执行的炸弹与箱子任务序列时返回 true
+///
+/// \details
+/// 炸弹任务全部完成后转入箱子任务级搜索
+/// 每个炸弹分支都通过通用推炸弹规划器生成真实路径并同步清墙结果
+bool Sokoban::search_semantic_task_candidate(
+    const GameState& state,
+    const StaticArray<point, MAX_PATH_LENGTH>& path,
+    uint32_t& bomb_branch_budget,
+    StaticArray<point, MAX_PATH_LENGTH>& out_path) const {
+    if (count_active_bomb_tasks(state) == 0) {
+        StaticArray<point, MAX_PATH_LENGTH> box_path;
+        if (!try_box_task_candidate_from_state(
+                state,
+                SokobanConfig::SEMANTIC_BOX_TASK_BRANCH_BUDGET,
+                box_path)) {
+            return false;
+        }
+
+        StaticArray<point, MAX_PATH_LENGTH> full_path = path;
+        for (int i = 1; i < box_path.size(); ++i) {
+            if (full_path.size() >= MAX_PATH_LENGTH) return false;
+            full_path.push_back(box_path[i]);
+        }
+        out_path = full_path;
+        return true;
+    }
+
+    for (uint8_t b = 0; b < state.num_bombs && bomb_branch_budget > 0; ++b) {
+        if ((state.blown_mask & (1U << b)) != 0 || bomb_tasks[b].target_wall.x == -1) continue;
+        --bomb_branch_budget;
+
+        StaticArray<point, MAX_PATH_LENGTH> bomb_path;
+        if (!build_bomb_macro_path(state, b, bomb_path) || bomb_path.empty()) continue;
+
+        StaticArray<point, MAX_PATH_LENGTH> next_path = path;
+        bool path_fits = true;
+        for (int i = 0; i < bomb_path.size(); ++i) {
+            if (next_path.size() >= MAX_PATH_LENGTH) {
+                path_fits = false;
+                break;
+            }
+            next_path.push_back(bomb_path[i]);
+        }
+        if (!path_fits) continue;
+
+        BombTask task = bomb_tasks[b];
+        task.bomb_start = {state.bomb_x[b], state.bomb_y[b]};
+        GameState next_state;
+        if (!build_bomb_task_successor_state(
+                state,
+                b,
+                task,
+                bomb_path.back(),
+                next_state)) {
+            continue;
+        }
+        if (search_semantic_task_candidate(
+                next_state,
+                next_path,
+                bomb_branch_budget,
+                out_path)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /// \brief 递归搜索首个可行的箱子完成顺序和目标分配

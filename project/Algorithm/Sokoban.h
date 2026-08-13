@@ -176,6 +176,8 @@ private:
     bool solve_internal();
     // 纯推箱先取任务级宏首解，再按固定节点预算运行严格 IDA* 改进
     bool try_pure_box_hybrid_solution();
+    // 高级语义模式先按炸弹任务和箱子任务构造有界首解
+    bool try_semantic_task_solution();
     // 运行一次 IDA*，strict_cost=true 时按真实步数做受限修复搜索
     bool run_ida_search(
         bool strict_cost,
@@ -193,6 +195,17 @@ private:
     // --- 纯推箱任务级宏搜索 ---
     // 纯推箱按“完成一个箱子任务”为宏边快速搜索候选解
     bool try_box_task_candidate(StaticArray<point, MAX_PATH_LENGTH>& out_path) const;
+    // 从指定状态按固定分支预算搜索箱子任务候选解
+    bool try_box_task_candidate_from_state(
+        const GameState& state,
+        uint32_t branch_budget,
+        StaticArray<point, MAX_PATH_LENGTH>& out_path) const;
+    // 有界枚举剩余炸弹任务顺序并衔接箱子任务候选解
+    bool search_semantic_task_candidate(
+        const GameState& state,
+        const StaticArray<point, MAX_PATH_LENGTH>& path,
+        uint32_t& bomb_branch_budget,
+        StaticArray<point, MAX_PATH_LENGTH>& out_path) const;
     // 递归搜索首个可行的箱子完成顺序和目标分配
     bool search_box_task_candidate(
         const SokobanLevel& level,

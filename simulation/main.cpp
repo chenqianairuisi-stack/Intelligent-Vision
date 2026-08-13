@@ -631,7 +631,8 @@ int main(int argc, char** argv) {
                 task_queue.push_back(RobotTask::make_path_obs(view.pos));
                 task_queue.push_back(RobotTask::make_wait_track());
                 task_queue.push_back(RobotTask::make_align(view.target_yaw));
-                task_queue.push_back(RobotTask::make_capture(action.observe.active_mask));
+                // 仿真路径模拟当前 ART2 批量协议
+                task_queue.push_back(RobotTask::make_capture(action.observe.active_mask, true));
             }
         };
 
