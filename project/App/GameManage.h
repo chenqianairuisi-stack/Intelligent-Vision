@@ -59,7 +59,7 @@ protected:
     // 微观任务队列（由 current_macro_action 转换而来）
     StaticArray<RobotTask, 10> task_queue;
     size_t current_task_idx = 0;
-    bool art2_capture_request_sent = false;  // 当前观测宏动作的批量 ART2 请求是否已发出
+    bool art2_capture_request_sent = false;  // 当前 ART2 请求是否已发出
 
     // --- 内部函数 ---
     bool plan_next_macro_action(MacroAction& out_action);

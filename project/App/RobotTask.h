@@ -28,6 +28,7 @@ struct alignas(4) RobotTask {
         float target_yaw;          // ALIGN_YAW
         struct {
             uint32_t active_mask;
+            bool use_new_protocol;
         } capture;                 // WAIT_ART2_CAPTURE
     } param;
 
@@ -58,9 +59,11 @@ struct alignas(4) RobotTask {
         t.type = TaskType::ALIGN_YAW; t.param.target_yaw = yaw; 
         return t; 
     }
-    static RobotTask make_capture(uint32_t active_mask) {
+    static RobotTask make_capture(uint32_t active_mask, bool use_new_protocol) {
         RobotTask t{}; 
-        t.type = TaskType::WAIT_ART2_CAPTURE; t.param.capture.active_mask = active_mask;
+        t.type = TaskType::WAIT_ART2_CAPTURE;
+        t.param.capture.active_mask = active_mask;
+        t.param.capture.use_new_protocol = use_new_protocol;
         return t; 
     }
     static RobotTask make_apply_bomb_result(const BombPushAction& bomb_push) {

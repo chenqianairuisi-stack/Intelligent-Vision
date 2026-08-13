@@ -1,6 +1,7 @@
 #include "Vision.h"
 #include "RobotState.h"
 #include "system_config.h"
+#include "tuning_config.h"
 #include "CoreScheduler.h"
 #include "PoseEstimate.h"
 
@@ -37,6 +38,7 @@ namespace {
     // 分配在极速区的独立解析器
     DTCM_DATA ProtocolParser parser_art1;
     DTCM_DATA ProtocolParser parser_art2; 
+    DTCM_DATA bool art2_capture_uses_new_protocol = true;
 
     // 协议指令定义
     constexpr uint8_t CMD_REQ_MAP      = 0x10;  // 请求地图指令 (ART1)
@@ -267,8 +269,8 @@ namespace {
             int8_t semantic_id = parser_art2.payload_buf[1];
             const uint32_t entity_bit = entity_id < SystemConfig::MAX_ENTITIES
                 ? (uint32_t{1u} << entity_id) : 0u;
-            // ACK 到达前的结果可能属于上一批尚未排空的帧，不能计入当前观测
-            if (vis.capture_ack_received &&
+            // 新协议用 ACK 隔离上一批迟到帧，旧协议保持 RESULT 与 ACK 可乱序到达
+            if ((!art2_capture_uses_new_protocol || vis.capture_ack_received) &&
                 semantic_id >= 0 && semantic_id <= 9 &&
                 (vis.art2_expected_mask & entity_bit) != 0u) {
                 vis.semantic_labels[entity_id] = semantic_id;
@@ -319,20 +321,28 @@ void schedule_pose_request_ART1() {
     App::g_state.vision.art1_pose_request_pending = true;
 }
 
+bool use_new_art2_protocol() {
+    return USE_NEW_ART2_PROTOCOL ||
+           tune.planning_extra.box_extra_observe_enable >= 0.5f ||
+           tune.planning_extra.target_extra_observe_enable >= 0.5f;
+}
+
 /// \brief 请求 ART2 完成一个宏观观测动作
 /// \param level 当前逻辑地图
 /// \param vehicle_grid 当前观测位的小车格点
 /// \param camera_yaw 本次观测的相机朝向
 /// \param active_mask 本次请求的同类别实体掩码
+/// \param use_new_protocol true 使用当前批量协议，false 使用旧单实体协议
 /// \return active_mask 合法且请求已发送时返回 true
 ///
 /// \details
-/// 箱子请求固定发送一组 [id, camera_x, camera_y]，目标点请求固定发送三组。
-/// 相机坐标 X 指向车身右侧，Y 指向车头前方，目标点按 X 从小到大排列。
+/// 旧协议发送 [id, is_box]，新协议箱子发送一组 [id, camera_x, camera_y]，
+/// 新协议目标点固定发送三组并按相机 X 从小到大排列
 bool request_capture_ART2(const SokobanLevel& level,
                           point vehicle_grid,
                           float camera_yaw,
-                          uint32_t active_mask) {
+                          uint32_t active_mask,
+                          bool use_new_protocol) {
     const uint32_t valid_mask = level_entity_mask(level);
     const uint32_t box_mask = level.box_count == 0u
         ? 0u
@@ -340,10 +350,11 @@ bool request_capture_ART2(const SokobanLevel& level,
     const uint32_t target_mask = valid_mask & ~box_mask;
     const uint32_t requested_boxes = active_mask & box_mask;
     const uint32_t requested_targets = active_mask & target_mask;
+    // 发包前再次检查运行时开关，避免任务排队期间打开扩展观测后仍误发旧报文
+    const bool effective_use_new_protocol =
+        use_new_protocol || use_new_art2_protocol();
 
-    int camera_yaw_index = 0;
     if (active_mask == 0u || (active_mask & ~valid_mask) != 0u ||
-        !camera_yaw_to_index(camera_yaw, camera_yaw_index) ||
         (requested_boxes != 0u && requested_targets != 0u)) {
         return false;
     }
@@ -356,6 +367,29 @@ bool request_capture_ART2(const SokobanLevel& level,
     vis.capture_ack_received = false;
     vis.art2_expected_mask = active_mask;
     vis.art2_received_mask = 0u;
+    art2_capture_uses_new_protocol = effective_use_new_protocol;
+
+    if (!effective_use_new_protocol) {
+        if (count_mask_bits(active_mask) != 1) {
+            finish_capture_ART2();
+            return false;
+        }
+
+        uint8_t entity_id = 0;
+        while ((active_mask & (uint32_t{1u} << entity_id)) == 0u) ++entity_id;
+        uint8_t payload[2] = {
+            entity_id,
+            static_cast<uint8_t>(entity_id < level.box_count ? 1u : 0u)
+        };
+        uart_cam2.send_packet(CMD_TRIG_CAPTURE, payload, sizeof(payload));
+        return true;
+    }
+
+    int camera_yaw_index = 0;
+    if (!camera_yaw_to_index(camera_yaw, camera_yaw_index)) {
+        finish_capture_ART2();
+        return false;
+    }
 
     if (requested_boxes != 0u) {
         if (count_mask_bits(requested_boxes) != 1) {
@@ -428,6 +462,7 @@ void finish_capture_ART2() {
     vis.capture_ack_received = false;
     vis.art2_expected_mask = 0u;
     vis.art2_received_mask = 0u;
+    art2_capture_uses_new_protocol = true;
 }
 
 /// \brief 视觉模块主循环轮询入口

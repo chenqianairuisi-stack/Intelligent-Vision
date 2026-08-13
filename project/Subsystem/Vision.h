@@ -4,6 +4,9 @@
 
 
 namespace Subsystem::Vision {
+    // 开启时固定使用当前批量协议，关闭时仅在两类扩展观测位均关闭后使用旧协议
+    inline constexpr bool USE_NEW_ART2_PROTOCOL = false;
+
     void init();
     
     // 主循环调用，处理串口数据并更新状态
@@ -13,23 +16,29 @@ namespace Subsystem::Vision {
     void request_map_ART1();
     void request_pose_ART1();
     void schedule_pose_request_ART1();
+    /// \brief 判断当前是否必须使用 ART2 新协议
+    /// \return constexpr 总开关或任一扩展观测开关开启时返回 true
+    bool use_new_art2_protocol();
+
     /// \brief 请求 ART2 完成一次箱子或目标点批量观测
     /// \param level 当前逻辑地图，用于把实体格点转换成相对小车坐标
     /// \param vehicle_grid 当前观测时的小车格点
     /// \param camera_yaw 当前观测相机朝向，用于转换到车体相机坐标
     /// \param active_mask 本次观测要求返回语义的同类别实体掩码
+    /// \param use_new_protocol true 使用当前批量协议，false 使用旧单实体协议
     /// \return 请求参数合法且已发包时返回 true
     ///
     /// \details
-    /// 相机坐标 X 轴指向车身右侧，Y 轴指向车头前方。箱子请求负载为
+    /// 相机坐标 X 轴指向车身右侧，Y 轴指向车头前方，箱子请求负载为
     /// [id, relative_x, relative_y]，目标点请求负载为三组
-    /// [id, relative_x, relative_y]。目标点不足三组时用 -1 填充空槽。
+    /// [id, relative_x, relative_y]，目标点不足三组时用 -1 填充空槽
     bool request_capture_ART2(const SokobanLevel& level,
                               point vehicle_grid,
                               float camera_yaw,
-                              uint32_t active_mask);
+                              uint32_t active_mask,
+                              bool use_new_protocol);
 
-    // 当前批量观测结束后失效请求掩码，忽略后续迟到结果
+    // 当前观测结束后失效请求掩码，忽略后续迟到结果
     void finish_capture_ART2();
 
     // 寻图前清空缓存
@@ -53,10 +62,13 @@ namespace Subsystem::Vision {
  *      - MsgType: CMD_REQ_MAP, Payload: 无 (长度 0)
  *   2. 请求定位 (向 ART1 发送):
  *      - MsgType: CMD_REQ_POSE, Payload: 无 (长度 0)
- *   3. 触发批量观测 (向 ART2 发送):
- *      - 箱子：Payload[3] = [实体ID, 相机X, 相机Y]，X 为右侧、Y 为前方。
- *      - 目标点：Payload[9] = 三组 [实体ID, 相机X, 相机Y]，从左到右排列；
- *        不足三组的 ID、X、Y 全部填 -1。
+ *   3. 触发观测 (向 ART2 发送):
+ *      - 旧协议：Payload[2] = [实体ID, 是否为箱子(1/0)]，每次只请求一个实体
+ *      - 新协议箱子：Payload[3] = [实体ID, 相机X, 相机Y]，X 为右侧、Y 为前方
+ *      - 新协议目标点：Payload[9] = 三组 [实体ID, 相机X, 相机Y]，从左到右排列；
+ *        不足三组的 ID、X、Y 全部填 -1
+ *      - USE_NEW_ART2_PROTOCOL 开启时固定使用新协议；关闭时还需同时关闭箱子和目标点
+ *        扩展观测位才能使用旧协议，任一扩展观测位开启都会强制使用新协议
  * 
  * 三、 视觉模块 -> RT1064 (接收解析):
  *   1. 地图与目标数据 (ART1 发送, MSG_MAP_DATA):
@@ -68,7 +80,7 @@ namespace Subsystem::Vision {
  *   2. 定位数据 (ART1 发送, MSG_POSE_DATA):
  *      - Payload: [X轴 (float)] [Y轴 (float)] [Yaw角 (float)] (长度 12 字节)
  *   3. 拍照确认ACK (ART2 发送, MSG_CAPTURE_ACK):
- *      - Payload: 任意1字节。主控仍需等待本次请求全部实体的结果包。
+ *      - Payload: 任意1字节，主控仍需等待本次请求的结果包全部返回
  *   4. 目标语义识别结果 (ART2 发送, MSG_ART2_RESULT):
  *      - Payload: [实体ID (uint8_t)] [语义/类别ID (int8_t)] (长度 2)
  */

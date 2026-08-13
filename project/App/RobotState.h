@@ -47,7 +47,7 @@ struct RobotState {
         bool art1_map_ready = false;
         bool art1_pose_updated = false;
         bool art1_pose_request_pending = false;
-        // ART2 当前批量观测状态，结果掩码只累计本次请求要求的实体
+        // ART2 当前观测状态，结果掩码只累计本次请求要求的实体
         uint32_t art2_expected_mask = 0;
         uint32_t art2_received_mask = 0;
         bool capture_ack_received = false;

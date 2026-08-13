@@ -266,8 +266,8 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
     },
     {
         1.0f,     // planning_extra.diagonal_move_enable
-        1.0f,     // planning_extra.box_extra_observe_enable
-        1.0f,     // planning_extra.target_extra_observe_enable
+        0.0f,     // planning_extra.box_extra_observe_enable
+        0.0f,     // planning_extra.target_extra_observe_enable
     },
 };
 

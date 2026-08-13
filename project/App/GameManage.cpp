@@ -499,7 +499,8 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                                 logical_level,
                                 current_macro_action.observe.view.pos,
                                 current_macro_action.observe.view.target_yaw,
-                                requested_mask)) {
+                                requested_mask,
+                                task.param.capture.use_new_protocol)) {
                             game.error_stage = 7;
                             game.phase = GamePhase::ERROR_OCCURRED;
                             break;
@@ -507,7 +508,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                         art2_capture_request_sent = true;
                     }
 
-                    // 一次目标点观测最多回传三个实体，必须等请求掩码完整返回后才能提交给 Macro
+                    // 新协议等待整批结果，旧协议任务是单实体掩码，两者共用相同完成条件
                     if (vision_data.capture_ack_received &&
                         (vision_data.art2_received_mask & requested_mask) == requested_mask) {
                         logical_level.player_start = current_macro_action.observe.view.pos;
@@ -823,8 +824,19 @@ void GameManager::start_macro_action(const MacroAction& action) {
         task_queue.push_back(RobotTask::make_wait_track());
         task_queue.push_back(RobotTask::make_align(view.target_yaw));
 
-        // 一个 OBSERVE 宏动作对应一次 ART2 批量请求，等待该 mask 内全部语义返回再结束动作
-        task_queue.push_back(RobotTask::make_capture(mask));
+        const bool use_new_protocol = Subsystem::Vision::use_new_art2_protocol();
+        if (use_new_protocol) {
+            // 新协议一个 OBSERVE 动作只发送一次批量请求
+            task_queue.push_back(RobotTask::make_capture(mask, true));
+        } else {
+            // 旧协议每次只能请求一个实体，保持旧版任务拆分和处理顺序
+            for (uint8_t entity_id = 0; entity_id < SystemConfig::MAX_ENTITIES; ++entity_id) {
+                const uint32_t entity_bit = uint32_t{1u} << entity_id;
+                if ((mask & entity_bit) != 0u) {
+                    task_queue.push_back(RobotTask::make_capture(entity_bit, false));
+                }
+            }
+        }
     }
 }
 
