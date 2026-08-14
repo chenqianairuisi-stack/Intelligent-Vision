@@ -28,7 +28,11 @@ namespace SokobanConfig {
     // 任务级快速首解
     // ------------------------------------------------------------------------
     // 高级语义模式仅在未完成箱子数大于该值时启用任务级快速首解，箱子数小于等于该值时保持原来的完整 IDA* 求解流程
-    inline constexpr int SEMANTIC_TASK_FAST_PATH_BOX_THRESHOLD = 6;
+    inline constexpr int SEMANTIC_TASK_FAST_PATH_BOX_THRESHOLD = 5;
+    // 任务级快速首解在箱子数不大于该值时追加严格修复，较大局面保持首解立即返回
+    inline constexpr int SEMANTIC_TASK_STRICT_REPAIR_MAX_BOXES = 6;
+    // 允许严格精修的边界局面先按原流程探测，简单局面优先保持原路径
+    inline constexpr uint32_t SEMANTIC_ORIGINAL_FLOW_PROBE_NODE_BUDGET = 128;
 
     // 高级语义任务级首解的箱子目标分支预算
     inline constexpr uint32_t SEMANTIC_BOX_TASK_BRANCH_BUDGET = 512;
@@ -59,6 +63,10 @@ namespace SokobanConfig {
     inline constexpr bool ENABLE_TURN_ACCESS_DEBT_SORT = true;
     // 是否根据动态阻挡关系调整动作顺序
     inline constexpr bool ENABLE_DYNAMIC_BLOCK_SORT = true;
+    // 未完成箱子数不大于该值且炸弹任务已完成时，启用残局逆推延后排序，0 表示关闭
+    inline constexpr int STRICT_REVERSE_SORT_BOX_THRESHOLD = 1;
+    // 逆推排序惩罚只改变同阈值动作顺序，不剪掉确实需要逆推的分支
+    inline constexpr int STRICT_REVERSE_SORT_PENALTY = 64;
 
     // ------------------------------------------------------------------------
     // IDA* 阈值与启发式
@@ -473,7 +481,24 @@ bool Sokoban::solve_internal() {
     const bool use_semantic_task_fast_path =
         heuristic_mode == SokobanHeuristicMode::SEMANTIC &&
         initial_state.num_boxes > SokobanConfig::SEMANTIC_TASK_FAST_PATH_BOX_THRESHOLD;
-    if (use_semantic_task_fast_path && try_semantic_task_solution()) return true;
+    if (use_semantic_task_fast_path) {
+        if (initial_state.num_boxes <= SokobanConfig::SEMANTIC_TASK_STRICT_REPAIR_MAX_BOXES) {
+            StaticArray<point, MAX_PATH_LENGTH> original_flow_path;
+            if (run_ida_search(
+                    false,
+                    MAX_PATH_LENGTH,
+                    original_flow_path,
+                    SokobanConfig::SEMANTIC_ORIGINAL_FLOW_PROBE_NODE_BUDGET)) {
+                final_path = original_flow_path;
+                try_strict_cost_repair(original_flow_path);
+                if constexpr (SokobanConfig::ENABLE_PATH_POSTOPT) {
+                    optimize_final_path_turns();
+                }
+                return true;
+            }
+        }
+        if (try_semantic_task_solution()) return true;
+    }
 
     StaticArray<point, MAX_PATH_LENGTH> candidate_path;
     uint32_t node_budget = use_semantic_task_fast_path
@@ -511,6 +536,9 @@ bool Sokoban::try_semantic_task_solution() {
     }
 
     final_path = candidate_path;
+    if (initial_state.num_boxes <= SokobanConfig::SEMANTIC_TASK_STRICT_REPAIR_MAX_BOXES) {
+        try_strict_cost_repair(candidate_path);
+    }
     if constexpr (SokobanConfig::ENABLE_PATH_POSTOPT) {
         optimize_final_path_turns();
     }
@@ -1415,6 +1443,19 @@ int Sokoban::ida_star_search(const GameState& state, int g, int depth, int thres
                 if (!is_taskless_bomb) sort_key -= same_dir_bonus;
             }
             else sort_key += dir_change_penalty;
+
+            // 逆推仍保留为合法分支，只在相同真实步数候选中延后恢复刚才实体位置的动作
+            if (strict_cost_search &&
+                SokobanConfig::STRICT_REVERSE_SORT_BOX_THRESHOLD > 0 &&
+                state.num_boxes <= SokobanConfig::STRICT_REVERSE_SORT_BOX_THRESHOLD &&
+                active_bombs == 0 &&
+                last_push_dir < 4) {
+                point last_pushed_pos = state.player + MOVE[last_push_dir];
+                if (pos == last_pushed_pos &&
+                    mv.dir == ((last_push_dir + 2) & 3)) {
+                    sort_key += SokobanConfig::STRICT_REVERSE_SORT_PENALTY;
+                }
+            }
         }
         if (mv.triggers_explosion) sort_key -= explosion_bonus;
         if (!strict_cost_search) {

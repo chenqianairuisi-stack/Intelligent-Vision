@@ -22,6 +22,10 @@ using namespace SystemConfig;
 #define STRATEGY_ENABLE_SHADOW_CLEAR_DECISION 1
 #endif
 
+#ifndef STRATEGY_ENABLE_PHASE1_OPTIMIZATION
+#define STRATEGY_ENABLE_PHASE1_OPTIMIZATION 1
+#endif
+
 namespace StrategyConfig {
     // ------------------------------------------------------------------------
     // 诊断与 profile 开关：多数只影响日志，shadow decision 会影响清障候选来源
@@ -31,6 +35,7 @@ namespace StrategyConfig {
     inline constexpr bool ENABLE_HOT_PROFILE = STRATEGY_ENABLE_HOT_PROFILE != 0; // 热点 profile 开关，只影响日志
     inline constexpr bool ENABLE_SHADOW_CLEAR_CLASSIFIER = STRATEGY_ENABLE_SHADOW_CLEAR_CLASSIFIER != 0; // shadow 分类开关，只影响诊断
     inline constexpr bool ENABLE_SHADOW_CLEAR_DECISION = STRATEGY_ENABLE_SHADOW_CLEAR_DECISION != 0; // 候选剪枝：shadow 决策开关，调参需回归清障图
+    inline constexpr bool ENABLE_PHASE1_OPTIMIZATION = STRATEGY_ENABLE_PHASE1_OPTIMIZATION != 0; // Phase1 闭环后优化开关，PC A/B 回归可关闭
     inline constexpr int PROFILE_EVAL_LIMIT = 8;                  // 日志/profile：单次策略评估最多记录的 profile pass 数，可调
     inline constexpr int PROFILE_TOP_CANDIDATES = 3;              // 日志/profile：根层候选诊断只保留前几个高分墙位，可调
     inline constexpr int CLEAR_DIAG_LIMIT = 48;                   // 日志/profile：清障诊断最多记录的任务条目数，可调
@@ -47,6 +52,19 @@ namespace StrategyConfig {
     // ------------------------------------------------------------------------
     inline constexpr int16_t INF_DIST = 9999;                     // 接口约束：不可达距离占位值，必须大于地图内任何真实路径代价，不建议手调
     inline constexpr int PHASE1_SOFT_REPLACE_PROFIT_MARGIN = 20;  // 结构评分/执行代价：soft pass 替换 hard pass 的最低收益边际，可调
+
+    // ------------------------------------------------------------------------
+    // Phase1 闭环后优化：只使用可直接推动的剩余炸弹，避免为非必需任务额外搬箱
+    // ------------------------------------------------------------------------
+    inline constexpr int PHASE1_OPTIMIZATION_DISTANCE_WEIGHT = 20; // 路径收益：全对偶推距下降的权重，可调
+    inline constexpr int PHASE1_OPTIMIZATION_CLARITY_WEIGHT = 2;   // 开图收益：多实体中间墙和局部开区的权重，可调
+    inline constexpr int PHASE1_OPTIMIZATION_ROUTE_WEIGHT = 16;    // 执行代价：巡图阶段推弹路径的权重，可调
+    inline constexpr int PHASE1_OPTIMIZATION_MIN_SCORE = 36;       // 收益阈值：过滤只有微弱结构提示的可选炸弹，可调
+    inline constexpr int PHASE1_OPTIMIZATION_VIEW_MIN_SCORE = 24;  // 观测阈值：无推距收益时必须明显改善多实体观测空间，可调
+    inline constexpr int PHASE1_OPTIMIZATION_MIN_DISTANCE_GAIN = 3; // 路径收益：小于该值时不为可选任务提前消耗炸弹，可调
+    inline constexpr int PHASE1_OPTIMIZATION_SCAN_LIMIT = 12;      // 候选剪枝：无死锁根层最多做真实爆破重评估的墙位数，可调
+    inline constexpr int PHASE1_OPTIMIZATION_SUFFIX_SCAN_LIMIT = 3; // 候选剪枝：已有结构前缀或第二层时只验证少量高潜力墙位，可调
+    inline constexpr int PHASE1_OPTIMIZATION_BRANCH_LIMIT = 2;     // 候选剪枝：每层最多递归展开的优化任务数，可调
 
     // ------------------------------------------------------------------------
     // 局部清障实体化：执行代价与候选剪枝
@@ -478,8 +496,9 @@ private:
     void execute_phase1_search_pass(const SokobanLevel& level, uint8_t pass, DFSResult& out_res);
     void execute_phase2_search_pass(const SokobanLevel& level, uint8_t pass, DFSResult& out_res);
 
-    void stamp_selected_tasks(DFSResult& result);
+    void stamp_selected_tasks(DFSResult& result, bool preserve_essential = false);
     void optimize_phase1_bomb_assignment(const SokobanLevel& level, DFSResult& result);
+    void append_phase1_optimization_tasks(const SokobanLevel& level, DFSResult& result);
 
     bool apply_executable_bomb_task(SokobanLevel& work, point& player, const BombTask& task, int* sequence_cost = nullptr);
     bool materialize_phase1_sequence(

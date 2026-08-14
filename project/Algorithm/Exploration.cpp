@@ -760,8 +760,16 @@ StaticArray<BombTask, MAX_BOMBS> Exploration::optimize_bomb_timeline(
         }
         if (cost >= best_cost) return; // 当前排列已经不可能更优，剪枝
 
+        bool essential_pending = false;
+        for (int i = 0; i < raw_tasks.size(); ++i) {
+            if (!used[i] && raw_tasks[i].is_essential) {
+                essential_pending = true;
+                break;
+            }
+        }
         for (int i = 0; i < raw_tasks.size(); ++i) {
             if (!used[i]) {
+                if (essential_pending && !raw_tasks[i].is_essential) continue;
                 StaticArray<point, MAX_PATH_LENGTH> dummy_path;
                 // 只有物理上能推到目标墙的炸弹任务才参与排序
                 if (PlanningCommon::get_bomb_push_path(lvl, current_pos, raw_tasks[i], dummy_path)) {
@@ -793,9 +801,17 @@ StaticArray<BombTask, MAX_BOMBS> Exploration::optimize_bomb_timeline(
         int best_idx = -1;
         uint16_t best_step_cost = COST_INFINITY;
         StaticArray<point, MAX_PATH_LENGTH> best_path;
+        bool essential_pending = false;
+        for (int i = 0; i < raw_tasks.size(); ++i) {
+            if (!consumed[i] && raw_tasks[i].is_essential) {
+                essential_pending = true;
+                break;
+            }
+        }
 
         for (int i = 0; i < raw_tasks.size(); ++i) {
             if (consumed[i]) continue;
+            if (essential_pending && !raw_tasks[i].is_essential) continue;
 
             StaticArray<point, MAX_PATH_LENGTH> path;
             if (!PlanningCommon::get_bomb_push_path(work, current_pos, raw_tasks[i], path)) continue;
