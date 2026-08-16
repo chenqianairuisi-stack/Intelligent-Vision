@@ -563,15 +563,15 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                         art2_capture_request_sent = true;
                     }
 
-                    // 新协议等待整批结果，旧协议任务是单实体掩码，两者共用相同完成条件
-                    if (vision_data.capture_ack_received &&
-                        (vision_data.art2_received_mask & requested_mask) == requested_mask) {
+                    // 拍照 ACK 表示画面已经锁定，此时释放拍照通道并立即继续下一动作
+                    // 所有已 ACK 请求的结果按 entity_id 异步写入，不阻塞后续观测请求
+                    if (vision_data.capture_ack_received) {
                         logical_level.player_start = current_macro_action.observe.view.pos;
                         observed_mask |= requested_mask;
                         current_observe_yaw = current_macro_action.observe.view.target_yaw;
                         macro_planner.sync_semantics(vision_data.semantic_labels);
                         macro_planner.apply_observation(logical_level, requested_mask);
-                        Subsystem::Vision::finish_capture_ART2();
+                        Subsystem::Vision::consume_capture_ack_ART2();
                         art2_capture_request_sent = false;
                         task_done = true;
                     }

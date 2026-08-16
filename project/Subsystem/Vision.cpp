@@ -38,7 +38,6 @@ namespace {
     // 分配在极速区的独立解析器
     DTCM_DATA ProtocolParser parser_art1;
     DTCM_DATA ProtocolParser parser_art2; 
-    DTCM_DATA bool art2_capture_uses_new_protocol = true;
 
     // 协议指令定义
     constexpr uint8_t CMD_REQ_MAP      = 0x10;  // 请求地图指令 (ART1)
@@ -74,6 +73,28 @@ namespace {
                                  static_cast<int>(level.target_count);
         if (entity_count <= 0) return 0u;
         return (uint32_t{1u} << entity_count) - 1u;
+    }
+
+    // ACK 已消费且整轮待收结果全部到齐后释放累计掩码
+    static void clear_completed_art2_results() {
+        auto& vis = App::g_state.vision;
+        if (vis.art2_current_request_mask == 0u &&
+            vis.art2_expected_mask != 0u &&
+            (vis.art2_received_mask & vis.art2_expected_mask) == vis.art2_expected_mask) {
+            vis.art2_expected_mask = 0u;
+            vis.art2_received_mask = 0u;
+            vis.art2_result_allowed_mask = 0u;
+        }
+    }
+
+    // 发包前校验失败时只回滚本次请求，不影响更早的异步结果
+    static void cancel_current_art2_request(uint32_t active_mask) {
+        auto& vis = App::g_state.vision;
+        vis.art2_expected_mask &= ~active_mask;
+        vis.art2_received_mask &= ~active_mask;
+        vis.art2_result_allowed_mask &= ~active_mask;
+        vis.art2_current_request_mask = 0u;
+        vis.capture_ack_received = false;
     }
 
     // 将规划地图格差旋转到 ART2 相机坐标，X 为车身右侧，Y 为车头前方
@@ -260,7 +281,8 @@ namespace {
         auto& vis = App::g_state.vision;
 
         if (parser_art2.msg_type == MSG_CAPTURE_ACK && parser_art2.payload_len == 1) {
-            if (vis.art2_expected_mask != 0u) {
+            if (vis.art2_current_request_mask != 0u) {
+                vis.art2_result_allowed_mask |= vis.art2_current_request_mask;
                 vis.capture_ack_received = true;
             }
         }
@@ -269,12 +291,13 @@ namespace {
             int8_t semantic_id = parser_art2.payload_buf[1];
             const uint32_t entity_bit = entity_id < SystemConfig::MAX_ENTITIES
                 ? (uint32_t{1u} << entity_id) : 0u;
-            // 新协议用 ACK 隔离上一批迟到帧，旧协议保持 RESULT 与 ACK 可乱序到达
-            if ((!art2_capture_uses_new_protocol || vis.capture_ack_received) &&
-                semantic_id >= 0 && semantic_id <= 9 &&
+            // allowed 掩码让已 ACK 的多次请求并行收结果，同时隔离当前新协议的 ACK 前迟到帧
+            if (semantic_id >= 0 && semantic_id <= 9 &&
+                (vis.art2_result_allowed_mask & entity_bit) != 0u &&
                 (vis.art2_expected_mask & entity_bit) != 0u) {
                 vis.semantic_labels[entity_id] = semantic_id;
                 vis.art2_received_mask |= entity_bit;
+                clear_completed_art2_results();
             }
         }
     }
@@ -360,18 +383,23 @@ bool request_capture_ART2(const SokobanLevel& level,
     }
 
     auto& vis = App::g_state.vision;
-    // 一个观测宏动作只能持有一批请求，禁止覆盖仍在等待结果的掩码
-    if (vis.art2_expected_mask != 0u) {
+    // 拍照通道只串行等待 ACK，已 ACK 请求的语义结果可继续异步返回
+    if (vis.art2_current_request_mask != 0u || vis.capture_ack_received ||
+        (active_mask & vis.art2_expected_mask) != 0u) {
         return false;
     }
     vis.capture_ack_received = false;
-    vis.art2_expected_mask = active_mask;
-    vis.art2_received_mask = 0u;
-    art2_capture_uses_new_protocol = effective_use_new_protocol;
+    vis.art2_current_request_mask = active_mask;
+    vis.art2_expected_mask |= active_mask;
+    vis.art2_received_mask &= ~active_mask;
+    if (!effective_use_new_protocol) {
+        // 旧协议允许 RESULT 与 ACK 乱序，发包后立即开放本次实体结果
+        vis.art2_result_allowed_mask |= active_mask;
+    }
 
     if (!effective_use_new_protocol) {
         if (count_mask_bits(active_mask) != 1) {
-            finish_capture_ART2();
+            cancel_current_art2_request(active_mask);
             return false;
         }
 
@@ -387,13 +415,13 @@ bool request_capture_ART2(const SokobanLevel& level,
 
     int camera_yaw_index = 0;
     if (!camera_yaw_to_index(camera_yaw, camera_yaw_index)) {
-        finish_capture_ART2();
+        cancel_current_art2_request(active_mask);
         return false;
     }
 
     if (requested_boxes != 0u) {
         if (count_mask_bits(requested_boxes) != 1) {
-            finish_capture_ART2();
+            cancel_current_art2_request(active_mask);
             return false;
         }
 
@@ -411,7 +439,7 @@ bool request_capture_ART2(const SokobanLevel& level,
     }
 
     if (requested_targets == 0u || count_mask_bits(requested_targets) > 3) {
-        finish_capture_ART2();
+        cancel_current_art2_request(active_mask);
         return false;
     }
 
@@ -457,12 +485,25 @@ bool request_capture_ART2(const SokobanLevel& level,
     return true;
 }
 
+/// \brief 消费当前拍照 ACK 并开放下一次拍照请求
+///
+/// \details
+/// 已 ACK 请求的 expected 和 allowed 掩码继续保留，使结果能在后续移动及拍照期间异步写入
+void consume_capture_ack_ART2() {
+    auto& vis = App::g_state.vision;
+    if (!vis.capture_ack_received) return;
+    vis.capture_ack_received = false;
+    vis.art2_current_request_mask = 0u;
+    clear_completed_art2_results();
+}
+
 void finish_capture_ART2() {
     auto& vis = App::g_state.vision;
     vis.capture_ack_received = false;
     vis.art2_expected_mask = 0u;
     vis.art2_received_mask = 0u;
-    art2_capture_uses_new_protocol = true;
+    vis.art2_result_allowed_mask = 0u;
+    vis.art2_current_request_mask = 0u;
 }
 
 /// \brief 视觉模块主循环轮询入口

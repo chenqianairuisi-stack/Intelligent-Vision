@@ -636,9 +636,8 @@ int main(int argc, char** argv) {
             }
         };
 
-        // 模拟 Vision.update() 收到 ACK 后逐实体收到 0x41 结果
+        // 模拟 Vision.update() 收到 ACK 后逐实体收到 0x41 结果，主流程以 ACK 作为动作完成条件
         auto run_art2_capture = [&](uint32_t requested_mask) {
-            uint32_t received_mask = 0u;
             bool capture_ack_received = false;
             mcu_trace.push_back("ART2_CAPTURE " + std::to_string(requested_mask));
 
@@ -651,7 +650,6 @@ int main(int argc, char** argv) {
                 const int8_t semantic_id = truth_semantic_labels[entity_id];
                 if (semantic_id < 0 || semantic_id > 9) return false;
                 observed_semantic_labels[entity_id] = semantic_id;
-                received_mask |= entity_bit;
                 // PATROL 段保留观测完成事件，visualizer 可按真实 ART2 回传顺序逐个揭示语义
                 const bool is_box = entity_id < logical_level.box_count;
                 // 观测结果必须携带本次 ALIGN_YAW 的真实朝向，供 visualizer 统计旋转次数
@@ -666,8 +664,7 @@ int main(int argc, char** argv) {
                     std::to_string(static_cast<int>(semantic_id))
                 );
             }
-            return capture_ack_received &&
-                   (received_mask & requested_mask) == requested_mask;
+            return capture_ack_received;
         };
 
         while (loop_guard++ < 4096 && !patrol_failed && sim_phase != McuSimPhase::DONE) {

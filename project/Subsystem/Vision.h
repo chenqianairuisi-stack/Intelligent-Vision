@@ -38,7 +38,10 @@ namespace Subsystem::Vision {
                               uint32_t active_mask,
                               bool use_new_protocol);
 
-    // 当前观测结束后失效请求掩码，忽略后续迟到结果
+    /// \brief 消费当前拍照 ACK 并释放下一次拍照请求
+    void consume_capture_ack_ART2();
+
+    // 流程复位时清空所有尚未完成的 ART2 请求
     void finish_capture_ART2();
 
     // 寻图前清空缓存
@@ -80,7 +83,7 @@ namespace Subsystem::Vision {
  *   2. 定位数据 (ART1 发送, MSG_POSE_DATA):
  *      - Payload: [X轴 (float)] [Y轴 (float)] [Yaw角 (float)] (长度 12 字节)
  *   3. 拍照确认ACK (ART2 发送, MSG_CAPTURE_ACK):
- *      - Payload: 任意1字节，主控仍需等待本次请求的结果包全部返回
+ *      - Payload: 任意1字节，主控收到后立即推进动作，语义结果继续异步接收
  *   4. 目标语义识别结果 (ART2 发送, MSG_ART2_RESULT):
  *      - Payload: [实体ID (uint8_t)] [语义/类别ID (int8_t)] (长度 2)
  */
