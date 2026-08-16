@@ -217,7 +217,7 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
         5000.0f,  // latency.l_stale_ms
     },
     {
-        900.0f,  // bomb.explosion_wait_ms
+        1000.0f, // bomb.explosion_wait_ms
     },
     {
         0.20f,    // yaw.lin_band

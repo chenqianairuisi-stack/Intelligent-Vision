@@ -475,6 +475,8 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     StaticArray<point, MAX_PATH_LENGTH> segment;
                     BombTask bomb = make_bomb_task(task.param.bomb_push);
                     if (PlanningCommon::get_bomb_push_path(logical_level, logical_level.player_start, bomb, segment)) {
+                        // 下一段路径需要穿过刚炸开的墙时先等待爆炸完成
+                        if (gate_explosion_before_path(logical_level.player_start, segment)) break;
                         // 传入真实逻辑起点，避免路径首点缺失时 Tracker 误判第一段方向
                         Algorithm::Tracker::load_path(segment, logical_level.player_start);
                         task_done = true;
@@ -490,6 +492,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     BoxPushTask box_push = make_box_push_task(task.param.box_push);
 
                     if (PlanningCommon::append_box_push_path(probe, probe_player, box_push, segment)) {
+                        if (gate_explosion_before_path(logical_level.player_start, segment)) break;
                         // 推箱路径可能从下一格开始，逻辑起点用于 Tracker 压缩首段
                         Algorithm::Tracker::load_box_push_path(segment, logical_level.player_start,
                                                                box_push.box_start,
@@ -507,6 +510,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     if (PlanningCommon::get_optimized_observe_path(
                             logical_level, logical_level.player_start,
                             task.param.target_grid, segment)) {
+                        if (gate_explosion_before_path(logical_level.player_start, segment)) break;
                         // 观察移动同样保留逻辑起点，保证第一段航向和视觉校正基准一致
                         Algorithm::Tracker::load_path(segment, logical_level.player_start);
                         // 不再边跑边转：观测目标航向不在路径加载时写入，全程保持出发朝向平移，
@@ -574,6 +578,13 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     break;
                 }
                 case TaskType::APPLY_BOMB_RESULT: {
+                    // 必须在地图结算清墙前记录本次真正炸开的墙格
+                    if (task.param.bomb_push.detonates) {
+                        capture_blast_cells(task.param.bomb_push.blast_wall, logical_level);
+                    } else {
+                        s_pending_blast_cells.clear();
+                    }
+
                     // 真实执行完成后，同时结算地图状态和剩余炸弹任务
                     PlanningCommon::apply_executed_bomb_push_result(
                         logical_level,
@@ -585,6 +596,8 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     if (!App::g_state.planning.grid_path.empty()) {
                         logical_level.player_start = App::g_state.planning.grid_path.back();
                     }
+
+                    s_explosion_wait_active = false;
 
                     task_done = true;
                     break;
