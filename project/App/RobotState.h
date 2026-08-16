@@ -46,6 +46,7 @@ struct RobotState {
         uint8_t art1_pose_stable_count = 0;     // Stable ART1 pose frame count for motion control gating
         bool art1_map_ready = false;
         bool art1_pose_updated = false;
+        bool art1_pose_applied = false;         // 本轮停稳后是否已用视觉位姿覆盖里程计
         bool art1_pose_request_pending = false;
         // ART2 当前观测状态，结果掩码只累计本次请求要求的实体
         uint32_t art2_expected_mask = 0;

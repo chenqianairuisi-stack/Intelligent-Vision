@@ -856,7 +856,7 @@ namespace {
                 err,
                 VISION_LATERAL_DEADBAND_CM,
                 max_step,
-                0.90f,
+                0.70f,
                 tune.vision_long.reject_dist_cm,
                 step)) {
             return false;

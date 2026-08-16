@@ -39,88 +39,15 @@ namespace {
         static_cast<uint8_t>(sizeof(ROUND_ADVANCED_SEQ) / sizeof(ROUND_ADVANCED_SEQ[0]));
     constexpr float RETURN_FINAL_YAW_TOLERANCE_DEG = 2.0f;
     constexpr float RETURN_EXIT_ODOM_REACH_RADIUS_CM = 3.0f;
-    constexpr float RETURN_EXIT_VISUAL_REACH_RADIUS_CM = 2.0f;
+    constexpr float RETURN_EXIT_VISUAL_REACH_RADIUS_CM = 8.0f;
     constexpr uint32_t RETURN_POSE_RECENT_MS = 300U;
     constexpr uint32_t RETURN_POSE_REQUEST_INTERVAL_MS = 150U;
+    constexpr uint32_t ART1_RETRY_INTERVAL_MS = 1000U;
 
     DTCM_DATA uint32_t s_return_pose_request_tick_ms = 0U;
     DTCM_DATA bool s_return_final_align_started = false;
-
-    // 炸弹按需等待爆炸：记录"这次爆炸真正会清开的墙格集合"，下一条路径若踩到其中任一格才等爆炸。
-    // 存被清开的墙格(而非 blast_wall 单点)有两个原因：
-    //  1) 精确——3×3 里多数格本就是空地，只有原本是墙、靠这次爆炸清开的格才需要等；踩邻域空地不等；
-    //  2) 时序——爆破 apply 会把这些墙当场清成 0，故必须在 apply 前捕获，之后无法再从地图反查。
-    DTCM_DATA StaticArray<point, 9> s_pending_blast_cells;  // 空 = 无待处理炸弹
-    DTCM_DATA bool s_explosion_wait_active = false;    // 当前是否正在等爆炸
-    DTCM_DATA uint32_t s_explosion_wait_start_ms = 0U; // 等待起始时刻
-
-    [[maybe_unused]] [[gnu::always_inline]] inline bool segment_contains(
-        const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& seg, point cell) {
-        for (int i = 0; i < seg.size(); ++i) {
-            if (seg[i] == cell) return true;
-        }
-        return false;
-    }
-
-    // 在爆破 apply 之前调用：扫描 blast_wall 的 3×3，把其中当前仍是墙(map!=0)的格捕获进
-    // s_pending_blast_cells。这些正是"下一步只有等这次爆炸炸开才能通过"的格子。
-    [[gnu::always_inline]] inline void capture_blast_cells(point blast_wall, const SokobanLevel& level) {
-        s_pending_blast_cells.clear();
-        for (int dy = -1; dy <= 1; ++dy) {
-            for (int dx = -1; dx <= 1; ++dx) {
-                int gx = blast_wall.x + dx;
-                int gy = blast_wall.y + dy;
-                if (gy < 0 || gy >= SystemConfig::MAP_MAX_HEIGHT ||
-                    gx < 0 || gx >= SystemConfig::MAP_MAX_WIDTH) continue;
-                if (level.map[gy][gx] != 0) {
-                    s_pending_blast_cells.push_back({static_cast<int8_t>(gx), static_cast<int8_t>(gy)});
-                }
-            }
-        }
-    }
-
-    // 路径是否踩到"这次爆炸才会清开的墙格"。只要路径任一格命中捕获的墙格集合即为真。
-    // 车绕墙而行、只擦过墙的邻域空地时不命中 → 不需要等(见图示轨迹绕开墙却曾误等 1 秒)。
-    [[gnu::always_inline]] inline bool segment_needs_blast(
-        point start,
-        const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& seg) {
-        for (int j = 0; j < s_pending_blast_cells.size(); ++j) {
-            if (PlanningCommon::path_crosses_cell(
-                    start, seg, s_pending_blast_cells[j])) return true;
-        }
-        return false;
-    }
-
-    // 路径加载前调用：刚推的炸弹若炸开的墙挡住即将执行的路径段 seg，则先原地等爆炸。
-    // 返回 true = 仍需等待（调用方应保持原地、暂不加载路径）；false = 可放行加载。
-    [[gnu::always_inline]] inline bool gate_explosion_before_path(
-        point start,
-        const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& seg) {
-        if (s_pending_blast_cells.size() == 0) return false;  // 无待处理炸弹
-
-        if (!s_explosion_wait_active) {
-            if (!segment_needs_blast(start, seg)) {
-                s_pending_blast_cells.clear();         // 路径不靠这次爆炸开路：不等，直奔目标
-                return false;
-            }
-            s_explosion_wait_active = true;            // 需穿墙：启动固定时长等待
-            s_explosion_wait_start_ms = Core::Scheduler::get_sys_tick_ms();
-            // 等待期间锁住当前位置，避免车继续往墙冲
-            Algorithm::Tracker::track_point(
-                {App::g_state.physical.pose.x, App::g_state.physical.pose.y, App::g_state.physical.pose.yaw});
-            // 爆炸闪光会污染视觉坐标，等待窗口内屏蔽视觉修正，只靠锁位+里程计扛过
-            Algorithm::Tracker::set_vision_correction_suppressed(true);
-        }
-
-        uint32_t wait_ms = (uint32_t)tune.bomb.explosion_wait_ms;
-        if (Core::Scheduler::get_sys_tick_ms() - s_explosion_wait_start_ms >= wait_ms) {
-            s_explosion_wait_active = false;
-            s_pending_blast_cells.clear();
-            Algorithm::Tracker::set_vision_correction_suppressed(false);  // 闪光过去，恢复视觉修正
-            return false;  // 等待结束，放行加载
-        }
-        return true;  // 仍在等待
-    }
+    DTCM_DATA uint32_t s_art1_request_tick_ms = 0U;
+    DTCM_DATA uint32_t s_return_route_pose_seq_start = 0U;
 
     [[gnu::always_inline]] inline float yaw_error_abs_deg(float target, float current) {
         float diff = target - current;
@@ -135,28 +62,76 @@ namespace {
         }
     }
 
-    [[gnu::always_inline]] inline bool get_recent_stable_vision_pose(uint32_t now,
-                                                                     Pose2D& out_pose) {
+    // 一次新的 ART1 采集必须丢弃上一关的地图和位姿帧，避免旧帧直接放行下一关
+    [[gnu::always_inline]] inline void reset_art1_acquisition_state() {
+        auto& vision = App::g_state.vision;
+        vision.art1_map_ready = false;
+        vision.art1_pose_updated = false;
+        vision.art1_pose_applied = false;
+        vision.art1_pose_request_pending = false;
+        vision.art1_pose_seq = 0U;
+        vision.art1_pose_tick_ms = 0U;
+        vision.art1_pose_stable_count = 0U;
+        s_art1_request_tick_ms = 0U;
+    }
+
+    [[gnu::always_inline]] inline bool get_recent_stable_art1_pose(
+        uint32_t now, Pose2D& out_pose) {
         const auto& vision = App::g_state.vision;
         if (vision.art1_pose_seq == 0U ||
+            vision.art1_pose_seq <= s_return_route_pose_seq_start ||
             vision.art1_pose_stable_count < App::ART1_POSE_STABLE_REQUIRED_FRAMES ||
             now - vision.art1_pose_tick_ms > RETURN_POSE_RECENT_MS) {
             return false;
         }
-
         out_pose = vision.art1_pose_buffer[vision.art1_pose_publish_idx];
         return std::isfinite(out_pose.x) && std::isfinite(out_pose.y);
     }
 
-    [[gnu::always_inline]] inline bool vision_reached_return_exit(uint32_t now) {
+    [[gnu::always_inline]] inline bool visual_reached_return_exit(uint32_t now) {
         Pose2D vision_pose;
-        if (!get_recent_stable_vision_pose(now, vision_pose)) {
-            return false;
-        }
-        float dx = vision_pose.x - SystemConfig::OUT_TARGET_X;
-        float dy = vision_pose.y - SystemConfig::OUT_TARGET_Y;
+        if (!get_recent_stable_art1_pose(now, vision_pose)) return false;
+        const float dx = vision_pose.x - OUT_TARGET_X;
+        const float dy = vision_pose.y - OUT_TARGET_Y;
         return dx * dx + dy * dy <=
                RETURN_EXIT_VISUAL_REACH_RADIUS_CM * RETURN_EXIT_VISUAL_REACH_RADIUS_CM;
+    }
+
+    // 返航终点不再重新下发追踪目标，只把当前路径锁死在当前位置等待视觉采集
+    [[gnu::always_inline]] inline void hold_return_position() {
+        auto& pos = App::g_state.physical.pose;
+        auto& ctrl = App::g_state.control;
+        ctrl.current_target = pos;
+        ctrl.segment_end_speed = 0.0f;
+        ctrl.tracker_state = TrackerState::FINISHED;
+        ctrl.mode = ControlMode::AUTO_TRACKING;
+        ctrl.hard_lock = true;
+    }
+
+    [[gnu::always_inline]] inline void request_art1_map_and_pose(uint32_t now) {
+        Subsystem::Vision::request_map_ART1();
+        Subsystem::Vision::request_pose_ART1();
+        s_art1_request_tick_ms = now;
+    }
+
+    // 视觉帧稳定后只执行一次，XY 同时覆盖融合位姿和编码器历史；航向继续采用陀螺估计
+    [[gnu::always_inline]] inline bool apply_stable_art1_pose() {
+        auto& vision = App::g_state.vision;
+        if (vision.art1_pose_applied ||
+            vision.art1_pose_seq == 0U ||
+            vision.art1_pose_stable_count < App::ART1_POSE_STABLE_REQUIRED_FRAMES) {
+            return vision.art1_pose_applied;
+        }
+
+        const Pose2D visual_pose = vision.art1_pose_buffer[vision.art1_pose_publish_idx];
+        if (!std::isfinite(visual_pose.x) || !std::isfinite(visual_pose.y)) {
+            return false;
+        }
+
+        const float current_yaw = App::g_state.physical.pose.yaw;
+        Subsystem::PoseEstimator::set_position(visual_pose.x, visual_pose.y, current_yaw);
+        vision.art1_pose_applied = true;
+        return true;
     }
 
     [[gnu::always_inline]] inline void start_return_route(bool continue_to_next_round) {
@@ -257,22 +232,13 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
         case GamePhase::INIT_CALIBRATE: {
             // 一次性复位，连续关卡之间会走返航直通路径而不再进入本阶段
             if (phase_entered) {
-                vision_data.art1_map_ready = false;
-                vision_data.art1_pose_updated = false;
-                vision_data.art1_pose_request_pending = false;
-                vision_data.art1_pose_seq = 0U;
-                vision_data.art1_pose_tick_ms = 0U;
-                vision_data.art1_pose_stable_count = 0U;
+                reset_art1_acquisition_state();
                 // 正常只在首轮进入，保留 round 分支供调试时从中间轮次手动重启
                 const float start_x = (game.round_idx == 0) ? INITIAL_X : ENTRY_X;
                 const float start_y = (game.round_idx == 0) ? INITIAL_Y : ENTRY_Y;
                 Subsystem::PoseEstimator::set_position(start_x, start_y, ENTRY_YAW);
                 Algorithm::Tracker::track_point({start_x, start_y, ENTRY_YAW});
 
-                // 复位炸弹爆炸等待与视觉抑制，防止上一局异常中断后抑制标志卡死导致视觉永久失效
-                s_pending_blast_cells.clear();
-                s_explosion_wait_active = false;
-                Algorithm::Tracker::set_vision_correction_suppressed(false);
                 Subsystem::Vision::finish_capture_ART2();
             }
 
@@ -286,15 +252,29 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             // 到位后请求视觉模块 ART1 返回地图数据，进入等待状态
             if (Algorithm::Tracker::check_arrival({OUT_TARGET_X, OUT_TARGET_Y}, tune.tracker.reach_radius_min) &&
                 App::g_state.physical.is_stopped) {
-                Subsystem::Vision::request_map_ART1();   // 请求 ART1 地图
+                // 到观测区后先保持当前位置，地图和位姿同时申请，不能在等待期间继续追点
+                hold_return_position();
+                reset_art1_acquisition_state();
+                request_art1_map_and_pose(Core::Scheduler::get_sys_tick_ms());
                 game.phase = GamePhase::WAIT_FOR_VISION;
             }
             break;
         }
 
         case GamePhase::WAIT_FOR_VISION: {
-            
-            if (vision_data.art1_map_ready) {
+            // 等待地图和停稳后的新视觉位姿，两个条件缺一不可
+            const uint32_t now = Core::Scheduler::get_sys_tick_ms();
+            const bool pose_recent = vision_data.art1_pose_seq != 0U &&
+                now - vision_data.art1_pose_tick_ms <= RETURN_POSE_RECENT_MS;
+            if (vision_data.art1_map_ready &&
+                vision_data.art1_pose_seq != 0U &&
+                vision_data.art1_pose_stable_count >= App::ART1_POSE_STABLE_REQUIRED_FRAMES &&
+                pose_recent) {
+                apply_stable_art1_pose();
+                if (!vision_data.art1_pose_applied) {
+                    break;
+                }
+
                 // 地图帧就绪，将视觉数据转换加载到逻辑地图结构中，供后续算法使用
                 logical_level.map = vision_data.map;
                 logical_level.player_start = {PLAN_START_X, PLAN_START_Y};
@@ -318,9 +298,6 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     logical_level.target_semantics[i] = 0;
                 }
 
-                // 异步请求位姿，用于后续全局定位校准
-                Subsystem::Vision::request_pose_ART1(); 
-
                 if (game.is_advanced_stage) {  
                     game.phase = GamePhase::PLAN_PATROL;       // 进入巡图
                 } else {
@@ -337,12 +314,10 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     game.phase = GamePhase::PLAN_SOKOBAN;      // 直接进入推箱子阶段
                 }
             } else {
-                // 未接收到地图帧，超时重试请求地图数据
-                static uint32_t last_request_tick = Core::Scheduler::get_sys_tick_ms();
-                
-                if (Core::Scheduler::get_sys_tick_ms() - last_request_tick > 1000) {
-                    last_request_tick = Core::Scheduler::get_sys_tick_ms();
-                    Subsystem::Vision::request_map_ART1();  
+                // 地图或位姿未返回时同时重试，计时器在每轮采集开始时清零
+                if (s_art1_request_tick_ms == 0U ||
+                    now - s_art1_request_tick_ms >= ART1_RETRY_INTERVAL_MS) {
+                    request_art1_map_and_pose(now);
                 }
             }
             break;
@@ -417,13 +392,8 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     StaticArray<point, MAX_PATH_LENGTH> segment;
                     BombTask bomb = make_bomb_task(task.param.bomb_push);
                     if (PlanningCommon::get_bomb_push_path(logical_level, logical_level.player_start, bomb, segment)) {
-                        // 上一颗炸弹墙若在本段路径上，先原地等爆炸再加载
-                        if (gate_explosion_before_path(logical_level.player_start, segment)) break;
                         // 传入真实逻辑起点，避免路径首点缺失时 Tracker 误判第一段方向
-                        Algorithm::Tracker::load_bomb_push_path(segment,
-                                                               logical_level.player_start,
-                                                               bomb.target_wall,
-                                                               logical_level);
+                        Algorithm::Tracker::load_path(segment, logical_level.player_start);
                         task_done = true;
                     } else {
                         game.error_stage = 2; game.phase = GamePhase::ERROR_OCCURRED;
@@ -437,7 +407,6 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     BoxPushTask box_push = make_box_push_task(task.param.box_push);
 
                     if (PlanningCommon::append_box_push_path(probe, probe_player, box_push, segment)) {
-                        if (gate_explosion_before_path(logical_level.player_start, segment)) break;
                         // 推箱路径可能从下一格开始，逻辑起点用于 Tracker 压缩首段
                         Algorithm::Tracker::load_box_push_path(segment, logical_level.player_start,
                                                                box_push.box_start,
@@ -455,7 +424,6 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     if (PlanningCommon::get_optimized_observe_path(
                             logical_level, logical_level.player_start,
                             task.param.target_grid, segment)) {
-                        if (gate_explosion_before_path(logical_level.player_start, segment)) break;
                         // 观察移动同样保留逻辑起点，保证第一段航向和视觉校正基准一致
                         Algorithm::Tracker::load_path(segment, logical_level.player_start);
                         // 不再边跑边转：观测目标航向不在路径加载时写入，全程保持出发朝向平移，
@@ -523,17 +491,6 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     break;
                 }
                 case TaskType::APPLY_BOMB_RESULT: {
-                    // 记录被炸墙格：仅当本次推动确实引爆(detonates)才登记，下一条路径踩到被炸开的
-                    // 墙格才等爆炸。非引爆的中间推动(detonates=false，只挪炸弹未炸墙)绝不能等待——
-                    // 否则下一段常会经过 blast_wall(那还只是"未来"的墙)而误触发原地锁位等待+屏蔽视觉，
-                    // 表现为"没有炸墙也在原地干等好久"。参见 [[bomb-wait-after-push]]。
-                    // 必须在 apply 结算地图**之前**捕获——apply 会把这些墙当场清成空地，之后无法反查。
-                    if (task.param.bomb_push.detonates) {
-                        capture_blast_cells(task.param.bomb_push.blast_wall, logical_level);
-                    } else {
-                        s_pending_blast_cells.clear();
-                    }
-
                     // 真实执行完成后，同时结算地图状态和剩余炸弹任务
                     PlanningCommon::apply_executed_bomb_push_result(
                         logical_level,
@@ -545,8 +502,6 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     if (!App::g_state.planning.grid_path.empty()) {
                         logical_level.player_start = App::g_state.planning.grid_path.back();
                     }
-
-                    s_explosion_wait_active = false;
 
                     task_done = true;
                     break;
@@ -641,6 +596,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
         case GamePhase::PLAN_RETURN_HOME: {
             s_return_pose_request_tick_ms = 0U;
             s_return_final_align_started = false;
+            s_return_route_pose_seq_start = App::g_state.vision.art1_pose_seq;
             // 爆炸屏蔽只作用于关卡内等待窗口，返航必须恢复动态视觉纠偏
             Algorithm::Tracker::set_vision_correction_suppressed(false);
             // 返航立即启动，ART1 只提供运动中纠偏，不能成为发车前的无限阻塞条件
@@ -660,29 +616,31 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 bool odom_at_exit = Algorithm::Tracker::check_arrival(
                     {OUT_TARGET_X, OUT_TARGET_Y}, RETURN_EXIT_ODOM_REACH_RADIUS_CM);
                 bool route_finished_at_exit = ctrl.tracker_state == TrackerState::FINISHED;
+                bool visual_at_exit = visual_reached_return_exit(now);
 
                 // 持续补请求以免 AUTO 路径结束后不再拉取位姿
                 request_return_pose_sample(now);
                 if (!exit_leg_started ||
-                    (!odom_at_exit && !route_finished_at_exit) ||
-                    !vision_reached_return_exit(now)) {
+                    (!odom_at_exit && !route_finished_at_exit && !visual_at_exit)) {
                     break;
                 }
 
-                // 编码器和视觉都确认到达后请求地图，不要求停车
-                Algorithm::Tracker::track_point({OUT_TARGET_X, OUT_TARGET_Y, RETURN_HOME_YAW});
+                // 编码器有累计误差时，以视觉接近观测区作为到达依据，先硬锁当前位置等待完全停稳
+                if (!App::g_state.physical.is_stopped) {
+                    hold_return_position();
+                    break;
+                }
+
+                // 到位且停稳后立即重新申请地图和位姿，等待期间绝不重新 track_point
                 game.round_idx++;
                 game.is_advanced_stage = ROUND_ADVANCED_SEQ[game.round_idx];
-                vision_data.art1_map_ready = false;
-                vision_data.art1_pose_updated = false;
-                vision_data.art1_pose_request_pending = false;
-                s_pending_blast_cells.clear();
-                s_explosion_wait_active = false;
+                hold_return_position();
+                reset_art1_acquisition_state();
                 Algorithm::Tracker::set_vision_correction_suppressed(false);
                 if (game.is_debug_mode) {
                     load_mock_map(game.selected_map_id);
                 } else {
-                    Subsystem::Vision::request_map_ART1();
+                    request_art1_map_and_pose(now);
                 }
                 game.phase = GamePhase::WAIT_FOR_VISION;
                 break;
