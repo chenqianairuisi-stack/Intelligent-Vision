@@ -61,7 +61,7 @@ struct RobotState {
         StaticArray<point, SystemConfig::MAX_PATH_LENGTH> grid_path;          // 供 UI 渲染
 
         StaticArray<Point2D, SystemConfig::MAX_PATH_LENGTH> physical_path;    // 物理路径（cm级坐标），供 Tracker 追踪
-        StaticArray<uint8_t, SystemConfig::MAX_PATH_LENGTH> force_stop_at_wp; // 该航点是否必须停稳后再切下一段
+        StaticArray<uint8_t, SystemConfig::MAX_PATH_LENGTH> force_stop_at_wp; // 0连续通过 1强制停稳 2推物补点 3爆破等待
         uint16_t current_wp_idx = 0;                                          // 当前正在追的航点索引
 
         StaticArray<BombTask, SystemConfig::MAX_BOMBS> bomb_tasks;            // 炸弹任务列表

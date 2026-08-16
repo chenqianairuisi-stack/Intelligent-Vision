@@ -84,18 +84,6 @@ static bool has_other_dynamic_entity(const SokobanLevel& lvl, point p, int ignor
     return false;
 }
 
-// 将车头朝向映射为 MOVE 下标，供时间寻路计算跨宏动作的首个拐点。
-static int yaw_to_move_direction(float yaw) {
-    if (!std::isfinite(yaw) || yaw < 0.0f) return -1;
-    float normalized = yaw;
-    while (normalized < 0.0f) normalized += 360.0f;
-    while (normalized >= 360.0f) normalized -= 360.0f;
-    const int yaw_index = static_cast<int>((normalized + 45.0f) / 90.0f) & 3;
-    // 0 度为右，90 度为上，180 度为左，270 度为下。
-    static constexpr int YAW_TO_MOVE[4] = {1, 0, 3, 2};
-    return YAW_TO_MOVE[yaw_index];
-}
-
 // 返回路径最后一段的实际平移方向；任意斜率末段无法压缩成四方向时返回 -1
 static int path_last_move_direction(point start,
                                     const StaticArray<point, MAX_PATH_LENGTH>& path,
@@ -147,8 +135,8 @@ namespace {
         OBSERVE_ROUTE_INVALID_INDEX;
 
     struct PatrolSequenceOptimizeWorkspace {
-        uint16_t edge_cost[PATROL_SEQUENCE_MAX_ACTIONS + 1]
-                         [PATROL_SEQUENCE_MAX_ACTIONS + 1]{};
+        uint32_t edge_cost[PATROL_SEQUENCE_MAX_ACTIONS + 1]
+                          [PATROL_SEQUENCE_MAX_ACTIONS + 1]{};
         uint8_t order[PATROL_SEQUENCE_MAX_ACTIONS]{};
         uint8_t trial[PATROL_SEQUENCE_MAX_ACTIONS]{};
         uint8_t candidate_order[PATROL_SEQUENCE_MAX_ACTIONS]{};
@@ -337,7 +325,7 @@ static bool validate_fixed_observe_sequence(
 ///
 /// \details
 /// 仅处理 active_mask 互不重叠的纯观测序列，先缓存动作间有向代价，
-/// 再执行两轮有限插入邻域搜索，只有总代价严格下降时才提交新顺序
+/// 再执行两轮有限插入邻域搜索，使用精确斜线距离避免整数代价掩盖短路线
 static void optimize_observe_sequence_order(
         const SokobanLevel& lvl,
         point start_pos,
@@ -360,7 +348,7 @@ static void optimize_observe_sequence_order(
     }
 
     auto route_edge_cost = [&](int previous_action,
-                               int next_action) -> uint16_t {
+                               int next_action) -> uint32_t {
         point from = start_pos;
         float from_yaw = start_yaw;
         if (previous_action >= 0) {
@@ -368,18 +356,19 @@ static void optimize_observe_sequence_order(
             from_yaw = plan[previous_action].observe.view.target_yaw;
         }
         const ViewPose& next_view = plan[next_action].observe.view;
-        uint16_t route_cost = 0u;
-        if (!evaluate_observe_access(
-                lvl, 0, from, next_view,
-                yaw_to_move_direction(from_yaw), route_cost)) {
-            return COST_INFINITY;
+        StaticArray<point, MAX_PATH_LENGTH> route;
+        // 每个观测动作都已停车，下一段平移不继承观测 yaw 或入站方向
+        if (!PlanningCommon::get_optimized_observe_path(
+                lvl, from, next_view.pos, route, -1)) {
+            return 0xFFFFFFFFu;
         }
-        const uint32_t total = static_cast<uint32_t>(PlanningCommon::MotionCostConfig::OBSERVE_ACTION) +
-            route_cost +
+        const uint32_t fixed_cost =
+            static_cast<uint32_t>(PlanningCommon::MotionCostConfig::OBSERVE_ACTION) +
             PlanningCommon::yaw_turn_time_cost(from_yaw, next_view.target_yaw) +
             next_view.penalty[0];
-        return total >= COST_INFINITY
-            ? COST_INFINITY : static_cast<uint16_t>(total);
+        return PlanningCommon::observe_route_precise_time_cost(
+                   from, route, -1) +
+               fixed_cost * PlanningCommon::ObserveRouteConfig::COST_SCALE;
     };
 
     for (int next = 0; next < count; ++next) {
@@ -388,7 +377,7 @@ static void optimize_observe_sequence_order(
     }
     for (int previous = 0; previous < count; ++previous) {
         patrol_sequence_ws.edge_cost[previous + 1][previous + 1] =
-            COST_INFINITY;
+            0xFFFFFFFFu;
         for (int next = 0; next < count; ++next) {
             if (previous == next) continue;
             patrol_sequence_ws.edge_cost[previous + 1][next + 1] =
@@ -401,9 +390,11 @@ static void optimize_observe_sequence_order(
         int previous_action = -1;
         for (int i = 0; i < count; ++i) {
             const int next_action = order[i];
-            const uint16_t edge = patrol_sequence_ws.edge_cost[
+            const uint32_t edge = patrol_sequence_ws.edge_cost[
                 previous_action + 1][next_action + 1];
-            if (edge == COST_INFINITY) return 0xFFFFFFFFu;
+            if (edge == 0xFFFFFFFFu || total > 0xFFFFFFFFu - edge) {
+                return 0xFFFFFFFFu;
+            }
             total += edge;
             previous_action = next_action;
         }
@@ -1235,7 +1226,7 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
         uint32_t mask = start_mask;
         point curr_pos = start_pos;
         float curr_yaw = start_yaw;
-        int curr_move_dir = yaw_to_move_direction(start_yaw);
+        int curr_move_dir = -1;
         int k = 0;
         int32_t current_cost = 0;
 
@@ -1374,7 +1365,7 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                     vp.mask[k] & ~mask, remain_b, remain_t);
                 if (next_newly_seen == 0u) continue;
                 const uint32_t next_mask = mask | next_newly_seen;
-                const int next_move_dir = yaw_to_move_direction(vp.target_yaw);
+                const int next_move_dir = -1;
                 int next_box_seen = 0;
                 int next_target_seen = 0;
                 for (int entity = 0; entity < total_entities; ++entity) {
@@ -1440,8 +1431,8 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                     PlanningCommon::MotionCostConfig::OBSERVE_ACTION + route_move_cost +
                     get_turn_cost(curr_yaw, vp.target_yaw) +
                     vp.penalty[0]);
-                // 观测动作末尾已经对齐目标朝向，不能把接入路径末段方向带入下一状态
-                const int next_move_dir = yaw_to_move_direction(vp.target_yaw);
+                // 观测动作已经停车，下一段平移不继承入站方向或观测 yaw
+                const int next_move_dir = -1;
                 MacroAction act = make_observe_macro_action(
                     vp, newly_seen, observe_cost);
                 seed_path.push_back(act);
@@ -1465,8 +1456,8 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                 }
                 current_cost += get_bomb_action_cost(
                     curr_pos, macro_path, executable_task, curr_move_dir);
-                // 推炸弹动作不改变观测朝向，下一段路径仍从当前观测朝向开始
-                curr_move_dir = yaw_to_move_direction(curr_yaw);
+                curr_move_dir = path_last_move_direction(
+                    curr_pos, macro_path, curr_move_dir);
                 curr_pos = macro_path.empty() ? curr_pos : macro_path.back();
                 ++k;
                 continue;
@@ -1697,8 +1688,8 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                     get_turn_cost(curr_yaw, vp.target_yaw) +
                     vp.penalty[0]);
                 const uint32_t next_mask = mask | newly_seen;
-                // 观测后先 ALIGN_YAW，下一段移动方向由观测朝向决定
-                const int next_move_dir = yaw_to_move_direction(vp.target_yaw);
+                // 观测后已经停车，yaw 只参与下次观测对齐代价
+                const int next_move_dir = -1;
 
                 int int_yaw = static_cast<int>(vp.target_yaw + 0.5f) % 360;
                 if (int_yaw < 0) int_yaw += 360;
@@ -1823,7 +1814,7 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                                 vp.pos,
                                 suffix,
                                 executable_task,
-                                yaw_to_move_direction(vp.target_yaw));
+                                -1);
                         int32_t combined_cost =
                             apply_bomb_reward(combined_bomb_route_cost) + static_cast<int32_t>(observe_turn_cost);
 
@@ -1886,9 +1877,9 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                     }
 
                     point next_pos_after_obs = macro_path.empty() ? candidate.vp.pos : macro_path.back();
-                    // 插入观测后会对齐其目标朝向，后续炸弹接入从该朝向计价
-                    const int next_move_dir = yaw_to_move_direction(
-                        candidate.vp.target_yaw);
+                    const int next_move_dir = next_pos_after_obs == candidate.vp.pos
+                        ? -1
+                        : path_last_move_direction(curr_pos, macro_path, curr_move_dir);
                     self(self,
                          next_pos_after_obs,
                          candidate.vp.target_yaw,
@@ -1914,8 +1905,8 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                 point next_pos = macro_path.empty() ? curr_pos : macro_path.back();
                 int32_t bomb_cost = get_bomb_action_cost(
                     curr_pos, macro_path, executable_task, curr_move_dir);
-                // 未插入观测时观测朝向保持不变，下一段仍从当前朝向计价
-                const int next_move_dir = yaw_to_move_direction(curr_yaw);
+                const int next_move_dir = path_last_move_direction(
+                    curr_pos, macro_path, curr_move_dir);
                 self(self,
                      next_pos,
                      curr_yaw,
@@ -1932,7 +1923,7 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
     dfs(dfs,
         start_pos,
         start_yaw,
-        yaw_to_move_direction(start_yaw),
+        -1,
         0,
         start_mask,
         0,
@@ -1954,7 +1945,7 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
     uint32_t mask = start_mask;
     point curr_pos = start_pos;
     float curr_yaw = start_yaw;
-    int curr_move_dir = yaw_to_move_direction(start_yaw);
+    int curr_move_dir = -1;
     int k = 0;
 
     for (int guard = 0; guard < 32; ++guard) {
@@ -2031,8 +2022,8 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                         fallback_path, stage_lvl, curr_pos, executable_task, -1, nullptr, curr_move_dir)) {
                     break;
                 }
-                // 推炸弹后观测朝向未改变，下一次接入从当前朝向开始
-                curr_move_dir = yaw_to_move_direction(curr_yaw);
+                curr_move_dir = path_last_move_direction(
+                    curr_pos, macro_path, curr_move_dir);
                 curr_pos = macro_path.empty() ? curr_pos : macro_path.back();
                 ++k;
                 continue;
@@ -2160,8 +2151,8 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                 point probe_player = curr_pos;
                 if (PlanningCommon::append_box_push_path(probe, probe_player, macro_box_task(best_clear.action), clear_path)) {
                     fallback_path.push_back(best_clear.action);
-                    // 清障推箱不包含观测对齐，保持当前观测朝向的计价状态
-                    curr_move_dir = yaw_to_move_direction(curr_yaw);
+                    curr_move_dir = path_last_move_direction(
+                        curr_pos, clear_path, curr_move_dir);
                     curr_pos = probe_player;
 
                     for (int s = k; s <= B; ++s) {
@@ -2181,15 +2172,12 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
             const uint32_t newly_seen = trim_new_observation_mask(
                 vp.mask[k] & ~mask, remain_b, remain_t);
             if (newly_seen == 0u) continue;
-            // 观测动作结束后已对齐目标朝向，不能沿用网格路径末段方向
-            int next_move_dir = yaw_to_move_direction(vp.target_yaw);
-            if (next_move_dir < 0 || next_move_dir >= 4) next_move_dir = curr_move_dir;
             MacroAction act = make_observe_macro_action(vp, newly_seen);
             fallback_path.push_back(act);
             mask |= newly_seen;
             curr_pos = vp.pos;
             curr_yaw = vp.target_yaw;
-            curr_move_dir = next_move_dir;
+            curr_move_dir = -1;
             continue;
         }
 
@@ -2212,8 +2200,8 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                 fallback_path, multi_maps[k], curr_pos, executable_task, -1, nullptr, curr_move_dir)) {
             break;
         }
-        // 推炸弹动作不改变观测朝向
-        curr_move_dir = yaw_to_move_direction(curr_yaw);
+        curr_move_dir = path_last_move_direction(
+            curr_pos, macro_path, curr_move_dir);
         curr_pos = macro_path.empty() ? curr_pos : macro_path.back();
         ++k;
     }

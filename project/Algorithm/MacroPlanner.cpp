@@ -2,7 +2,6 @@
 /// \brief 巡图宏动作生成、语义观测和推箱任务调度实现
 
 #include "MacroPlanner.h"
-#include <cmath>
 #include <cstring>
 
 DTCM_DATA MacroPlanner macro_planner;
@@ -173,18 +172,6 @@ static int first_step_direction(point from, point to) {
         if (delta == MOVE[d]) return d;
     }
     return -1;
-}
-
-// 将车头朝向转换为 MOVE 下标，供普通观测接入路径计入首步拐点。
-static int yaw_to_move_direction(float yaw) {
-    if (!std::isfinite(yaw) || yaw < 0.0f) return -1;
-    float normalized = yaw;
-    while (normalized < 0.0f) normalized += 360.0f;
-    while (normalized >= 360.0f) normalized -= 360.0f;
-    const int yaw_index = static_cast<int>((normalized + 45.0f) / 90.0f) & 3;
-    // 0 度为右，90 度为上，180 度为左，270 度为下。
-    static constexpr int YAW_TO_MOVE[4] = {1, 0, 3, 2};
-    return YAW_TO_MOVE[yaw_index];
 }
 
 // 粗略估计某箱子到目标集合的静态可达距离，用于完成式推箱的压力奖励
@@ -679,7 +666,8 @@ bool MacroPlanner::prepare_reference_action(const MacroPlanContext& ctx, const M
             prepared_action.observe.active_mask;
         if (required_mask == 0u) return false;
         StaticArray<point, MAX_PATH_LENGTH> path;
-        const int initial_dir = yaw_to_move_direction(ctx.yaw);
+        // 宏动作从停车状态启动，观测 yaw 不能当作上一段平移方向
+        const int initial_dir = -1;
         if (!PlanningCommon::optimize_observe_route(
                 ctx.level, ctx.player, required_mask,
                 prepared_action.observe.view, path, initial_dir)) {
@@ -700,7 +688,7 @@ bool MacroPlanner::prepare_reference_action(const MacroPlanContext& ctx, const M
         point probe_player = ctx.player;
         if (!PlanningCommon::append_box_push_path(probe, probe_player, macro_box_task(prepared_action), path)) return false;
         prepared_action.real_cost = PlanningCommon::path_time_cost(
-            ctx.player, path, yaw_to_move_direction(ctx.yaw));
+            ctx.player, path, -1);
         return true;
     }
 
@@ -711,7 +699,7 @@ bool MacroPlanner::prepare_reference_action(const MacroPlanContext& ctx, const M
         StaticArray<point, MAX_PATH_LENGTH> path;
         if (!PlanningCommon::get_bomb_push_path(ctx.level, ctx.player, bomb, path)) return false;
         prepared_action.real_cost = PlanningCommon::path_time_cost(
-            ctx.player, path, yaw_to_move_direction(ctx.yaw));
+            ctx.player, path, -1);
         return true;
     }
 
@@ -799,7 +787,7 @@ bool MacroPlanner::build_bomb_observe_split(const MacroPlanContext& ctx,
             if (!PlanningCommon::get_bomb_push_path(pause_level, observe.observe.view.pos, macro_bomb_task(suffix), suffix_path)) continue;
 
             prefix.real_cost = PlanningCommon::path_time_cost(
-                ctx.player, prefix_path, yaw_to_move_direction(ctx.yaw));
+                ctx.player, prefix_path, -1);
             observe.real_cost =
                 PlanningCommon::MotionCostConfig::OBSERVE_ACTION +
                 PlanningCommon::observe_route_time_cost(prefix_end, observe_path) +
@@ -807,7 +795,7 @@ bool MacroPlanner::build_bomb_observe_split(const MacroPlanContext& ctx,
                 observe.observe.view.penalty[0];
             suffix.real_cost = PlanningCommon::path_time_cost(
                 observe.observe.view.pos, suffix_path,
-                yaw_to_move_direction(observe.observe.view.target_yaw));
+                -1);
 
             prefix_action = prefix;
             observe_action = observe;
@@ -929,7 +917,7 @@ bool MacroPlanner::build_reference_clearance(const MacroPlanContext& ctx, const 
         if (!PlanningCommon::append_box_push_path(probe, probe_player, task, path)) return;
         if (path.size() > MacroConfig::REFERENCE_CLEAR_MAX_PATH) return;
         uint16_t push_cost = PlanningCommon::path_time_cost(
-            ctx.player, path, yaw_to_move_direction(ctx.yaw));
+            ctx.player, path, -1);
 
         if (!clearance_keeps_semantic_options(probe, probe_player, box_id)) return;
 
@@ -997,7 +985,7 @@ bool MacroPlanner::build_reference_clearance(const MacroPlanContext& ctx, const 
         if (after_access >= kInfScore) return;
 
         uint16_t push_cost = PlanningCommon::path_time_cost(
-            ctx.player, first_path, yaw_to_move_direction(ctx.yaw));
+            ctx.player, first_path, -1);
         int score = bonus - static_cast<int>(push_cost) - after_access;
         if (!best.valid || score > best.score) {
             MacroAction action = make_box_push_macro_action(
@@ -1139,7 +1127,7 @@ bool MacroPlanner::simulate_action(const SokobanLevel& level, point player, uint
 
 // 估计从当前位置接入参考动作的代价，不修改地图
 int MacroPlanner::reference_access_cost(const SokobanLevel& level, point player, float observe_yaw, const MacroAction& reference_action) const {
-    const int initial_dir = yaw_to_move_direction(observe_yaw);
+    const int initial_dir = -1;
     if (reference_action.kind == MacroActionKind::OBSERVE) {
         const uint32_t required_mask =
             reference_action.observe.active_mask & ~knowledge_state.observed_mask;

@@ -49,6 +49,83 @@ namespace {
     DTCM_DATA uint32_t s_art1_request_tick_ms = 0U;
     DTCM_DATA uint32_t s_return_route_pose_seq_start = 0U;
 
+    // 炸弹按需等待爆炸：记录"这次爆炸真正会清开的墙格集合"，下一条路径若踩到其中任一格才等爆炸。
+    // 存被清开的墙格(而非 blast_wall 单点)有两个原因：
+    //  1) 精确——3×3 里多数格本就是空地，只有原本是墙、靠这次爆炸清开的格才需要等；踩邻域空地不等；
+    //  2) 时序——爆破 apply 会把这些墙当场清成 0，故必须在 apply 前捕获，之后无法再从地图反查。
+    DTCM_DATA StaticArray<point, 9> s_pending_blast_cells;  // 空 = 无待处理炸弹
+    DTCM_DATA bool s_explosion_wait_active = false;    // 当前是否正在等爆炸
+    DTCM_DATA uint32_t s_explosion_wait_start_ms = 0U; // 等待起始时刻
+    DTCM_DATA bool s_sokoban_solution_ready = false;   // 等爆炸期间复用已求出的最终路径
+
+    [[maybe_unused]] [[gnu::always_inline]] inline bool segment_contains(
+        const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& seg, point cell) {
+        for (int i = 0; i < seg.size(); ++i) {
+            if (seg[i] == cell) return true;
+        }
+        return false;
+    }
+
+    // 在爆破 apply 之前调用：扫描 blast_wall 的 3×3，把其中当前仍是墙(map!=0)的格捕获进
+    // s_pending_blast_cells。这些正是"下一步只有等这次爆炸炸开才能通过"的格子。
+    [[gnu::always_inline]] inline void capture_blast_cells(point blast_wall, const SokobanLevel& level) {
+        s_pending_blast_cells.clear();
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                int gx = blast_wall.x + dx;
+                int gy = blast_wall.y + dy;
+                if (gy < 0 || gy >= SystemConfig::MAP_MAX_HEIGHT ||
+                    gx < 0 || gx >= SystemConfig::MAP_MAX_WIDTH) continue;
+                if (level.map[gy][gx] != 0) {
+                    s_pending_blast_cells.push_back({static_cast<int8_t>(gx), static_cast<int8_t>(gy)});
+                }
+            }
+        }
+    }
+
+    // 路径是否踩到"这次爆炸才会清开的墙格"。只要路径任一格命中捕获的墙格集合即为真。
+    // 车绕墙而行、只擦过墙的邻域空地时不命中 → 不需要等(见图示轨迹绕开墙却曾误等 1 秒)。
+    [[gnu::always_inline]] inline bool segment_needs_blast(
+        point start,
+        const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& seg) {
+        for (int j = 0; j < s_pending_blast_cells.size(); ++j) {
+            if (PlanningCommon::path_crosses_cell(
+                    start, seg, s_pending_blast_cells[j])) return true;
+        }
+        return false;
+    }
+
+    // 路径加载前调用：刚推的炸弹若炸开的墙挡住即将执行的路径段 seg，则先原地等爆炸。
+    // 返回 true = 仍需等待（调用方应保持原地、暂不加载路径）；false = 可放行加载。
+    [[gnu::always_inline]] inline bool gate_explosion_before_path(
+        point start,
+        const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& seg) {
+        if (s_pending_blast_cells.size() == 0) return false;  // 无待处理炸弹
+
+        if (!s_explosion_wait_active) {
+            if (!segment_needs_blast(start, seg)) {
+                s_pending_blast_cells.clear();         // 路径不靠这次爆炸开路：不等，直奔目标
+                return false;
+            }
+            s_explosion_wait_active = true;            // 需穿墙：启动固定时长等待
+            s_explosion_wait_start_ms = Core::Scheduler::get_sys_tick_ms();
+            // 等待期间锁住当前位置，避免车继续往墙冲
+            Algorithm::Tracker::track_point(
+                {App::g_state.physical.pose.x, App::g_state.physical.pose.y, App::g_state.physical.pose.yaw});
+            // 爆炸闪光会污染视觉坐标，等待窗口内屏蔽视觉修正，只靠锁位+里程计扛过
+            Algorithm::Tracker::set_vision_correction_suppressed(true);
+        }
+
+        uint32_t wait_ms = (uint32_t)tune.bomb.explosion_wait_ms;
+        if (Core::Scheduler::get_sys_tick_ms() - s_explosion_wait_start_ms >= wait_ms) {
+            s_explosion_wait_active = false;
+            s_pending_blast_cells.clear();
+            Algorithm::Tracker::set_vision_correction_suppressed(false);  // 闪光过去，恢复视觉修正
+            return false;  // 等待结束，放行加载
+        }
+        return true;  // 仍在等待
+    }
+
     [[gnu::always_inline]] inline float yaw_error_abs_deg(float target, float current) {
         float diff = target - current;
         return std::abs(diff - 360.0f * std::roundf(diff * INV_360));
@@ -239,6 +316,11 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 Subsystem::PoseEstimator::set_position(start_x, start_y, ENTRY_YAW);
                 Algorithm::Tracker::track_point({start_x, start_y, ENTRY_YAW});
 
+                // 复位炸弹爆炸等待与视觉抑制，防止上一局异常中断后抑制标志卡死导致视觉永久失效
+                s_pending_blast_cells.clear();
+                s_explosion_wait_active = false;
+                s_sokoban_solution_ready = false;
+                Algorithm::Tracker::set_vision_correction_suppressed(false);
                 Subsystem::Vision::finish_capture_ART2();
             }
 
@@ -311,6 +393,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                         game.phase = GamePhase::ERROR_OCCURRED;
                         break;
                     }
+                    s_sokoban_solution_ready = false;
                     game.phase = GamePhase::PLAN_SOKOBAN;      // 直接进入推箱子阶段
                 }
             } else {
@@ -550,29 +633,38 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     game.phase = GamePhase::ERROR_OCCURRED;
                     break;
                 }
+                s_sokoban_solution_ready = false;
                 game.phase = GamePhase::PLAN_SOKOBAN;
             }
             break;
         }
         
         case GamePhase::PLAN_SOKOBAN: {
-            bool success = solver.solve();
-            if (!success && game.is_advanced_stage) {
-                success = prepare_phase2_solver(true) && solver.solve();
+            if (!s_sokoban_solution_ready) {
+                bool success = solver.solve();
+                if (!success && game.is_advanced_stage) {
+                    success = prepare_phase2_solver(true) && solver.solve();
+                }
+                if (!success) {
+                    game.error_stage = 6; // 错误阶段 6：推箱子路径求解失败
+                    game.phase = GamePhase::ERROR_OCCURRED;
+                    break;
+                }
+                s_sokoban_solution_ready = true;
             }
 
-            if (success) {
-                // 求解成功：加载路径并启动自动执行
-                // Sokoban 结果路径由求解器生成，仍用当前逻辑起点修正首段压缩
-                Algorithm::Tracker::load_sokoban_path(solver.get_result_path(),
-                                                      logical_level.player_start,
-                                                      logical_level);
-                ctrl.mode = ControlMode::AUTO_TRACKING;
-                game.phase = GamePhase::EXEC_SOKOBAN;
-            } else {
-                game.error_stage = 6; // 错误阶段 6：推箱子路径求解失败
-                game.phase = GamePhase::ERROR_OCCURRED;
-            }
+            const auto& result_path = solver.get_result_path();
+            // 巡图最后一次爆破可能直接进入最终路径，此处补上跨阶段门控
+            if (gate_explosion_before_path(logical_level.player_start, result_path)) break;
+
+            Algorithm::Tracker::load_sokoban_path(
+                result_path,
+                logical_level.player_start,
+                logical_level,
+                solver.get_explosion_wait_indices());
+            s_sokoban_solution_ready = false;
+            ctrl.mode = ControlMode::AUTO_TRACKING;
+            game.phase = GamePhase::EXEC_SOKOBAN;
             break;
         }
 

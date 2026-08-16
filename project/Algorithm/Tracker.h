@@ -11,9 +11,11 @@ namespace Algorithm::Tracker {
     void load_path(const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& raw_path, point start_grid);
     // 载入网格路径，并在整条路径上持续请求视觉定位
     void load_path_with_vision_assist(const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& raw_path);
+    // 载入最终路径并保留求解器标记的爆破等待航点
     void load_sokoban_path(const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& raw_path,
                            point start_grid,
-                           const SokobanLevel& level);
+                           const SokobanLevel& level,
+                           const StaticArray<uint16_t, SystemConfig::MAX_BOMBS>& explosion_wait_indices);
     void load_box_push_path(const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& raw_path,
                             point start_grid,
                             point box_start,

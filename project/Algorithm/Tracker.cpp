@@ -42,6 +42,10 @@ namespace {
     DTCM_DATA bool s_vision_correction_suppressed = false;  // 炸弹爆炸窗口期屏蔽视觉修正
     DTCM_DATA bool s_stop_settle_active = false;
     DTCM_DATA uint16_t s_stop_settle_wp_idx = 0U;
+    // Sokoban 整体路径内部的爆破停留状态
+    DTCM_DATA bool s_explosion_dwell_active = false;
+    DTCM_DATA uint16_t s_explosion_dwell_wp_idx = 0U;
+    DTCM_DATA uint32_t s_explosion_dwell_start_ms = 0U;
 
     // === 15ms 视觉修正节拍（PIT_CH2）冻结状态机 ===
     // 停车/保持时冻结视觉修正（不写 pose，只推进帧序号"边收边丢"），起步/长保持解冻后走一段
@@ -198,12 +202,18 @@ namespace {
 
     [[gnu::always_inline]] inline bool is_force_stop_waypoint(uint16_t idx) {
         const auto& plan = App::g_state.planning;
-        return idx < plan.force_stop_at_wp.size() && plan.force_stop_at_wp[idx] == 1U;
+        return idx < plan.force_stop_at_wp.size() &&
+               (plan.force_stop_at_wp[idx] == 1U || plan.force_stop_at_wp[idx] == 3U);
     }
 
     [[gnu::always_inline]] inline bool is_push_extra_waypoint(uint16_t idx) {
         const auto& plan = App::g_state.planning;
         return idx < plan.force_stop_at_wp.size() && plan.force_stop_at_wp[idx] == 2U;
+    }
+
+    [[gnu::always_inline]] inline bool is_explosion_wait_waypoint(uint16_t idx) {
+        const auto& plan = App::g_state.planning;
+        return idx < plan.force_stop_at_wp.size() && plan.force_stop_at_wp[idx] == 3U;
     }
 
     [[gnu::always_inline]] inline void force_stop_all_waypoints() {
@@ -326,6 +336,21 @@ namespace {
         s_stop_settle_wp_idx = 0U;
     }
 
+    [[gnu::always_inline]] inline void clear_explosion_dwell() {
+        s_explosion_dwell_active = false;
+        s_explosion_dwell_wp_idx = 0U;
+        s_explosion_dwell_start_ms = 0U;
+        s_vision_correction_suppressed = false;
+    }
+
+    [[gnu::always_inline]] inline uint32_t explosion_wait_ms() {
+        float wait = tune.bomb.explosion_wait_ms;
+        if (!std::isfinite(wait) || wait < 0.0f) {
+            wait = DEFAULT_TUNE_CONFIG.bomb.explosion_wait_ms;
+        }
+        return static_cast<uint32_t>(wait);
+    }
+
     // 当前底盘合速度大小 cm/s（由四轮反馈正运动学求出）
     [[maybe_unused]] [[gnu::always_inline]] inline float current_speed_mag() {
         const auto& w = App::g_state.physical.current_wheel_speed;
@@ -417,7 +442,8 @@ namespace {
 static void load_path_impl(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
                             bool has_start_grid,
                             point start_grid,
-                            bool force_vision_assist = false) {
+                            bool force_vision_assist = false,
+                            const StaticArray<uint8_t, MAX_PATH_LENGTH>* raw_waypoint_flags = nullptr) {
     auto& plan = App::g_state.planning;
     auto& ctrl = App::g_state.control;
 
@@ -425,6 +451,7 @@ static void load_path_impl(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
     plan.physical_path.clear();
     plan.force_stop_at_wp.clear();
     clear_stop_settle();
+    clear_explosion_dwell();
     s_finish_without_stop = false;
     ctrl.tracker_state = TrackerState::FINISHED;
     ctrl.hard_lock = false;   // 新路径载入：解除上一任务遗留的硬锁
@@ -443,14 +470,28 @@ static void load_path_impl(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
     if (can_use_start) {
         point prev = start_grid;
         int first_idx = raw_includes_start ? 1 : 0;
+        StaticArray<uint8_t, MAX_PATH_LENGTH> compressed_flags;
 
         // 用真实逻辑起点参与共线判断，避免第一段方向判断偏掉
         for (int i = first_idx; i < raw_path.size(); ++i) {
             bool is_last = (i == raw_path.size() - 1);
-            if (is_last || !same_direction(prev, raw_path[i], raw_path[i + 1])) {
+            uint8_t raw_flag = raw_waypoint_flags != nullptr && i < raw_waypoint_flags->size()
+                ? (*raw_waypoint_flags)[i]
+                : 0U;
+            if (is_last || raw_flag != 0U || !same_direction(prev, raw_path[i], raw_path[i + 1])) {
+                const int old_size = plan.grid_path.size();
                 push_unique_grid_waypoint(plan.grid_path, raw_path[i]);
+                if (plan.grid_path.size() > old_size) {
+                    compressed_flags.push_back(raw_flag);
+                } else if (raw_flag != 0U && !compressed_flags.empty()) {
+                    compressed_flags.back() = raw_flag;
+                }
             }
             prev = raw_path[i];
+        }
+
+        for (int i = 0; i < compressed_flags.size(); ++i) {
+            plan.force_stop_at_wp.push_back(compressed_flags[i]);
         }
     } else {
         compress_without_start(raw_path, plan.grid_path);
@@ -465,7 +506,7 @@ static void load_path_impl(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
         plan.physical_path.push_back(phys);
     }
 
-    for (int i = 0; i < plan.physical_path.size(); ++i) {
+    while (plan.force_stop_at_wp.size() < plan.physical_path.size()) {
         plan.force_stop_at_wp.push_back(0U);
     }
 
@@ -492,16 +533,23 @@ void load_path_with_vision_assist(const StaticArray<point, MAX_PATH_LENGTH>& raw
     load_path_impl(raw_path, false, {0, 0}, true);
 }
 
-// 推箱 / Sokoban 路径载入：现与观测 load_path 行为完全一致——不再插 0.2cm 顶死补点，
-// 终点按 must_stop 正常停稳一次。原先的 s_finish_without_stop + apply_box_push_extra 会在
-// 终点 0.2cm 内制造"停→弹射→停"，把目标加速度打成正负 doublet → 底盘"猛地一下"（推箱专属抖动）。
-// 去掉后推箱收尾与观测同样干净。代价：丢箱子最后 0.2cm 顶死余量（按用户取舍：消抖优先）。
-// level 参数保留以维持接口/调用点不变，当前实现不再使用（顶死补点的遥测调参 '3' 随之失效但无害）。
+/// \brief 载入带爆破等待标记的最终 Sokoban 路径
+/// \param raw_path 包含起点的逐格执行路径
+/// \param start_grid 当前逻辑起点
+/// \param level 当前逻辑地图，保留参数以维持统一路径接口
+/// \param explosion_wait_indices 需要停稳等待的 raw_path 索引
 void load_sokoban_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
                        point start_grid,
-                       const SokobanLevel& level) {
+                       const SokobanLevel& level,
+                       const StaticArray<uint16_t, MAX_BOMBS>& explosion_wait_indices) {
     (void)level;
-    load_path_impl(raw_path, true, start_grid);
+    StaticArray<uint8_t, MAX_PATH_LENGTH> raw_waypoint_flags;
+    for (int i = 0; i < raw_path.size(); ++i) raw_waypoint_flags.push_back(0U);
+    for (int i = 0; i < explosion_wait_indices.size(); ++i) {
+        const uint16_t raw_idx = explosion_wait_indices[i];
+        if (raw_idx < raw_waypoint_flags.size()) raw_waypoint_flags[raw_idx] = 3U;
+    }
+    load_path_impl(raw_path, true, start_grid, false, &raw_waypoint_flags);
 }
 
 void load_box_push_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
@@ -801,6 +849,25 @@ __attribute__((section(".ramfunc"))) void update_target() {
         }
     }
 
+    if (arrived && is_explosion_wait_waypoint(plan.current_wp_idx)) {
+        const uint32_t now = Core::Scheduler::get_sys_tick_ms();
+        if (!s_explosion_dwell_active || s_explosion_dwell_wp_idx != plan.current_wp_idx) {
+            s_explosion_dwell_active = true;
+            s_explosion_dwell_wp_idx = plan.current_wp_idx;
+            s_explosion_dwell_start_ms = now;
+            s_vision_correction_suppressed = true;
+        }
+        if (now - s_explosion_dwell_start_ms < explosion_wait_ms()) {
+            Point2D hold = current_pose_point();
+            ctrl.current_target.x = hold.x;
+            ctrl.current_target.y = hold.y;
+            ctrl.current_target.yaw = App::g_state.physical.pose.yaw;
+            ctrl.hard_lock = HARD_LOCK_ON_ARRIVAL;
+            return;
+        }
+        clear_explosion_dwell();
+    }
+
     if (arrived) {
         if (!is_last_point) {
             // 正常提前切段时保留实际位置，形成连续切向；若已越过理想拐点，不能再用
@@ -812,6 +879,7 @@ __attribute__((section(".ramfunc"))) void update_target() {
             reset_vision_assist(next_segment_start, s_force_vision_assist_current_segment);
             plan.current_wp_idx++;
             clear_stop_settle();
+            clear_explosion_dwell();
             target_phys = plan.physical_path[plan.current_wp_idx];
         } else if (finish_without_stop_at_last || App::g_state.physical.is_stopped) {
             ctrl.tracker_state = TrackerState::FINISHED;
@@ -842,6 +910,7 @@ void track_point_impl(const Pose2D& target, bool force_vision_assist) {
     plan.physical_path.clear();
     plan.force_stop_at_wp.clear();
     clear_stop_settle();
+    clear_explosion_dwell();
     s_finish_without_stop = false;
     reset_vision_assist(current_pose_point(), force_vision_assist);
 

@@ -180,8 +180,8 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
         80.0f,   // dynamics.max_duty
         200.0f,  // dynamics.max_vel
         800.0f,  // dynamics.max_acc
-        10.0f,   // dynamics.max_ang_vel
-        40.0f,   // dynamics.max_ang_acc
+        8.0f,    // dynamics.max_ang_vel
+        32.0f,   // dynamics.max_ang_acc
         1.090f,  // dynamics.kinematic_gain_x
         1.000f,  // dynamics.kinematic_gain_y
         0.80f,   // dynamics.brake_limit
@@ -195,7 +195,7 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
         1.0f,    // tracker.corner_switch_window
         0.7f,    // tracker.corner_line_tolerance
         100.0f,  // tracker.vision_request_interval_ms
-        5.0f,   // tracker.vision_reject_dist：横向误差接受范围，避免偏差超过 1cm 后反而完全不修
+        5.0f,    // tracker.vision_reject_dist：横向误差接受范围，避免偏差超过 1cm 后反而完全不修
         0.010f,  // tracker.ang_tolerance
         5.0f,    // tracker.corner_pause_speed
     },
@@ -217,14 +217,14 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
         5000.0f,  // latency.l_stale_ms
     },
     {
-        900.0f,   // bomb.explosion_wait_ms
+        900.0f,  // bomb.explosion_wait_ms
     },
     {
-        0.22f,    // yaw.lin_band
-        0.18f,    // yaw.kd
+        0.20f,    // yaw.lin_band
+        0.22f,    // yaw.kd
         1.0f,     // yaw.translate_gain
         0.36f,    // yaw.kd_translate
-        0.24f,    // yaw.stiction
+        0.18f,    // yaw.stiction
     },
     {
         1.0f,     // terminal.stop_brake_gain
@@ -236,10 +236,10 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
         1.0f,     // terminal.approach_enable
     },
     {
-        {{0.64f, 0.56f, 0.0f}, 0.046f, 0.012f, 0.030f, 1.0f},  // lf
-        {{0.46f, 0.56f, 0.0f}, 0.076f, 0.012f, 0.018f, 1.0f},  // lb
-        {{0.46f, 0.74f, 0.0f}, 0.080f, 0.012f, 0.028f, 1.0f},  // rf
-        {{0.46f, 0.56f, 0.0f}, 0.100f, 0.024f, 0.014f, 2.0f},  // rb
+        {{0.26f, 0.56f, 0.0f}, 0.084f, 0.030f, 0.022f, 0.0f},  // lf
+        {{0.26f, 0.56f, 0.0f}, 0.096f, 0.024f, 0.014f, 0.0f},  // lb
+        {{0.24f, 0.74f, 0.0f}, 0.096f, 0.024f, 0.008f, 0.0f},  // rf
+        {{0.32f, 0.56f, 0.0f}, 0.100f, 0.024f, 0.014f, 0.0f},  // rb
     },
     {
         1.0f,     // vision_long.enable：默认开启，中远段缓慢修正纵向里程，末端冻结逻辑保持不变

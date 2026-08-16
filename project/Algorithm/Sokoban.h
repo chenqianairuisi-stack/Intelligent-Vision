@@ -89,6 +89,10 @@ public:
     bool solve_macro_candidate();
     // 返回最近一次成功求解得到的玩家路径，包含行走和推动过程
     const StaticArray<point, MAX_PATH_LENGTH>& get_result_path() const { return final_path; }
+    // 返回需要在爆破落脚点等待的原始路径索引
+    const StaticArray<uint16_t, MAX_BOMBS>& get_explosion_wait_indices() const {
+        return explosion_wait_indices;
+    }
     // 返回最近一次求解的搜索统计，用于分析阈值、剪枝和扩展规模
     const SokobanProfile& get_profile() const { return profile; }
     bool profile_enabled() const;
@@ -199,6 +203,7 @@ private:
     bool try_box_task_candidate_from_state(
         const GameState& state,
         uint32_t branch_budget,
+        bool include_entry_walk,
         StaticArray<point, MAX_PATH_LENGTH>& out_path) const;
     // 有界枚举剩余炸弹任务顺序并衔接箱子任务候选解
     bool search_semantic_task_candidate(
@@ -213,7 +218,8 @@ private:
         uint16_t remaining_targets,
         const StaticArray<point, MAX_PATH_LENGTH>& path,
         StaticArray<point, MAX_PATH_LENGTH>& out_path,
-        uint32_t& branch_budget) const;
+        uint32_t& branch_budget,
+        bool include_entry_walk) const;
     // 回放并校验一条箱子任务宏边符合求解器的落位规则
     bool validate_box_task_segment(
         const SokobanLevel& level,
@@ -287,6 +293,7 @@ private:
     uint8_t infer_final_bomb_push_dir(point final_player, point target_wall) const;
     // 成功求解后优化同箱连续推动轨迹和玩家行走段转弯
     void optimize_final_path_turns();
+    void build_explosion_wait_indices();
     // 对边界状态一致的同箱连续推动片段做代价优先重规划
     void optimize_final_box_push_runs();
     // 为相邻推动作之间的一段行走重新寻路，优先减少转弯并限制额外步数
@@ -358,6 +365,7 @@ private:
     uint8_t target_semantics[MAX_BOXES] = {};                            // 每个目标点的语义编号
     StaticArray<point, MAX_BOMBS> initial_bombs;                         // 初始炸弹位置列表
     StaticArray<point, MAX_PATH_LENGTH> final_path;                      // 最近一次成功求解的完整玩家路径
+    StaticArray<uint16_t, MAX_BOMBS> explosion_wait_indices;            // 后续路径需穿新清墙时的爆破落脚点
     StaticArray<BombTask, MAX_BOMBS> bomb_tasks;                         // 按初始炸弹编号索引的清墙任务
     uint8_t num_bomb_tasks = 0;                                          // 有效炸弹任务/炸弹槽数量
     uint8_t b_macro_cost[MAX_BOMBS][MAP_MAX_HEIGHT][MAP_MAX_WIDTH][4];   // 炸弹宏动作乐观路径下界，255 表示不可达

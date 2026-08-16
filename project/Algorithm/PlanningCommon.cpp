@@ -1049,7 +1049,8 @@ namespace {
         OBS_ROUTE_MAX_CORNERS * OBS_ROUTE_CANDIDATES_PER_CORNER;
     inline constexpr int OBS_ROUTE_MAX_OBSTACLES =
         MAP_MAX_WIDTH * MAP_MAX_HEIGHT + MAX_BOXES + MAX_BOMBS;
-    inline constexpr uint32_t OBS_ROUTE_COST_SCALE = 100u;
+    inline constexpr uint32_t OBS_ROUTE_COST_SCALE =
+        ObserveRouteConfig::COST_SCALE;
     // 障碍格半宽 0.5，再预留约 0.46 格车体扫掠范围
     inline constexpr float OBS_ROUTE_BLOCK_HALF_EXTENT = 0.96f;
 
@@ -1589,6 +1590,13 @@ uint16_t observe_route_time_cost(point start,
     const uint32_t precise = observe_route_precise_cost(start, path, initial_dir);
     return clamp_time_cost(
         (precise + OBS_ROUTE_COST_SCALE / 2u) / OBS_ROUTE_COST_SCALE);
+}
+
+uint32_t observe_route_precise_time_cost(
+        point start,
+        const StaticArray<point, MAX_PATH_LENGTH>& path,
+        int initial_dir) {
+    return observe_route_precise_cost(start, path, initial_dir);
 }
 
 bool path_crosses_cell(point start,

@@ -7,7 +7,7 @@
 using namespace SystemConfig;
 
 // ============================================================================
-// planning 公共底层工具
+// planning 公共底层工具与代价模型
 // ============================================================================
 namespace PlanningCommon {
 
@@ -23,8 +23,9 @@ inline constexpr uint16_t OBSERVE_ACTION = STOP_NODE + OBSERVE_EXTRA;
 // 斜向移动配置
 namespace ObserveRouteConfig {
 inline constexpr bool ENABLE_OBSERVE_ROUTE_OPTIMIZATION = true;   // 启用观测路径斜向优化
-inline constexpr bool ENABLE_OBSERVE_ENDPOINT_ADJUST = true;      // 启用观测路径终点微调
+inline constexpr bool ENABLE_OBSERVE_ENDPOINT_ADJUST = false;      // 启用观测路径终点微调
 inline constexpr int ENDPOINT_ADJUST_RADIUS = 1;                  // 邻域半径，1 表示 3x3，2 表示 5x5
+inline constexpr uint16_t COST_SCALE = 100u;                      // 精确观测路径代价缩放倍率
 } // namespace ObserveRouteConfig
 
 // 箱子额外观测位配置
@@ -177,6 +178,13 @@ bool optimize_observe_route(const SokobanLevel& lvl,
 uint16_t observe_route_time_cost(point start,
                                  const StaticArray<point, MAX_PATH_LENGTH>& path,
                                  int initial_dir = -1);
+
+/// \brief 计算任意斜率观测航点的精确时间代价
+/// \return 以 ObserveRouteConfig::COST_SCALE 缩放后的整数代价
+uint32_t observe_route_precise_time_cost(
+    point start,
+    const StaticArray<point, MAX_PATH_LENGTH>& path,
+    int initial_dir = -1);
 
 /// \brief 判断航点折线是否穿过指定网格
 bool path_crosses_cell(point start,
