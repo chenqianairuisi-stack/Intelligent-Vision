@@ -43,11 +43,14 @@ namespace {
     constexpr uint32_t RETURN_POSE_RECENT_MS = 300U;
     constexpr uint32_t RETURN_POSE_REQUEST_INTERVAL_MS = 150U;
     constexpr uint32_t ART1_RETRY_INTERVAL_MS = 1000U;
+    constexpr uint32_t ART1_MAP_CAPTURE_DELAY_MS = 200U;  // 到观测点停稳后等待画面切换
 
     DTCM_DATA uint32_t s_return_pose_request_tick_ms = 0U;
     DTCM_DATA bool s_return_final_align_started = false;
     DTCM_DATA uint32_t s_art1_request_tick_ms = 0U;
     DTCM_DATA uint32_t s_return_route_pose_seq_start = 0U;
+    DTCM_DATA uint32_t s_art1_capture_wait_start_ms = 0U;
+    DTCM_DATA bool s_art1_map_request_sent = false;
 
     // 炸弹按需等待爆炸：记录"这次爆炸真正会清开的墙格集合"，下一条路径若踩到其中任一格才等爆炸。
     // 存被清开的墙格(而非 blast_wall 单点)有两个原因：
@@ -142,6 +145,54 @@ namespace {
         vision.art1_pose_tick_ms = 0U;
         vision.art1_pose_stable_count = 0U;
         s_art1_request_tick_ms = 0U;
+        s_art1_capture_wait_start_ms = 0U;
+        s_art1_map_request_sent = false;
+    }
+
+    // 校验 ART1 地图，拒绝空白帧、数量不完整帧和越界坐标帧
+    [[gnu::always_inline]] inline bool art1_map_is_valid() {
+        const auto& vision = App::g_state.vision;
+        if (vision.box_count == 0U ||
+            vision.box_count > SystemConfig::MAX_BOXES ||
+            vision.target_count != vision.box_count ||
+            vision.target_count > SystemConfig::MAX_BOXES ||
+            vision.bomb_count > SystemConfig::MAX_BOMBS) {
+            return false;
+        }
+
+        bool has_wall = false;
+        bool has_floor = false;
+        for (int y = 0; y < SystemConfig::MAP_MAX_HEIGHT; ++y) {
+            for (int x = 0; x < SystemConfig::MAP_MAX_WIDTH; ++x) {
+                const int8_t cell = vision.map[y][x];
+                if (cell == 0) {
+                    has_floor = true;
+                } else if (cell == 1) {
+                    has_wall = true;
+                } else {
+                    return false;
+                }
+            }
+        }
+        if (!has_wall || !has_floor) return false;
+
+        for (int i = 0; i < vision.box_count; ++i) {
+            const point box = vision.boxes[i];
+            const point target = vision.targets[i];
+            if (!PlanningCommon::in_bounds(box) ||
+                !PlanningCommon::in_bounds(target) ||
+                vision.map[box.y][box.x] != 0 ||
+                vision.map[target.y][target.x] != 0) {
+                return false;
+            }
+        }
+        for (int i = 0; i < vision.bomb_count; ++i) {
+            const point bomb = vision.bombs[i];
+            if (!PlanningCommon::in_bounds(bomb) || vision.map[bomb.y][bomb.x] != 0) {
+                return false;
+            }
+        }
+        return true;
     }
 
     [[gnu::always_inline]] inline bool get_recent_stable_art1_pose(
@@ -323,13 +374,13 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
         }
 
         case GamePhase::EXIT_START_ZONE: {
-            // 到位后请求视觉模块 ART1 返回地图数据，进入等待状态
+            // 到位停稳后先进入画面切换等待，再请求 ART1 地图和位姿
             if (Algorithm::Tracker::check_arrival({OUT_TARGET_X, OUT_TARGET_Y}, tune.tracker.reach_radius_min) &&
                 App::g_state.physical.is_stopped) {
-                // 到观测区后先保持当前位置，地图和位姿同时申请，不能在等待期间继续追点
+                // 到观测区后保持当前位置，不能在等待期间继续追点
                 hold_return_position();
                 reset_art1_acquisition_state();
-                request_art1_map_and_pose(Core::Scheduler::get_sys_tick_ms());
+                s_art1_capture_wait_start_ms = Core::Scheduler::get_sys_tick_ms();
                 game.phase = GamePhase::WAIT_FOR_VISION;
             }
             break;
@@ -338,6 +389,26 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
         case GamePhase::WAIT_FOR_VISION: {
             // 等待地图和停稳后的新视觉位姿，两个条件缺一不可
             const uint32_t now = Core::Scheduler::get_sys_tick_ms();
+
+            // 正式模式先丢弃等待窗口内到达的旧地图，满 100ms 后才发起本轮请求
+            if (!game.is_debug_mode && !s_art1_map_request_sent) {
+                vision_data.art1_map_ready = false;
+                if (s_art1_capture_wait_start_ms == 0U) {
+                    s_art1_capture_wait_start_ms = now;
+                }
+                if (now - s_art1_capture_wait_start_ms < ART1_MAP_CAPTURE_DELAY_MS) {
+                    break;
+                }
+                request_art1_map_and_pose(now);
+                s_art1_map_request_sent = true;
+                break;
+            }
+
+            if (vision_data.art1_map_ready && !art1_map_is_valid()) {
+                // 地图帧无效时释放首帧锁，按原重试周期重新取图
+                vision_data.art1_map_ready = false;
+            }
+
             const bool pose_recent = vision_data.art1_pose_seq != 0U &&
                 now - vision_data.art1_pose_tick_ms <= RETURN_POSE_RECENT_MS;
             if (vision_data.art1_map_ready &&
@@ -353,7 +424,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 logical_level.map = vision_data.map;
                 logical_level.player_start = {PLAN_START_X, PLAN_START_Y};
                 logical_level.box_count = vision_data.box_count;
-                logical_level.target_count = vision_data.box_count;
+                logical_level.target_count = vision_data.target_count;
                 logical_level.bomb_count = vision_data.bomb_count;
 
                 for(int i=0; i<logical_level.box_count; ++i) {
@@ -728,7 +799,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     break;
                 }
 
-                // 到位且停稳后立即重新申请地图和位姿，等待期间绝不重新 track_point
+                // 到位且停稳后启动画面切换等待，期间绝不重新 track_point
                 game.round_idx++;
                 game.is_advanced_stage = ROUND_ADVANCED_SEQ[game.round_idx];
                 hold_return_position();
@@ -737,7 +808,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 if (game.is_debug_mode) {
                     load_mock_map(game.selected_map_id);
                 } else {
-                    request_art1_map_and_pose(now);
+                    s_art1_capture_wait_start_ms = now;
                 }
                 game.phase = GamePhase::WAIT_FOR_VISION;
                 break;

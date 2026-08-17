@@ -200,13 +200,26 @@ namespace {
 
         if (parser_art1.msg_type == MSG_MAP_DATA && vis.art1_map_ready == false) { // 只处理第一帧地图数据，后续更新由业务层控制
             const uint8_t* p = parser_art1.payload_buf;
+            if (parser_art1.payload_len < 25U) return;
+
+            const uint8_t counts = p[24];
+            const uint8_t box_count = (counts >> 4) & 0x0F;
+            const uint8_t bomb_count = counts & 0x0F;
+            const uint8_t expected_len = static_cast<uint8_t>(25U + box_count * 2U + bomb_count);
+            if (box_count > SystemConfig::MAX_BOXES ||
+                bomb_count > SystemConfig::MAX_BOMBS ||
+                parser_art1.payload_len != expected_len) {
+                return;
+            }
+
             for (uint16_t i = 0; i < 192; i++) {
                 vis.map[i / 12][i % 12] = ((p[i / 8] & (1 << (i % 8))) != 0) ? 1 : 0;
             }
-            
-            uint8_t counts = p[24];
-            vis.box_count = (counts >> 4) & 0x0F;
-            vis.bomb_count = counts & 0x0F;
+
+            vis.box_count = box_count;
+            // ART1 协议使用同一个高 4 位同时表示箱子和目标点数量
+            vis.target_count = vis.box_count;
+            vis.bomb_count = bomb_count;
             
             uint8_t offset = 25;
             for (int i = 0; i < vis.box_count; i++)  { vis.boxes[i] = {(int8_t)((p[offset] >> 4) & 0x0F), (int8_t)(p[offset] & 0x0F)}; offset++; }

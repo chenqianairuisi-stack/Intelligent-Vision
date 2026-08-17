@@ -739,6 +739,7 @@ void load_mock_map(uint8_t map_idx) {
     const auto& map_layout = mock_map_library[map_idx].layout;
 
     vision_data.box_count = 0;
+    vision_data.target_count = 0;
     vision_data.bomb_count = 0;
     uint8_t target_count = 0;
 
@@ -763,6 +764,7 @@ void load_mock_map(uint8_t map_idx) {
             }
         }
     }
+    vision_data.target_count = target_count;
     vision_data.art1_map_ready = true; 
 }
 

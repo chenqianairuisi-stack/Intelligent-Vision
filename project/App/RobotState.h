@@ -30,6 +30,7 @@ struct RobotState {
         // 地图与实体信息
         std::array<std::array<int8_t, SystemConfig::MAP_MAX_WIDTH>, SystemConfig::MAP_MAX_HEIGHT> map{};
         uint8_t box_count;
+        uint8_t target_count;             // 独立保留目标点数量，供地图完整性校验
         uint8_t bomb_count;
         point boxes[SystemConfig::MAX_BOXES];
         point targets[SystemConfig::MAX_BOXES];
