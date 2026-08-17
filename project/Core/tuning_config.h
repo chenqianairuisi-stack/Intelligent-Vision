@@ -180,8 +180,8 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
         80.0f,   // dynamics.max_duty
         200.0f,  // dynamics.max_vel
         800.0f,  // dynamics.max_acc
-        80.0f,   // dynamics.max_ang_vel
-        32.0f,   // dynamics.max_ang_acc
+        6.0f,   // dynamics.max_ang_vel
+        36.0f,   // dynamics.max_ang_acc
         1.090f,  // dynamics.kinematic_gain_x
         1.000f,  // dynamics.kinematic_gain_y
         0.80f,   // dynamics.brake_limit
@@ -220,11 +220,11 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
         900.0f, // bomb.explosion_wait_ms
     },
     {
-        0.20f,    // yaw.lin_band
+        0.22f,    // yaw.lin_band
         0.22f,    // yaw.kd
         1.0f,     // yaw.translate_gain
         0.36f,    // yaw.kd_translate
-        0.18f,    // yaw.stiction
+        0.00f,    // yaw.stiction
     },
     {
         1.0f,     // terminal.stop_brake_gain
@@ -236,10 +236,10 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
         1.0f,     // terminal.approach_enable
     },
     {
-        {{0.26f, 0.56f, 0.0f}, 0.084f, 0.030f, 0.022f, 0.0f},  // lf
-        {{0.26f, 0.56f, 0.0f}, 0.096f, 0.022f, 0.04f, 0.0f},  // lb
-        {{0.24f, 0.74f, 0.0f}, 0.096f, 0.022f, 0.008f, 0.0f},  // rf
-        {{0.32f, 0.56f, 0.0f}, 0.100f, 0.024f, 0.014f, 0.0f},  // rb
+        {{0.38f, 0.8f, 0.0f}, 0.10f, 0.020f, 0.012f, 1.0f},  // lf
+        {{0.38f, 0.8f, 0.0f}, 0.10f, 0.020f, 0.012f, 1.0f},  // lb
+        {{0.38f, 0.8f, 0.0f}, 0.11f, 0.020f, 0.016f, 1.0f},  // rf
+        {{0.38f, 0.8f, 0.0f}, 0.10f, 0.020f, 0.016f, 1.0f},  // rb
     },
     {
         1.0f,     // vision_long.enable：默认开启，中远段缓慢修正纵向里程，末端冻结逻辑保持不变
