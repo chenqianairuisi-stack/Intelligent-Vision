@@ -21,10 +21,6 @@ namespace Algorithm::Tracker {
                             point box_start,
                             point box_target,
                             const SokobanLevel& level);
-    void load_bomb_push_path(const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& raw_path,
-                             point start_grid,
-                             point bomb_target,
-                             const SokobanLevel& level);
     void set_box_push_final_press_cm(float press_cm);
     float get_box_push_final_press_cm();
 

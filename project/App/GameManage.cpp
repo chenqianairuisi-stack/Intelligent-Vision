@@ -58,14 +58,6 @@ namespace {
     DTCM_DATA uint32_t s_explosion_wait_start_ms = 0U; // 等待起始时刻
     DTCM_DATA bool s_sokoban_solution_ready = false;   // 等爆炸期间复用已求出的最终路径
 
-    [[maybe_unused]] [[gnu::always_inline]] inline bool segment_contains(
-        const StaticArray<point, SystemConfig::MAX_PATH_LENGTH>& seg, point cell) {
-        for (int i = 0; i < seg.size(); ++i) {
-            if (seg[i] == cell) return true;
-        }
-        return false;
-    }
-
     // 在爆破 apply 之前调用：扫描 blast_wall 的 3×3，把其中当前仍是墙(map!=0)的格捕获进
     // s_pending_blast_cells。这些正是"下一步只有等这次爆炸炸开才能通过"的格子。
     [[gnu::always_inline]] inline void capture_blast_cells(point blast_wall, const SokobanLevel& level) {

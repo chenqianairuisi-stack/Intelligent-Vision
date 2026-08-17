@@ -561,31 +561,6 @@ void load_box_push_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
     load_path_impl(raw_path, true, start_grid);
 }
 
-void load_bomb_push_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
-                         point start_grid,
-                         point bomb_target,
-                         const SokobanLevel& level) {
-    load_path_impl(raw_path, true, start_grid);
-    force_stop_all_waypoints();
-    apply_box_push_extra_from_raw_path(raw_path, start_grid, level);
-
-    auto& plan = App::g_state.planning;
-    if (plan.physical_path.empty() || raw_path.size() == 0) {
-        return;
-    }
-
-    point final_car_grid = raw_path.back();
-    point push_dir = bomb_target - final_car_grid;
-    Point2D unit = grid_delta_to_physical_unit(push_dir);
-    float press = clamp_float(s_box_push_final_press_cm,
-                              MIN_BOX_PUSH_FINAL_PRESS_CM,
-                              MAX_BOX_PUSH_FINAL_PRESS_CM);
-
-    plan.physical_path[plan.physical_path.size() - 1].x += unit.x * press;
-    plan.physical_path[plan.physical_path.size() - 1].y += unit.y * press;
-
-}
-
 void set_box_push_final_press_cm(float press_cm) {
     if (!std::isfinite(press_cm)) {
         return;

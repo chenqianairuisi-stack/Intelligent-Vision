@@ -12,6 +12,8 @@ enum class TaskType : uint8_t {
     WAIT_ART2_CAPTURE,
     APPLY_BOMB_RESULT,
     UPDATE_BOX_LOGIC
+    // 注：炸弹按需等待爆炸未做成独立任务，而是在 LOAD_PATH_* 加载前内联门控
+    // （需先规划出路径才能判断是否穿过被炸墙），见 GameManage gate_explosion_before_path
 };
 
 // 指令结构

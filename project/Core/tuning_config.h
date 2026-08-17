@@ -18,9 +18,9 @@ namespace LinearTerminalConfig {
 
 inline constexpr float CRUISE_SPEED_CM_S = 100.0f;
 inline constexpr float SHORT_MIN_SPEED_CM_S = 20.0f;
-inline constexpr float SHORT_SLOWDOWN_DIST_CM = 15.0f;
-inline constexpr float LONG_MIN_SPEED_CM_S = 23.0f;
-inline constexpr float LONG_SLOWDOWN_DIST_CM = 55.0f;
+inline constexpr float SHORT_SLOWDOWN_DIST_CM = 12.0f;
+inline constexpr float LONG_MIN_SPEED_CM_S = 30.0f;
+inline constexpr float LONG_SLOWDOWN_DIST_CM = 35.0f;
 inline constexpr float STOP_DIST_CM = 0.8f;
 inline constexpr float LONG_SEGMENT_THRESHOLD_CM = 60.0f;
 inline constexpr float LONG_CRUISE_GAIN = 1.50f;
@@ -180,7 +180,7 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
         80.0f,   // dynamics.max_duty
         200.0f,  // dynamics.max_vel
         800.0f,  // dynamics.max_acc
-        8.0f,    // dynamics.max_ang_vel
+        80.0f,   // dynamics.max_ang_vel
         32.0f,   // dynamics.max_ang_acc
         1.090f,  // dynamics.kinematic_gain_x
         1.000f,  // dynamics.kinematic_gain_y
@@ -192,10 +192,10 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
         0.3f,    // tracker.reach_radius
         1.0f,    // tracker.reach_radius_min
         0.0f,    // tracker.corner_pass_speed
-        1.0f,    // tracker.corner_switch_window
+        2.0f,    // tracker.corner_switch_window
         0.7f,    // tracker.corner_line_tolerance
         100.0f,  // tracker.vision_request_interval_ms
-        5.0f,    // tracker.vision_reject_dist：横向误差接受范围，避免偏差超过 1cm 后反而完全不修
+        5.0f,   // tracker.vision_reject_dist：横向误差接受范围，避免偏差超过 1cm 后反而完全不修
         0.010f,  // tracker.ang_tolerance
         5.0f,    // tracker.corner_pause_speed
     },
@@ -204,7 +204,7 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
     },
     {
         1.0f,     // latency.encoder_latency_gain
-        320.0f,   // latency.vision_latency_ms
+        380.0f,   // latency.vision_latency_ms
         1.0f,     // latency.enable_estimation
         45.0f,    // latency.turn_thresh_deg
         0.30f,    // latency.enc_v_min
@@ -217,7 +217,7 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
         5000.0f,  // latency.l_stale_ms
     },
     {
-        1000.0f, // bomb.explosion_wait_ms
+        900.0f, // bomb.explosion_wait_ms
     },
     {
         0.20f,    // yaw.lin_band
@@ -237,8 +237,8 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
     },
     {
         {{0.26f, 0.56f, 0.0f}, 0.084f, 0.030f, 0.022f, 0.0f},  // lf
-        {{0.26f, 0.56f, 0.0f}, 0.096f, 0.024f, 0.014f, 0.0f},  // lb
-        {{0.24f, 0.74f, 0.0f}, 0.096f, 0.024f, 0.008f, 0.0f},  // rf
+        {{0.26f, 0.56f, 0.0f}, 0.096f, 0.022f, 0.04f, 0.0f},  // lb
+        {{0.24f, 0.74f, 0.0f}, 0.096f, 0.022f, 0.008f, 0.0f},  // rf
         {{0.32f, 0.56f, 0.0f}, 0.100f, 0.024f, 0.014f, 0.0f},  // rb
     },
     {
@@ -251,7 +251,7 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
         // 曾设 2.0：纵向误差一旦越过 2cm 就完全不修，与 15cm 硬重置之间留下 13cm 死区，
         // 误差越大越不修。长段累积必然越过 2cm → 修正开关式关闭 → 剩余段纯靠已跑偏的编码器
         // → 多跑；短段撑不到 2cm 所以一直准。取 12 与硬重置衔接，不留空档。
-        6.0f,    // vision_long.reject_dist_cm
+        12.0f,    // vision_long.reject_dist_cm
         1.0f,     // vision_long.scale_learn_enable
         // 比例是全局持久状态、乘在每个编码器增量上，误差正比于段长。alpha 越大波动越快、
         // run-to-run 差异越大（"偶尔多跑"的来源）。保守取 0.10。
@@ -261,7 +261,7 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
         1.15f,    // vision_long.scale_max
     },
     {
-        3.0f,     // vision_lateral.max_step_cm
+        1.5f,     // vision_lateral.max_step_cm
         1.0f,     // vision_lateral.gain
     },
     {
