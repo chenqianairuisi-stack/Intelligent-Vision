@@ -44,10 +44,16 @@ namespace {
     constexpr uint32_t RETURN_POSE_REQUEST_INTERVAL_MS = 150U;
     constexpr uint32_t ART1_RETRY_INTERVAL_MS = 1000U;
     constexpr uint32_t ART1_MAP_CAPTURE_DELAY_MS = 200U;  // 到观测点停稳后等待画面切换
+    constexpr uint32_t ART1_MAP_SETTLE_MS = 50U;
+    constexpr uint32_t RETURN_HOME_DWELL_MS = 120U;
 
     DTCM_DATA uint32_t s_return_pose_request_tick_ms = 0U;
     DTCM_DATA bool s_return_final_align_started = false;
+    DTCM_DATA bool s_return_home_dwell_active = false;
+    DTCM_DATA bool s_return_exit_started = false;
+    DTCM_DATA uint32_t s_return_home_dwell_start_ms = 0U;
     DTCM_DATA uint32_t s_art1_request_tick_ms = 0U;
+    DTCM_DATA uint32_t s_art1_map_settle_start_tick_ms = 0U;
     DTCM_DATA uint32_t s_return_route_pose_seq_start = 0U;
     DTCM_DATA uint32_t s_art1_capture_wait_start_ms = 0U;
     DTCM_DATA bool s_art1_map_request_sent = false;
@@ -147,6 +153,7 @@ namespace {
         s_art1_request_tick_ms = 0U;
         s_art1_capture_wait_start_ms = 0U;
         s_art1_map_request_sent = false;
+        s_art1_map_settle_start_tick_ms = Core::Scheduler::get_sys_tick_ms();
     }
 
     // 校验 ART1 地图，拒绝空白帧、数量不完整帧和越界坐标帧
@@ -254,13 +261,16 @@ namespace {
         return true;
     }
 
-    [[gnu::always_inline]] inline void start_return_route(bool continue_to_next_round) {
+    [[gnu::always_inline]] inline void start_return_home_route() {
         StaticArray<point, SystemConfig::MAX_PATH_LENGTH> route;
         route.push_back(RETURN_HOME_GRID);
-        if (continue_to_next_round) {
-            // home 是普通中间航点，Tracker 会保留速度并直接切向下一关出库点
-            route.push_back(RETURN_EXIT_GRID);
-        }
+        Algorithm::Tracker::load_path_with_vision_assist(route);
+        App::g_state.control.current_target.yaw = RETURN_HOME_YAW;
+    }
+
+    [[gnu::always_inline]] inline void start_return_exit_route() {
+        StaticArray<point, SystemConfig::MAX_PATH_LENGTH> route;
+        route.push_back(RETURN_EXIT_GRID);
         Algorithm::Tracker::load_path_with_vision_assist(route);
         App::g_state.control.current_target.yaw = RETURN_HOME_YAW;
     }
@@ -290,6 +300,9 @@ void init() {
     App::g_state.game.round_count       = sw1_on ? MAX_ROUND_COUNT : 1U;
     App::g_state.game.is_advanced_stage = sw1_on ? ROUND_ADVANCED_SEQ[0] : true;
     App::g_state.game.is_debug_mode     = sw2_on;  // 调试模式：开-直接注入地图数据，绕过视觉输入；关-正常模式，等待视觉输入
+    s_return_home_dwell_active = false;
+    s_return_exit_started = false;
+    s_return_home_dwell_start_ms = 0U;
 
     if (App::g_state.game.is_debug_mode) {
         App::g_state.game.phase = GamePhase::NONE;  // 直接进入初始状态，UI 选完地图后再切到正常流程
@@ -350,7 +363,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
         // ---- 阶段一：启动出库与建图 ----
         // =============================================================================
         case GamePhase::INIT_CALIBRATE: {
-            // 一次性复位，连续关卡之间会走返航直通路径而不再进入本阶段
+            // 一次性复位，连续关卡返航后从发车区重新进入出库流程
             if (phase_entered) {
                 reset_art1_acquisition_state();
                 // 正常只在首轮进入，保留 round 分支供调试时从中间轮次手动重启
@@ -460,9 +473,10 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     game.phase = GamePhase::PLAN_SOKOBAN;      // 直接进入推箱子阶段
                 }
             } else {
-                // 地图或位姿未返回时同时重试，计时器在每轮采集开始时清零
-                if (s_art1_request_tick_ms == 0U ||
-                    now - s_art1_request_tick_ms >= ART1_RETRY_INTERVAL_MS) {
+                // 到达观测点并完全停稳后，再给相机 50 ms 响应窗口后发起采集
+                if (now - s_art1_map_settle_start_tick_ms >= ART1_MAP_SETTLE_MS &&
+                    (s_art1_request_tick_ms == 0U ||
+                     now - s_art1_request_tick_ms >= ART1_RETRY_INTERVAL_MS)) {
                     request_art1_map_and_pose(now);
                 }
             }
@@ -764,12 +778,14 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
         case GamePhase::PLAN_RETURN_HOME: {
             s_return_pose_request_tick_ms = 0U;
             s_return_final_align_started = false;
+            s_return_home_dwell_active = false;
+            s_return_exit_started = false;
+            s_return_home_dwell_start_ms = 0U;
             s_return_route_pose_seq_start = App::g_state.vision.art1_pose_seq;
             // 爆炸屏蔽只作用于关卡内等待窗口，返航必须恢复动态视觉纠偏
             Algorithm::Tracker::set_vision_correction_suppressed(false);
-            // 返航立即启动，ART1 只提供运动中纠偏，不能成为发车前的无限阻塞条件
-            bool has_next_round = game.round_idx + 1 < game.round_count;
-            start_return_route(has_next_round);
+            // 先单独返回发车区，连续关卡在此停稳等待 1 秒后再加载出库路径
+            start_return_home_route();
             request_return_pose_sample(Core::Scheduler::get_sys_tick_ms());
             game.phase = GamePhase::EXEC_RETURN_HOME;
             break;
@@ -779,17 +795,37 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
             uint32_t now = Core::Scheduler::get_sys_tick_ms();
             bool has_next_round = game.round_idx + 1 < game.round_count;
             if (has_next_round) {
-                // home 保持普通连续航点，切到第二航段后才允许判断观测区
-                bool exit_leg_started = App::g_state.planning.current_wp_idx >= 1U;
+                // 连续关卡：发车区必须先停稳并保持 1 秒，再重新发车去观测区
+                request_return_pose_sample(now);
+                if (!s_return_exit_started) {
+                    if (!s_return_home_dwell_active) {
+                        if (ctrl.tracker_state != TrackerState::FINISHED ||
+                            !App::g_state.physical.is_stopped) {
+                            break;
+                        }
+                        s_return_home_dwell_active = true;
+                        s_return_home_dwell_start_ms = now;
+                    }
+
+                    hold_return_position();
+                    if (now - s_return_home_dwell_start_ms < RETURN_HOME_DWELL_MS) {
+                        break;
+                    }
+
+                    s_return_home_dwell_active = false;
+                    s_return_exit_started = true;
+                    // 只接受重新发车后采集的视觉帧作为观测区到达依据
+                    s_return_route_pose_seq_start = App::g_state.vision.art1_pose_seq;
+                    start_return_exit_route();
+                    break;
+                }
+
                 bool odom_at_exit = Algorithm::Tracker::check_arrival(
                     {OUT_TARGET_X, OUT_TARGET_Y}, RETURN_EXIT_ODOM_REACH_RADIUS_CM);
                 bool route_finished_at_exit = ctrl.tracker_state == TrackerState::FINISHED;
                 bool visual_at_exit = visual_reached_return_exit(now);
 
-                // 持续补请求以免 AUTO 路径结束后不再拉取位姿
-                request_return_pose_sample(now);
-                if (!exit_leg_started ||
-                    (!odom_at_exit && !route_finished_at_exit && !visual_at_exit)) {
+                if (!odom_at_exit && !route_finished_at_exit && !visual_at_exit) {
                     break;
                 }
 
@@ -799,9 +835,10 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     break;
                 }
 
-                // 到位且停稳后启动画面切换等待，期间绝不重新 track_point
+                // 到位且停稳后进入采集等待，等待期间绝不重新 track_point
                 game.round_idx++;
                 game.is_advanced_stage = ROUND_ADVANCED_SEQ[game.round_idx];
+                s_return_exit_started = false;
                 hold_return_position();
                 reset_art1_acquisition_state();
                 Algorithm::Tracker::set_vision_correction_suppressed(false);

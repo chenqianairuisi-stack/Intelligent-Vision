@@ -72,11 +72,15 @@ private:
 // ==========================================
 namespace Kinematics {
     constexpr float L = SystemConfig::HALF_X_AXIS + SystemConfig::HALF_Y_AXIS;
+    // 实车横移标定：左右横移每 200 cm 会串入约 10 cm 的反向前后位移
+    inline constexpr float LATERAL_DRIFT_COMPENSATION = 0.00f;
 
     __attribute__((always_inline))
     inline WheelSpeed4 inverse(float vx, float vy, float vw) noexcept {
         float vx_compensated = vx * tune.dynamics.kinematic_gain_x;
-        float vy_compensated = vy * tune.dynamics.kinematic_gain_y; 
+        // 横移引起的前后串扰方向随 vx 反向，先在轮速层加入等量反向前后指令
+        float vy_compensated = (vy + LATERAL_DRIFT_COMPENSATION * vx) *
+                               tune.dynamics.kinematic_gain_y;
         return {
             vy_compensated + vx_compensated - vw * L,  // LF
             vy_compensated - vx_compensated - vw * L,  // LB

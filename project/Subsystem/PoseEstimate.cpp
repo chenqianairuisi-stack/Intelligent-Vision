@@ -76,6 +76,8 @@ namespace {
     DTCM_DATA uint16_t s_odom_history_idx = 0;
     DTCM_DATA VisionLatencyDebug s_vision_latency_debug = {};
     DTCM_DATA MileageScaleDebug s_mileage_scale_debug = {};
+    // 视觉与编码器严重分叉后锁定编码器，避免错误视觉坐标反复把位姿拉回去
+    DTCM_DATA bool s_vision_encoder_holdoff = false;
 
     struct MileageScaleAxisLearner {
         float candidate = 1.0f;
@@ -107,7 +109,9 @@ namespace {
     constexpr float DEFAULT_VISION_LATENCY_MS =
         DEFAULT_TUNE_CONFIG.latency.vision_latency_ms;
     constexpr float VISION_LATERAL_DEADBAND_CM = 0.15f;
-    constexpr float VISION_ENCODER_RESET_THRESHOLD_CM = 15.0f;
+    constexpr float VISION_ENCODER_RESET_THRESHOLD_CM = 10.0f;
+    constexpr float VISION_ENCODER_HOLDOFF_THRESHOLD_CM = 20.0f;
+    constexpr float VISION_ENCODER_REJOIN_THRESHOLD_CM = 2.0f;
     constexpr float MILEAGE_AXIS_ALIGNMENT_MIN = 0.92f;
     constexpr float MILEAGE_SAMPLE_CONSISTENCY_TOL = 0.03f;
     constexpr float MILEAGE_MAX_CROSS_TRACK_CM = 3.0f;
@@ -152,6 +156,7 @@ namespace {
     void reset_odom_history(const Pose2D& pose, uint32_t tick_ms) {
         s_encoder_pose = pose;
         s_raw_encoder_pose = pose;
+        s_vision_encoder_holdoff = false;
         s_odom_history_idx = 0;
         for (auto& sample : s_odom_history) {
             sample.valid = false;
@@ -850,7 +855,7 @@ namespace {
 
         // 粗差闸传纵向自己的 reject_dist_cm，不能沿用横向的 vision_reject_dist（默认 1cm）：
         // 那是"横向偏这么多就是误检"的尺度，而纵向要治的打滑累积本身就是 1~3cm，沿用会把
-        // 待修误差全判成误检、修正恒为 0。更大的真异常仍由 15cm 粗差硬拽兜底。
+        // 待修误差全判成误检、修正恒为 0。3~20cm 由视觉硬贴合处理，超过 20cm 由编码器保护接管。
         float step = 0.0f;
         if (!calc_smoothed_correction_step(
                 err,
@@ -1266,7 +1271,7 @@ void set_encoder_pose_xy(float x, float y) {
 /// **段法向**做限步收敛，并在末端冻结区外缓慢修正纵向坐标
 /// 同采集时刻的原始视觉/编码器位移还会用于学习之后的 X/Y 编码器里程比例
 /// 段向量退化(<1cm，如原地保持/锁点)时方向不可靠，本帧不修，纯靠编码器保持。
-/// 与编码器积分偏离过大(粗差跳变)时仍走硬贴合并重置历史保护。
+/// 3~20cm 偏差直接硬贴合视觉并重置历史，超过 20cm 锁定编码器保护。
 /// 按视觉帧序号消费新数据，不清 art1_pose_updated，避免与标定/调试流程抢同一个 bool 标志。
 ///
 bool apply_vision_axis_correction(const Point2D& segment_start, const Point2D& segment_end,
@@ -1300,10 +1305,40 @@ bool apply_vision_axis_correction(const Point2D& segment_start, const Point2D& s
     }
 
     auto& pose = App::g_state.physical.pose;
-    // 粗差跳变保护：与编码器纯积分偏离过大时直接硬贴合并重置历史
+    // 粗差保护：视觉跳到编码器 20cm 以外时，先锁定编码器，等待视觉自己回到附近
     float encoder_err_x = vision_pose.x - s_encoder_pose.x;
     float encoder_err_y = vision_pose.y - s_encoder_pose.y;
     float encoder_err_sq = encoder_err_x * encoder_err_x + encoder_err_y * encoder_err_y;
+
+    if (s_vision_encoder_holdoff) {
+        // 锁定期间融合位姿持续跟随编码器，视觉只用于判断是否已重新对齐
+        pose.x = s_encoder_pose.x;
+        pose.y = s_encoder_pose.y;
+        s_vision_latency_debug.correction_x = 0.0f;
+        s_vision_latency_debug.correction_y = 0.0f;
+        if (encoder_err_sq > VISION_ENCODER_REJOIN_THRESHOLD_CM *
+                            VISION_ENCODER_REJOIN_THRESHOLD_CM) {
+            return true;
+        }
+
+        // 本帧只解除屏蔽，下一帧再恢复正常视觉修正，避免边沿帧突然跳变
+        s_vision_encoder_holdoff = false;
+        return false;
+    }
+
+    if (encoder_err_sq > VISION_ENCODER_HOLDOFF_THRESHOLD_CM *
+                          VISION_ENCODER_HOLDOFF_THRESHOLD_CM) {
+        const float before_x = pose.x;
+        const float before_y = pose.y;
+        s_vision_encoder_holdoff = true;
+        pose.x = s_encoder_pose.x;
+        pose.y = s_encoder_pose.y;
+        s_vision_latency_debug.correction_x = pose.x - before_x;
+        s_vision_latency_debug.correction_y = pose.y - before_y;
+        return true;
+    }
+
+    // 未触发 20cm 编码器保护时，3cm 以上偏差直接采用视觉坐标
     if (encoder_err_sq >= VISION_ENCODER_RESET_THRESHOLD_CM * VISION_ENCODER_RESET_THRESHOLD_CM) {
         float before_x = pose.x;
         float before_y = pose.y;

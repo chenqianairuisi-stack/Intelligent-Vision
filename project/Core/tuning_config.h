@@ -242,7 +242,7 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
         {{0.38f, 0.8f, 0.0f}, 0.10f, 0.020f, 0.016f, 1.0f},  // rb
     },
     {
-        1.0f,     // vision_long.enable：默认开启，中远段缓慢修正纵向里程，末端冻结逻辑保持不变
+        0.0f,     // vision_long.enable：默认开启，中远段缓慢修正纵向里程，末端冻结逻辑保持不变
         3.0f,     // vision_long.freeze_floor_cm
         0.5f,     // vision_long.latency_window_gain
         1.0f,     // vision_long.max_step_cm
@@ -261,8 +261,8 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
         1.15f,    // vision_long.scale_max
     },
     {
-        1.5f,     // vision_lateral.max_step_cm
-        1.0f,     // vision_lateral.gain
+        3.0f,     // vision_lateral.max_step_cm
+        1.8f,     // vision_lateral.gain
     },
     {
         1.0f,     // planning_extra.diagonal_move_enable

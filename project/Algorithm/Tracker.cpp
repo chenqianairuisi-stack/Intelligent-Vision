@@ -13,7 +13,7 @@ using namespace SystemConfig;
 namespace Algorithm::Tracker {
 namespace {
     constexpr bool TRACKING_VISION_ASSIST_ENABLED = true; // 动中视觉辅助开关，默认关闭，调试时可打开观察效果
-    constexpr float DEFAULT_BOX_PUSH_FINAL_PRESS_CM = 0.2f;
+    constexpr float DEFAULT_BOX_PUSH_FINAL_PRESS_CM = 0.00f;
     constexpr float MIN_BOX_PUSH_FINAL_PRESS_CM = 0.0f;
     constexpr float MAX_BOX_PUSH_FINAL_PRESS_CM = 1.0f;
     [[maybe_unused]] constexpr float VISION_ASSIST_MIN_SEGMENT_CM = 15.0f;
@@ -557,8 +557,9 @@ void load_box_push_path(const StaticArray<point, MAX_PATH_LENGTH>& raw_path,
                         point,
                         point,
                         const SokobanLevel& level) {
-    (void)level;
     load_path_impl(raw_path, true, start_grid);
+    // 推箱终点不能使用普通停车半径收尾，补一个短压行程确保车体真正顶到箱子
+    apply_box_push_extra_from_raw_path(raw_path, start_grid, level);
 }
 
 void set_box_push_final_press_cm(float press_cm) {
