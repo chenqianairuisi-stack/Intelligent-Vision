@@ -46,6 +46,9 @@ namespace {
     constexpr uint32_t ART1_MAP_CAPTURE_DELAY_MS = 200U;  // 到观测点停稳后等待画面切换
     constexpr uint32_t ART1_MAP_SETTLE_MS = 50U;
     constexpr uint32_t RETURN_HOME_DWELL_MS = 120U;
+    constexpr uint32_t RETURN_HOME_DWELL_MS_M = 5000U;
+    // 默认使用短停顿，主菜单可切换成长停顿
+    bool s_use_long_return_home_dwell = false;
 
     DTCM_DATA uint32_t s_return_pose_request_tick_ms = 0U;
     DTCM_DATA bool s_return_final_align_started = false;
@@ -280,6 +283,19 @@ namespace {
 // GameEngine 模块对外接口实现
 // ==================================================================
 
+/// \brief 切换连续关卡返航后的停顿时长档位
+void toggle_return_home_dwell() {
+    s_use_long_return_home_dwell = !s_use_long_return_home_dwell;
+}
+
+/// \brief 获取当前返航停顿时长
+/// \return 当前选择的停顿时长 ms
+uint32_t get_return_home_dwell_ms() {
+    return s_use_long_return_home_dwell
+        ? RETURN_HOME_DWELL_MS_M
+        : RETURN_HOME_DWELL_MS;
+}
+
 /// \brief 初始化比赛管理器入口状态
 ///
 /// \details
@@ -300,6 +316,7 @@ void init() {
     App::g_state.game.round_count       = sw1_on ? MAX_ROUND_COUNT : 1U;
     App::g_state.game.is_advanced_stage = sw1_on ? ROUND_ADVANCED_SEQ[0] : true;
     App::g_state.game.is_debug_mode     = sw2_on;  // 调试模式：开-直接注入地图数据，绕过视觉输入；关-正常模式，等待视觉输入
+    s_use_long_return_home_dwell = false;
     s_return_home_dwell_active = false;
     s_return_exit_started = false;
     s_return_home_dwell_start_ms = 0U;
@@ -808,7 +825,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                     }
 
                     hold_return_position();
-                    if (now - s_return_home_dwell_start_ms < RETURN_HOME_DWELL_MS) {
+                    if (now - s_return_home_dwell_start_ms < get_return_home_dwell_ms()) {
                         break;
                     }
 

@@ -125,6 +125,13 @@ private:
 void init();  
 void update(); 
 
+/// \brief 切换连续关卡返航后的停顿时长档位
+void toggle_return_home_dwell();
+
+/// \brief 获取当前返航停顿时长
+/// \return 当前选择的停顿时长 ms
+uint32_t get_return_home_dwell_ms();
+
 // Mock 模式专用接口：获取可用地图数量、地图名称列表、加载指定地图
 uint8_t get_mock_map_count();
 const char* get_mock_map_name(uint8_t idx);
