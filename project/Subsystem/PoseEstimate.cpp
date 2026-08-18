@@ -109,7 +109,7 @@ namespace {
     constexpr float DEFAULT_VISION_LATENCY_MS =
         DEFAULT_TUNE_CONFIG.latency.vision_latency_ms;
     constexpr float VISION_LATERAL_DEADBAND_CM = 0.15f;
-    constexpr float VISION_ENCODER_RESET_THRESHOLD_CM = 10.0f;
+    constexpr float VISION_ENCODER_RESET_THRESHOLD_CM = 15.0f;
     constexpr float VISION_ENCODER_HOLDOFF_THRESHOLD_CM = 20.0f;
     constexpr float VISION_ENCODER_REJOIN_THRESHOLD_CM = 2.0f;
     constexpr float MILEAGE_AXIS_ALIGNMENT_MIN = 0.92f;
