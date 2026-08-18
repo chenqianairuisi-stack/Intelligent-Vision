@@ -18,10 +18,10 @@ namespace LinearTerminalConfig {
 
 inline constexpr float CRUISE_SPEED_CM_S = 100.0f;
 inline constexpr float SHORT_MIN_SPEED_CM_S = 20.0f;
-inline constexpr float SHORT_SLOWDOWN_DIST_CM = 12.0f;
-inline constexpr float LONG_MIN_SPEED_CM_S = 30.0f;
+inline constexpr float SHORT_SLOWDOWN_DIST_CM = 10.0f;
+inline constexpr float LONG_MIN_SPEED_CM_S = 27.0f;
 inline constexpr float LONG_SLOWDOWN_DIST_CM = 35.0f;
-inline constexpr float STOP_DIST_CM = 0.8f;
+inline constexpr float STOP_DIST_CM = 0.5f;
 inline constexpr float LONG_SEGMENT_THRESHOLD_CM = 60.0f;
 inline constexpr float LONG_CRUISE_GAIN = 1.50f;
 inline constexpr float LONG_MAX_CRUISE_CM_S = 200.0f;
@@ -29,7 +29,7 @@ inline constexpr float LONG_ACCEL_GAIN = 1.40f;
 inline constexpr float DECEL_STEP_CM_S = 36.0f;
 inline constexpr bool USE_K15_SHAPING = false;
 inline constexpr bool AUTO_WINDOW_ENABLE = true;
-inline constexpr float SLOWDOWN_SEG_RATIO = 0.50f;
+inline constexpr float SLOWDOWN_SEG_RATIO = 0.40f;
 inline constexpr float WINDOW_ACC_MARGIN = 0.80f;
 inline constexpr bool USE_FIXED_DECEL_STEP = false;
 inline constexpr bool USE_LEGACY_MIN_SPEED = true;
@@ -263,7 +263,7 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
     },
     {
         10.0f,     // vision_lateral.max_step_cm
-        2.5f,     // vision_lateral.gain
+        1.2f,     // vision_lateral.gain
     },
     {
         1.0f,     // planning_extra.diagonal_move_enable
