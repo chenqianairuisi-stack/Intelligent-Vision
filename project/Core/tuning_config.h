@@ -172,6 +172,7 @@ struct TuningConfig {
         float diagonal_move_enable;         // 斜向移动总开关，0 关闭，1 开启
         float box_extra_observe_enable;     // 箱子额外观测位总开关，0 关闭，1 开启
         float target_extra_observe_enable;  // 目标点额外观测位总开关，0 关闭，1 开启
+        float semantic_serial_task_first_solution_enable; // 语义任务级串行首解，0 关闭，1 开启
     } planning_extra;
 };
 
@@ -182,8 +183,8 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
         800.0f,  // dynamics.max_acc
         6.0f,   // dynamics.max_ang_vel
         36.0f,   // dynamics.max_ang_acc
-        1.090f,  // dynamics.kinematic_gain_x
-        1.000f,  // dynamics.kinematic_gain_y
+        1.096f,  // dynamics.kinematic_gain_x
+        1.046f,  // dynamics.kinematic_gain_y
         0.80f,   // dynamics.brake_limit
         450.0f,  // dynamics.brake_acc_ceiling：与当前 600×0.65 一致，不改变现有线性减速手感；
                  // 后续调高 max_acc 时刹车能力不再被同步虚高。
@@ -268,11 +269,16 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
         1.0f,     // planning_extra.diagonal_move_enable
         0.0f,     // planning_extra.box_extra_observe_enable
         0.0f,     // planning_extra.target_extra_observe_enable
+        1.0f,     // planning_extra.semantic_serial_task_first_solution_enable
     },
 };
 
 // 高频控制直接读取该实例，存储加载时在短临界区内整体替换
+#if defined(TUNING_CONFIG_EXTERN_INSTANCE)
+extern TuningConfig tune;
+#else
 __attribute__((section(".dtcm_data"))) inline TuningConfig tune = DEFAULT_TUNE_CONFIG;
+#endif
 
 // ============================================================================
 // 屏幕与上位机共用的参数注册表
@@ -364,6 +370,7 @@ inline ParamItem params[] = {
     {"DiagMove", "DM", &tune.planning_extra.diagonal_move_enable, 1.0f, 0.0f, 1.0f, ScreenEditGroup::SINGLE, false},
     {"BoxExtra", "BX", &tune.planning_extra.box_extra_observe_enable, 1.0f, 0.0f, 1.0f, ScreenEditGroup::SINGLE, false},
     {"TgtExtra", "TX", &tune.planning_extra.target_extra_observe_enable, 1.0f, 0.0f, 1.0f, ScreenEditGroup::SINGLE, false},
+    {"SerialTask", "ST", &tune.planning_extra.semantic_serial_task_first_solution_enable, 1.0f, 0.0f, 1.0f, ScreenEditGroup::SINGLE, false},
 };
 
 // 单轮键由 0=LF、1=LB、2=RF、3=RB 组成，屏幕只显示上面的 ALL 项

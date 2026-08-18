@@ -483,10 +483,12 @@ class SokobanVisualizerQt(QMainWindow):
         self.diagonal_move_checkbox = QCheckBox("斜向移动")
         self.box_extra_observe_checkbox = QCheckBox("箱子额外观测位")
         self.target_extra_observe_checkbox = QCheckBox("目标点额外观测位")
+        self.semantic_serial_task_first_checkbox = QCheckBox("串行任务级首解")
         switches = [
             (self.diagonal_move_checkbox, "simulation_diagonal_move"),
             (self.box_extra_observe_checkbox, "simulation_box_extra_observe"),
             (self.target_extra_observe_checkbox, "simulation_target_extra_observe"),
+            (self.semantic_serial_task_first_checkbox, "simulation_semantic_serial_task_first"),
         ]
         for checkbox, setting_key in switches:
             checkbox.setChecked(bool(self.user_settings.get(setting_key, True)))
@@ -820,6 +822,7 @@ class SokobanVisualizerQt(QMainWindow):
         self.user_settings["simulation_diagonal_move"] = self.diagonal_move_checkbox.isChecked()
         self.user_settings["simulation_box_extra_observe"] = self.box_extra_observe_checkbox.isChecked()
         self.user_settings["simulation_target_extra_observe"] = self.target_extra_observe_checkbox.isChecked()
+        self.user_settings["simulation_semantic_serial_task_first"] = self.semantic_serial_task_first_checkbox.isChecked()
         self.save_user_settings()
 
     def save_current_car_start(self):
@@ -1088,6 +1091,7 @@ class SokobanVisualizerQt(QMainWindow):
             self.diagonal_move_checkbox,
             self.box_extra_observe_checkbox,
             self.target_extra_observe_checkbox,
+            self.semantic_serial_task_first_checkbox,
         ]:
             checkbox.setEnabled(not self.is_solver_running)
         self.update_title_button_icons()
@@ -1243,6 +1247,7 @@ class SokobanVisualizerQt(QMainWindow):
             f"--diagonal-move={int(self.diagonal_move_checkbox.isChecked())}",
             f"--box-extra-observe={int(self.box_extra_observe_checkbox.isChecked())}",
             f"--target-extra-observe={int(self.target_extra_observe_checkbox.isChecked())}",
+            f"--semantic-serial-task-first={int(self.semantic_serial_task_first_checkbox.isChecked())}",
         ]
         self.solver_thread = SolverThread(SOLVER_PATH, solver_args, VISUALIZER_DIR, self)
         self.solver_thread.finished_ok.connect(self.parse_and_play)

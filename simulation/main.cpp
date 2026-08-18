@@ -50,7 +50,8 @@ bool apply_simulation_switch(const std::string& arg) {
     }
     return parse_switch_arg(arg, "--diagonal-move", tune.planning_extra.diagonal_move_enable) ||
            parse_switch_arg(arg, "--box-extra-observe", tune.planning_extra.box_extra_observe_enable) ||
-           parse_switch_arg(arg, "--target-extra-observe", tune.planning_extra.target_extra_observe_enable);
+           parse_switch_arg(arg, "--target-extra-observe", tune.planning_extra.target_extra_observe_enable) ||
+           parse_switch_arg(arg, "--semantic-serial-task-first", tune.planning_extra.semantic_serial_task_first_solution_enable);
 }
 
 long long elapsed_ms(std::chrono::high_resolution_clock::time_point begin,

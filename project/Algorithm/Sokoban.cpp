@@ -2,6 +2,9 @@
 /// \brief C++ Sokoban 预计算、宏动作混合候选搜索和路径优化实现
 
 #include "Sokoban.h"
+#define TUNING_CONFIG_EXTERN_INSTANCE
+#include "tuning_config.h"
+#undef TUNING_CONFIG_EXTERN_INSTANCE
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -55,7 +58,7 @@ namespace SokobanConfig {
     inline constexpr uint32_t MACRO_CANDIDATE_NODE_BUDGET = 6000;
     // 是否在首解之后按真实步数进行有限修复搜索
     inline constexpr bool ENABLE_STRICT_COST_REPAIR = true;
-    // 首解修复阶段最多展开的节点数
+    // 首解修复阶段最多展开的节点数，设为 0 表示关闭严格修复
     inline constexpr uint32_t STRICT_REPAIR_NODE_BUDGET = 3000;
     // 行走段后处理允许相对原路径增加的步数，最终仍按面板代价验收
     inline constexpr int PATH_POSTOPT_EXTRA_WALK_STEPS = 12;
@@ -282,7 +285,11 @@ bool Sokoban::solve_macro_candidate() {
     }
 
     final_path = candidate_path;
-    try_strict_cost_repair(candidate_path);
+    // 先完成首解后处理，再以最终代价基线进入严格修复
+    if constexpr (SokobanConfig::ENABLE_PATH_POSTOPT) {
+        optimize_final_path_turns();
+    }
+    try_strict_cost_repair(final_path);
     if constexpr (SokobanConfig::ENABLE_PATH_POSTOPT) {
         optimize_final_path_turns();
     }
@@ -492,6 +499,12 @@ bool Sokoban::solve_internal() {
         heuristic_mode == SokobanHeuristicMode::SEMANTIC &&
         initial_state.num_boxes > SokobanConfig::SEMANTIC_TASK_FAST_PATH_BOX_THRESHOLD;
     if (use_semantic_task_fast_path) {
+        const bool serial_task_first_solution =
+            tune.planning_extra.semantic_serial_task_first_solution_enable >= 0.5f;
+        if (serial_task_first_solution) {
+            // 串行模式先尝试任务级首解，让每个箱子完整落位后再处理下一个
+            if (try_semantic_task_solution()) return true;
+        }
         if (initial_state.num_boxes <= SokobanConfig::SEMANTIC_TASK_STRICT_REPAIR_MAX_BOXES) {
             StaticArray<point, MAX_PATH_LENGTH> original_flow_path;
             if (run_ida_search(
@@ -500,14 +513,20 @@ bool Sokoban::solve_internal() {
                     original_flow_path,
                     SokobanConfig::SEMANTIC_ORIGINAL_FLOW_PROBE_NODE_BUDGET)) {
                 final_path = original_flow_path;
-                try_strict_cost_repair(original_flow_path);
+                // 先完成首解后处理，再以最终代价基线进入严格修复
+                if constexpr (SokobanConfig::ENABLE_PATH_POSTOPT) {
+                    optimize_final_path_turns();
+                }
+                try_strict_cost_repair(final_path);
                 if constexpr (SokobanConfig::ENABLE_PATH_POSTOPT) {
                     optimize_final_path_turns();
                 }
                 return true;
             }
         }
-        if (try_semantic_task_solution()) return true;
+        if (!serial_task_first_solution) {
+            if (try_semantic_task_solution()) return true;
+        }
     }
 
     StaticArray<point, MAX_PATH_LENGTH> candidate_path;
@@ -517,7 +536,11 @@ bool Sokoban::solve_internal() {
     if (!run_ida_search(false, MAX_PATH_LENGTH, candidate_path, node_budget)) return false;
 
     final_path = candidate_path;
-    try_strict_cost_repair(candidate_path);
+    // 先完成首解后处理，再以最终代价基线进入严格修复
+    if constexpr (SokobanConfig::ENABLE_PATH_POSTOPT) {
+        optimize_final_path_turns();
+    }
+    try_strict_cost_repair(final_path);
     if constexpr (SokobanConfig::ENABLE_PATH_POSTOPT) {
         optimize_final_path_turns();
     }
@@ -547,7 +570,13 @@ bool Sokoban::try_semantic_task_solution() {
 
     final_path = candidate_path;
     if (initial_state.num_boxes <= SokobanConfig::SEMANTIC_TASK_STRICT_REPAIR_MAX_BOXES) {
-        try_strict_cost_repair(candidate_path);
+        // 先完成首解后处理，再以最终代价基线进入严格修复
+        if constexpr (SokobanConfig::ENABLE_PATH_POSTOPT) {
+            optimize_final_path_turns();
+        }
+        if (tune.planning_extra.semantic_serial_task_first_solution_enable < 0.5f) {
+            try_strict_cost_repair(final_path);
+        }
     }
     if constexpr (SokobanConfig::ENABLE_PATH_POSTOPT) {
         optimize_final_path_turns();
@@ -729,6 +758,11 @@ bool Sokoban::run_bounded_strict_search(
 
 bool Sokoban::try_strict_cost_repair(const StaticArray<point, MAX_PATH_LENGTH>& candidate_path) {
     if constexpr (!SokobanConfig::ENABLE_STRICT_COST_REPAIR) {
+        (void)candidate_path;
+        return false;
+    }
+    // 预算为 0 时关闭修复，避免被底层“0 表示不限节点”的通用语义拖入无界搜索
+    if constexpr (SokobanConfig::STRICT_REPAIR_NODE_BUDGET == 0) {
         (void)candidate_path;
         return false;
     }

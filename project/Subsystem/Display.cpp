@@ -239,8 +239,8 @@ void process_logic() {
             break;
 
         case MenuPage::GLOBAL_CONFIG:
-            if (ctx.key_down_pressed) ctx.cursor_idx = (ctx.cursor_idx + 1) % 3;
-            if (ctx.key_up_pressed) ctx.cursor_idx = ctx.cursor_idx == 0 ? 2 : ctx.cursor_idx - 1;
+            if (ctx.key_down_pressed) ctx.cursor_idx = (ctx.cursor_idx + 1) % 4;
+            if (ctx.key_up_pressed) ctx.cursor_idx = ctx.cursor_idx == 0 ? 3 : ctx.cursor_idx - 1;
             if (ctx.key_enter_pressed) {
                 if (ctx.cursor_idx == 0) {
                     tune.planning_extra.diagonal_move_enable =
@@ -248,9 +248,12 @@ void process_logic() {
                 } else if (ctx.cursor_idx == 1) {
                     tune.planning_extra.box_extra_observe_enable =
                         tune.planning_extra.box_extra_observe_enable >= 0.5f ? 0.0f : 1.0f;
-                } else {
+                } else if (ctx.cursor_idx == 2) {
                     tune.planning_extra.target_extra_observe_enable =
                         tune.planning_extra.target_extra_observe_enable >= 0.5f ? 0.0f : 1.0f;
+                } else {
+                    tune.planning_extra.semantic_serial_task_first_solution_enable =
+                        tune.planning_extra.semantic_serial_task_first_solution_enable >= 0.5f ? 0.0f : 1.0f;
                 }
             }
             if (ctx.key_back_pressed) {
@@ -390,15 +393,15 @@ void draw_main_menu() {
              static_cast<unsigned long>(App::GameEngine::get_return_home_dwell_ms()));
 
     tft180_show_string(0, 0, "-- COMMAND MENU --");
-    draw_item(2, "Dashboard",  ctx.cursor_idx == 0);
-    draw_item(3, "Odometry",   ctx.cursor_idx == 1);
-    draw_item(4, "Tuning",     ctx.cursor_idx == 2);
+    draw_item(2, "Dashboard",     ctx.cursor_idx == 0);
+    draw_item(3, "Odometry",      ctx.cursor_idx == 1);
+    draw_item(4, "Tuning",        ctx.cursor_idx == 2);
     draw_item(5, "Global Config", ctx.cursor_idx == 3);
-    draw_item(6, "Slow 140/500", ctx.cursor_idx == 4);
-    draw_item(7, "Fast 200/800", ctx.cursor_idx == 5);
+    draw_item(6, "Slow_Param",    ctx.cursor_idx == 4);
+    draw_item(7, "Fast_Param",    ctx.cursor_idx == 5);
     draw_item(8, home_dwell_item, ctx.cursor_idx == 6);
-    draw_item(9, "Save Config", ctx.cursor_idx == 7);
-    draw_item(10, "Load Config", ctx.cursor_idx == 8);
+    draw_item(9, "Save Config",   ctx.cursor_idx == 7);
+    draw_item(10, "Load Config",  ctx.cursor_idx == 8);
 }
 
 /// \brief 绘制全局规划配置页面
@@ -419,6 +422,11 @@ void draw_global_config() {
             ? "Target Extra [ON]"
             : "Target Extra [OFF]",
         ctx.cursor_idx == 2);
+    draw_item(5,
+        tune.planning_extra.semantic_serial_task_first_solution_enable >= 0.5f
+            ? "Serial Task [ON]"
+            : "Serial Task [OFF]",
+        ctx.cursor_idx == 3);
 }
 
 /// \brief 绘制 Mock/Demo 模式选择页面
