@@ -40,7 +40,8 @@ namespace { // 匿名命名空间，确保这些数据只在本文件可见
         uint8_t back_buffer[16][12] = {0}; 
     };
 
-    UIContext ctx;
+    // OCRAM 已接近上限，显示状态缓存放入 DTCM，避免挤占规划数据区
+    __attribute__((section(".dtcm_data"))) UIContext ctx;
 
     // --- 页面布局常量 ---
     constexpr uint8_t TL_WALL=1<<0, TL_TGT=1<<1, TL_BOX=1<<2, TL_BOMB=1<<3, TL_PATH=1<<4, TL_CRS=1<<5, TL_CAR=1<<6;
@@ -54,7 +55,7 @@ namespace { // 匿名命名空间，确保这些数据只在本文件可见
         float max_acc;
     };
 
-    constexpr MotionPreset SLOW_MOTION_PRESET = {120.0f, 400.0f };
+    constexpr MotionPreset SLOW_MOTION_PRESET = {120.0f, 400.0f};
     constexpr MotionPreset FAST_MOTION_PRESET = {200.0f, 1000.0f};
 }
 
@@ -195,6 +196,10 @@ void process_logic() {
                 }
                 if (ctx.cursor_idx == 6) {
                     App::GameEngine::toggle_return_home_dwell();
+                    const bool saved = Storage::save_params();
+                    tft180_show_string(16 * UI_COL_W, 8 * UI_ROW_H,
+                                       saved ? "[OK]" : "[ERR]");
+                    system_delay_ms(300);
                 }
 
                 // --- Flash 存储触发 ---

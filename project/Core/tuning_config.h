@@ -117,7 +117,8 @@ struct TuningConfig {
 
     struct {
         float explosion_wait_ms;      // 推炸弹后的最长等待时间 ms
-    } bomb;
+        float return_home_dwell_ms;   // 连续关卡返航后的停顿时间 ms
+    } wain_time;
 
     struct {
         float lin_band;               // 偏航误差线性区半宽 rad
@@ -218,7 +219,8 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
         5000.0f,  // latency.l_stale_ms
     },
     {
-        900.0f, // bomb.explosion_wait_ms
+        900.0f, // wain_time.explosion_wait_ms
+        120.0f, // wain_time.return_home_dwell_ms
     },
     {
         0.22f,    // yaw.lin_band
@@ -334,7 +336,8 @@ inline ParamItem params[] = {
     {"LagAngle", "LD", &tune.latency.dtheta_tol_deg, 1.0f, 0.0f, 180.0f},
     {"LagAlpha", "LA", &tune.latency.lowpass_alpha, 0.05f, 0.0f, 1.0f},
     {"LagStale", "LS", &tune.latency.l_stale_ms, 100.0f, 100.0f, 60000.0f},
-    {"BombWait", "BW", &tune.bomb.explosion_wait_ms, 50.0f, 500.0f, 10000.0f},
+    {"BombWait", "BW", &tune.wain_time.explosion_wait_ms, 50.0f, 500.0f, 10000.0f},
+    {"HomeWait", "HW", &tune.wain_time.return_home_dwell_ms, 50.0f, 0.0f, 10000.0f},
     {"VLongEn ", "VN", &tune.vision_long.enable, 1.0f, 0.0f, 1.0f},
     {"VLFloor ", "VF", &tune.vision_long.freeze_floor_cm, 0.5f, 0.0f, 30.0f},
     {"VLLagG  ", "VG", &tune.vision_long.latency_window_gain, 0.05f, 0.0f, 2.0f},

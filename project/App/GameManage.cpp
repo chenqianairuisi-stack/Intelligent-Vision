@@ -45,10 +45,8 @@ namespace {
     constexpr uint32_t ART1_RETRY_INTERVAL_MS = 1000U;
     constexpr uint32_t ART1_MAP_CAPTURE_DELAY_MS = 200U;  // 到观测点停稳后等待画面切换
     constexpr uint32_t ART1_MAP_SETTLE_MS = 50U;
-    constexpr uint32_t RETURN_HOME_DWELL_MS = 120U;
-    constexpr uint32_t RETURN_HOME_DWELL_MS_M = 5000U;
-    // 默认使用短停顿，主菜单可切换成长停顿
-    bool s_use_long_return_home_dwell = false;
+    constexpr uint32_t RETURN_HOME_DWELL_DEFAULT_MS = 120U;
+    constexpr uint32_t RETURN_HOME_DWELL_LONG_MS = 4000U;
 
     DTCM_DATA uint32_t s_return_pose_request_tick_ms = 0U;
     DTCM_DATA bool s_return_final_align_started = false;
@@ -120,7 +118,7 @@ namespace {
             Algorithm::Tracker::set_vision_correction_suppressed(true);
         }
 
-        uint32_t wait_ms = (uint32_t)tune.bomb.explosion_wait_ms;
+        uint32_t wait_ms = (uint32_t)tune.wain_time.explosion_wait_ms;
         if (Core::Scheduler::get_sys_tick_ms() - s_explosion_wait_start_ms >= wait_ms) {
             s_explosion_wait_active = false;
             s_pending_blast_cells.clear();
@@ -285,15 +283,23 @@ namespace {
 
 /// \brief 切换连续关卡返航后的停顿时长档位
 void toggle_return_home_dwell() {
-    s_use_long_return_home_dwell = !s_use_long_return_home_dwell;
+    const float current = tune.wain_time.return_home_dwell_ms;
+    const uint32_t primask = interrupt_global_disable();
+    tune.wain_time.return_home_dwell_ms =
+        (std::isfinite(current) && current >= 2000.0f) ?
+            static_cast<float>(RETURN_HOME_DWELL_DEFAULT_MS) :
+            static_cast<float>(RETURN_HOME_DWELL_LONG_MS);
+    interrupt_global_enable(primask);
 }
 
 /// \brief 获取当前返航停顿时长
 /// \return 当前选择的停顿时长 ms
 uint32_t get_return_home_dwell_ms() {
-    return s_use_long_return_home_dwell
-        ? RETURN_HOME_DWELL_MS_M
-        : RETURN_HOME_DWELL_MS;
+    float dwell = tune.wain_time.return_home_dwell_ms;
+    if (!std::isfinite(dwell) || dwell < 0.0f) {
+        dwell = DEFAULT_TUNE_CONFIG.wain_time.return_home_dwell_ms;
+    }
+    return static_cast<uint32_t>(dwell);
 }
 
 /// \brief 初始化比赛管理器入口状态
@@ -316,7 +322,6 @@ void init() {
     App::g_state.game.round_count       = sw1_on ? MAX_ROUND_COUNT : 1U;
     App::g_state.game.is_advanced_stage = sw1_on ? ROUND_ADVANCED_SEQ[0] : true;
     App::g_state.game.is_debug_mode     = sw2_on;  // 调试模式：开-直接注入地图数据，绕过视觉输入；关-正常模式，等待视觉输入
-    s_use_long_return_home_dwell = false;
     s_return_home_dwell_active = false;
     s_return_exit_started = false;
     s_return_home_dwell_start_ms = 0U;

@@ -344,9 +344,9 @@ namespace {
     }
 
     [[gnu::always_inline]] inline uint32_t explosion_wait_ms() {
-        float wait = tune.bomb.explosion_wait_ms;
+        float wait = tune.wain_time.explosion_wait_ms;
         if (!std::isfinite(wait) || wait < 0.0f) {
-            wait = DEFAULT_TUNE_CONFIG.bomb.explosion_wait_ms;
+            wait = DEFAULT_TUNE_CONFIG.wain_time.explosion_wait_ms;
         }
         return static_cast<uint32_t>(wait);
     }

@@ -125,7 +125,7 @@ private:
 void init();  
 void update(); 
 
-/// \brief 切换连续关卡返航后的停顿时长档位
+/// \brief 在 tune.wain_time.return_home_dwell_ms 的 4000 ms 与 120 ms 档位间切换
 void toggle_return_home_dwell();
 
 /// \brief 获取当前返航停顿时长
