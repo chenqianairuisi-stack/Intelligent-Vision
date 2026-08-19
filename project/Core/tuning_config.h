@@ -304,8 +304,8 @@ struct ParamItem {
 
 inline ParamItem params[] = {
     {"MaxDuty ", "MD", &tune.dynamics.max_duty, 1.0f, 1.0f, 100.0f},
-    {"MaxVel  ", "MV", &tune.dynamics.max_vel, 1.0f, 1.0f, 500.0f},
-    {"MaxAcc  ", "MA", &tune.dynamics.max_acc, 5.0f, 1.0f, 1000.0f},
+    {"MaxVel  ", "MV", &tune.dynamics.max_vel, 10.0f, 1.0f, 500.0f},
+    {"MaxAcc  ", "MA", &tune.dynamics.max_acc, 20.0f, 1.0f, 1200.0f},
     {"MaxAVel ", "AV", &tune.dynamics.max_ang_vel, 0.1f, 0.1f, 30.0f},
     {"MaxAAcc ", "AA", &tune.dynamics.max_ang_acc, 0.5f, 0.1f, 200.0f},
     {"GainX   ", "KX", &tune.dynamics.kinematic_gain_x, 0.001f, 0.5f, 1.5f},

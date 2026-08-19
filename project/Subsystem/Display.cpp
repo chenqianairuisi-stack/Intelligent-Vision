@@ -255,6 +255,13 @@ void process_logic() {
                     tune.planning_extra.semantic_serial_task_first_solution_enable =
                         tune.planning_extra.semantic_serial_task_first_solution_enable >= 0.5f ? 0.0f : 1.0f;
                 }
+                // 全局规划开关确认后立即持久化，避免重启后丢失选择
+                {
+                    const bool saved = Storage::save_params();
+                    tft180_show_string(16 * UI_COL_W, (ctx.cursor_idx + 2) * UI_ROW_H,
+                                       saved ? "[OK]" : "[ERR]");
+                    system_delay_ms(300);
+                }
             }
             if (ctx.key_back_pressed) {
                 ctx.current_page = MenuPage::MAIN_MENU;
