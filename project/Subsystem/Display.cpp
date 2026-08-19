@@ -54,8 +54,8 @@ namespace { // 匿名命名空间，确保这些数据只在本文件可见
         float max_acc;
     };
 
-    constexpr MotionPreset SLOW_MOTION_PRESET = {120.0f, 400.0f};
-    constexpr MotionPreset FAST_MOTION_PRESET = {200.0f, 800.0f};
+    constexpr MotionPreset SLOW_MOTION_PRESET = {120.0f, 400.0f };
+    constexpr MotionPreset FAST_MOTION_PRESET = {200.0f, 1000.0f};
 }
 
 

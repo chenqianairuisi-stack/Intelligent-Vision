@@ -178,14 +178,14 @@ struct TuningConfig {
 
 inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
     {
-        80.0f,   // dynamics.max_duty
+        99.0f,   // dynamics.max_duty
         200.0f,  // dynamics.max_vel
-        800.0f,  // dynamics.max_acc
+        1000.0f,  // dynamics.max_acc
         6.0f,   // dynamics.max_ang_vel
         36.0f,   // dynamics.max_ang_acc
         1.096f,  // dynamics.kinematic_gain_x
         1.046f,  // dynamics.kinematic_gain_y
-        0.80f,   // dynamics.brake_limit
+        0.90f,   // dynamics.brake_limit
         450.0f,  // dynamics.brake_acc_ceiling：与当前 600×0.65 一致，不改变现有线性减速手感；
                  // 后续调高 max_acc 时刹车能力不再被同步虚高。
     },
@@ -207,7 +207,7 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
         1.0f,     // latency.encoder_latency_gain
         380.0f,   // latency.vision_latency_ms
         1.0f,     // latency.enable_estimation
-        45.0f,    // latency.turn_thresh_deg
+        30.0f,    // latency.turn_thresh_deg
         0.30f,    // latency.enc_v_min
         0.50f,    // latency.vis_v_min
         100.0f,   // latency.refractory_ms
@@ -262,8 +262,8 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
         1.15f,    // vision_long.scale_max
     },
     {
-        10.0f,     // vision_lateral.max_step_cm
-        1.2f,     // vision_lateral.gain
+        1.5f,     // vision_lateral.max_step_cm
+        1.0f,     // vision_lateral.gain
     },
     {
         1.0f,     // planning_extra.diagonal_move_enable
