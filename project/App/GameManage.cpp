@@ -38,6 +38,7 @@ namespace {
     constexpr uint8_t MAX_ROUND_COUNT =
         static_cast<uint8_t>(sizeof(ROUND_ADVANCED_SEQ) / sizeof(ROUND_ADVANCED_SEQ[0]));
     constexpr float RETURN_FINAL_YAW_TOLERANCE_DEG = 2.0f;
+    constexpr float RETURN_FINAL_SPIN_DEG = 360.0f;
     constexpr float RETURN_EXIT_ODOM_REACH_RADIUS_CM = 3.0f;
     constexpr float RETURN_EXIT_VISUAL_REACH_RADIUS_CM = 8.0f;
     constexpr uint32_t RETURN_POSE_RECENT_MS = 300U;
@@ -50,6 +51,7 @@ namespace {
 
     DTCM_DATA uint32_t s_return_pose_request_tick_ms = 0U;
     DTCM_DATA bool s_return_final_align_started = false;
+    DTCM_DATA bool s_return_final_spin_started = false;
     DTCM_DATA bool s_return_home_dwell_active = false;
     DTCM_DATA bool s_return_exit_started = false;
     DTCM_DATA uint32_t s_return_home_dwell_start_ms = 0U;
@@ -800,6 +802,7 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
         case GamePhase::PLAN_RETURN_HOME: {
             s_return_pose_request_tick_ms = 0U;
             s_return_final_align_started = false;
+            s_return_final_spin_started = false;
             s_return_home_dwell_active = false;
             s_return_exit_started = false;
             s_return_home_dwell_start_ms = 0U;
@@ -887,6 +890,16 @@ __attribute__((section(".ramfunc"))) void GameManager::update() {
                 yaw_error_abs_deg(RETURN_HOME_YAW, pos.yaw) <= RETURN_FINAL_YAW_TOLERANCE_DEG;
             if (!App::g_state.physical.is_stopped || !yaw_aligned) {
                 break;
+            }
+
+            if (game.round_count == MAX_ROUND_COUNT) {
+                if (!s_return_final_spin_started) {
+                    Subsystem::Chassis::start_continuous_spin(RETURN_FINAL_SPIN_DEG);
+                    s_return_final_spin_started = true;
+                    break;
+                }
+
+                if (!Subsystem::Chassis::is_continuous_spin_finished()) break;
             }
 
             game.phase = GamePhase::FINISHED;

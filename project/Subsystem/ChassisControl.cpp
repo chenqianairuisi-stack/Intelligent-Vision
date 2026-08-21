@@ -51,6 +51,16 @@ __attribute__((section(".dtcm_data"))) static ControlMode last_control_mode = Co
 __attribute__((section(".dtcm_data"))) static TrackerState last_tracker_state = TrackerState::NONE;
 __attribute__((section(".dtcm_data"))) static Pose2D last_control_target = {0.0f, 0.0f, SystemConfig::ENTRY_YAW};
 
+struct ContinuousSpinState {
+    float last_yaw;
+    float unwrapped_yaw;
+    float target_yaw;
+    bool finished;
+};
+__attribute__((section(".dtcm_data"))) static ContinuousSpinState s_continuous_spin = {
+    SystemConfig::ENTRY_YAW, SystemConfig::ENTRY_YAW, SystemConfig::ENTRY_YAW, false
+};
+
 // --- 内部辅助函数声明 ---
 namespace {
     // 防止偏航角误差出现 359度 变成 -1度 导致的疯狂原地打转，将角度归一化到 [-pi, pi] 范围内
@@ -58,6 +68,14 @@ namespace {
         if (angle > 180.0f)       angle -= 360.0f;
         else if (angle < -180.0f) angle += 360.0f;
         return angle * SystemConfig::DEG_TO_RAD;
+    }
+
+    // 将相邻两次 0~360 度 yaw 的变化解包为连续角度增量
+    __attribute__((always_inline)) inline float unwrap_yaw_delta(float current, float previous) {
+        float delta = current - previous;
+        if (delta > 180.0f) delta -= 360.0f;
+        else if (delta < -180.0f) delta += 360.0f;
+        return delta;
     }
 
     __attribute__((always_inline)) inline float smooth_sign(float val) {
@@ -172,6 +190,24 @@ namespace {
         s_interp_ticks_left = static_cast<uint8_t>(N);
     }
 
+    // 统一发布轮速、加速度前馈和快环内插，保证连续旋转与常规移动使用相同轮速输出链路
+    __attribute__((always_inline)) inline void publish_motion_command(float vx, float vy, float vw) {
+        s_target_wheel_speeds = Algorithm::Motion::Kinematics::inverse(vx, vy, vw);
+
+        const float dt = SystemConfig::PIT_CH1_DT_S;
+        const float max_wheel_acc = tune.dynamics.max_acc +
+            tune.dynamics.max_ang_acc * Algorithm::Motion::Kinematics::L;
+        auto acc_of = [&](float now, float prev) {
+            return std::clamp((now - prev) / dt, -max_wheel_acc, max_wheel_acc);
+        };
+        s_target_wheel_accels.lf = acc_of(s_target_wheel_speeds.lf, s_prev_target_wheel_speeds.lf);
+        s_target_wheel_accels.lb = acc_of(s_target_wheel_speeds.lb, s_prev_target_wheel_speeds.lb);
+        s_target_wheel_accels.rf = acc_of(s_target_wheel_speeds.rf, s_prev_target_wheel_speeds.rf);
+        s_target_wheel_accels.rb = acc_of(s_target_wheel_speeds.rb, s_prev_target_wheel_speeds.rb);
+        s_prev_target_wheel_speeds = s_target_wheel_speeds;
+        publish_wheel_target_interp();
+    }
+
     // 速度内环控制（从 Branch 搬入：每轮独立 PID + 前馈）：输入四轮目标转速，逐轮
     // 前馈(kv + ks + ka/kb·目标加速度) + 独立 PID(积分门控) 出占空比。零速死区改为松力滑行，
     // 无主动制动锁定。目标速度/加速度均经 20ms→5ms 内插喂入，起步弹射/刹车稳停更脆更平顺。
@@ -225,6 +261,34 @@ WheelSpeed4 get_target_wheel_speeds() {
     return snapshot;
 }
 
+/// \brief 启动原地连续旋转
+/// \param degrees 旋转角度，正值为逆时针
+///
+/// \details
+/// 在 20ms 控制周期内对 yaw 解包并按绝对累计角度闭环，
+/// 因而可执行超过 180 度的同向旋转
+///
+void start_continuous_spin(float degrees) {
+    auto& pose = App::g_state.physical.pose;
+    auto& ctrl = App::g_state.control;
+
+    s_continuous_spin.last_yaw = pose.yaw;
+    s_continuous_spin.unwrapped_yaw = pose.yaw;
+    s_continuous_spin.target_yaw = pose.yaw + degrees;
+    s_continuous_spin.finished = false;
+
+    ctrl.current_target = pose;
+    ctrl.segment_end_speed = 0.0f;
+    ctrl.hard_lock = false;
+    ctrl.tracker_state = TrackerState::TRACKING;
+    ctrl.mode = ControlMode::CONTINUOUS_SPIN;
+}
+
+/// \brief 查询连续旋转是否已完成并停稳
+bool is_continuous_spin_finished() {
+    return s_continuous_spin.finished;
+}
+
 /// \brief 20ms 底盘控制周期
 ///
 /// \details
@@ -248,6 +312,28 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick() {
     }
 
     guard_motion_residue(App::g_state);
+
+    if (ctrl.mode == ControlMode::CONTINUOUS_SPIN) {
+        s_continuous_spin.unwrapped_yaw += unwrap_yaw_delta(yaw, s_continuous_spin.last_yaw);
+        s_continuous_spin.last_yaw = yaw;
+
+        // 不对误差做最短角归一化，使正向 360 度目标保持同一旋转方向
+        const float err_yaw = (s_continuous_spin.target_yaw - s_continuous_spin.unwrapped_yaw) *
+                              SystemConfig::DEG_TO_RAD;
+        const float expected_local_vw = yaw_controller.calculate(
+            err_yaw, SystemConfig::PIT_CH1_DT_S, false, App::g_state.physical.yaw_rate);
+        ctrl.commanded_vel = {0.0f, 0.0f};
+        publish_motion_command(0.0f, 0.0f, expected_local_vw);
+
+        if (std::abs(err_yaw) <= tune.tracker.ang_tolerance &&
+            App::g_state.physical.is_stopped) {
+            s_continuous_spin.finished = true;
+            ctrl.current_target = {posi.x, posi.y, yaw};
+            ctrl.tracker_state = TrackerState::FINISHED;
+            ctrl.mode = ControlMode::POINT_TRACKING;
+        }
+        return;
+    }
 
     // 硬锁：到达停车航点半径内后 Tracker 置位 hard_lock。此时直接把四轮目标速度清零，
     // 不再经过 path_follower / yaw 规划 / 逆运动学，靠 5ms 速度环 PID 顶在 0 主动刹停锁死轮胎。
@@ -295,29 +381,8 @@ __attribute__((section(".ramfunc"))) void update_20ms_tick() {
     float expected_local_vw = yaw_controller.calculate(err_yaw, SystemConfig::PIT_CH1_DT_S, is_translating, App::g_state.physical.yaw_rate);
 
 
-    // 逆运动学解算：将期望的底盘全向速度分配给 4 个轮子，得到每个轮子的目标转速 (v1, v2, v3, v4)
-    // 只产出目标速度，交给 5ms 快环闭环；本慢环不再直接驱动电机。
-    s_target_wheel_speeds = Algorithm::Motion::Kinematics::inverse(expected_local_vx, expected_local_vy, expected_local_vw);
-
-    // 每轮目标加速度 = 相邻两拍目标轮速之差 / dt，供 5ms 轮速环的 ka/kb 加速度前馈：
-    // 起步时前喂 ka·a → 弹射更脆(消 PID 追斜坡的滞后)；刹车时前喂 kb·a → 稳停更利落。
-    // 限幅到物理上限，避免切段/yaw 纠偏引起目标突变时产生前馈尖峰。
-    {
-        const float dt = SystemConfig::PIT_CH1_DT_S;
-        const float max_wheel_acc = tune.dynamics.max_acc +
-            tune.dynamics.max_ang_acc * Algorithm::Motion::Kinematics::L;
-        auto acc_of = [&](float now, float prev) {
-            return std::clamp((now - prev) / dt, -max_wheel_acc, max_wheel_acc);
-        };
-        s_target_wheel_accels.lf = acc_of(s_target_wheel_speeds.lf, s_prev_target_wheel_speeds.lf);
-        s_target_wheel_accels.lb = acc_of(s_target_wheel_speeds.lb, s_prev_target_wheel_speeds.lb);
-        s_target_wheel_accels.rf = acc_of(s_target_wheel_speeds.rf, s_prev_target_wheel_speeds.rf);
-        s_target_wheel_accels.rb = acc_of(s_target_wheel_speeds.rb, s_prev_target_wheel_speeds.rb);
-        s_prev_target_wheel_speeds = s_target_wheel_speeds;
-    }
-
-    // 发布 20ms→5ms 内插步长：快环 4 拍线性铺到新目标，消除台阶激励（低速刹车微颤）。
-    publish_wheel_target_interp();
+    // 常规移动与连续旋转共用轮速、加速度前馈和快环内插链路
+    publish_motion_command(expected_local_vx, expected_local_vy, expected_local_vw);
 }
 
 

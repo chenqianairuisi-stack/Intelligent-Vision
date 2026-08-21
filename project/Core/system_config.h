@@ -125,7 +125,8 @@ enum class TrackerState : uint8_t {
 // 控制模式枚举：手动调试 vs 自动循迹
 enum class ControlMode : uint8_t {
     POINT_TRACKING,           // 调试模式：上位机直接写 target_pose，不理会 Tracker
-    AUTO_TRACKING           // 自动模式：听从 Tracker 生成的路径
+    AUTO_TRACKING,            // 自动模式：听从 Tracker 生成的路径
+    CONTINUOUS_SPIN           // 原地连续旋转，使用解包 yaw 保证可完成整圈
 };
 
 // 定义赛段模式（编译期路由）
