@@ -3,6 +3,11 @@
 #include <array>
 
 #define DTCM_DATA __attribute__((section(".dtcm_data")))
+#if defined(__ARMCC_VERSION)
+#define DTCM_BSS __attribute__((section(".dtcm_data")))
+#else
+#define DTCM_BSS __attribute__((section(".dtcm_bss")))
+#endif
 #define OCRAM_BSS __attribute__((section(".ocram_bss")))
 
 //---------------------------------------------------------------------------------
@@ -60,7 +65,7 @@ namespace SystemConfig {
     static constexpr int MAX_ENTITY_MASK = 1 << MAX_ENTITIES;   // 实体访问状态总数（bitmask）
     static constexpr int MAX_OBS_POINTS = 4 * MAX_ENTITIES;     // 最大观测点数（每个实体最多4个观测点，分别对应4个朝向）
     static constexpr int MAP_CELL_COUNT = MAP_MAX_WIDTH * MAP_MAX_HEIGHT;   // 地图总格子数
-    static constexpr int MAX_PATH_LENGTH = 340;                 // 最大搜索步数
+    static constexpr int MAX_PATH_LENGTH = 300;                 // 最大搜索步数
     
     // 其他全局常量
     static constexpr float INITIAL_X = 124.0f;                  // 上电首轮初始点 X 坐标

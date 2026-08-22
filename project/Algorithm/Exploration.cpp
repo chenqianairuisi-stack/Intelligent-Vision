@@ -21,6 +21,7 @@ namespace ExplorationConfig {
     inline constexpr int32_t BONUS_FOR_BOMB = 8;                 // 完成必推炸弹的固定收益，避免把解锁动作无限推迟
     inline constexpr uint16_t BOMB_ROUTE_COST_DIVISOR = 100;     // 推炸弹本体路径按摊销代价参与观测顺序排序
     inline constexpr uint16_t FIRST_BOMB_LOCALITY_WEIGHT = 8;    // 巡图炸弹排序：优先处理当前附近的炸弹
+    inline constexpr int32_t EARLY_SHORTCUT_MIN_STRATEGY_PROFIT = 1000; // 仅用于识别值得优先展开的强捷径任务
     inline constexpr uint16_t FINAL_NEAR_BOX_RADIUS = 2;         // 收尾位置靠近箱子的判定半径
     inline constexpr uint16_t FINAL_NO_BOX_PENALTY = 10;         // 收尾位置远离箱子的时间惩罚
     inline constexpr uint16_t COST_INFINITY = 65535;             // 不可达代价哨兵值
@@ -143,7 +144,8 @@ namespace {
         uint8_t best_order[PATROL_SEQUENCE_MAX_ACTIONS]{};
     };
 
-    OCRAM_BSS static PatrolSequenceOptimizeWorkspace patrol_sequence_ws;
+    // 序列优化工作区体量较小且每轮巡图都会访问，放入 DTCM
+    DTCM_BSS static PatrolSequenceOptimizeWorkspace patrol_sequence_ws;
 }
 
 static_assert((OBSERVE_ROUTE_HASH_SLOTS & (OBSERVE_ROUTE_HASH_SLOTS - 1)) == 0,
@@ -730,7 +732,7 @@ StaticArray<BombTask, MAX_BOMBS> Exploration::optimize_bomb_timeline(
     bool used[MAX_BOMBS] = {false};
     StaticArray<BombTask, MAX_BOMBS> current_seq;
 
-    // 暴力枚举炸弹执行顺序；MAX_BOMBS 很小，直接 DFS 更稳
+    // 暴力枚举炸弹执行顺序，让起点附近的捷径炸弹可以早于远端必炸任务
     auto dfs_perm = [&](auto& self, const SokobanLevel& lvl, point current_pos, uint32_t cost) -> void {
         if (current_seq.size() == raw_tasks.size()) {
             StaticArray<point, MAX_PATH_LENGTH> first_path;
@@ -749,8 +751,6 @@ StaticArray<BombTask, MAX_BOMBS> Exploration::optimize_bomb_timeline(
             }
             return;
         }
-        if (cost >= best_cost) return; // 当前排列已经不可能更优，剪枝
-
         bool essential_pending = false;
         for (int i = 0; i < raw_tasks.size(); ++i) {
             if (!used[i] && raw_tasks[i].is_essential) {
@@ -760,7 +760,11 @@ StaticArray<BombTask, MAX_BOMBS> Exploration::optimize_bomb_timeline(
         }
         for (int i = 0; i < raw_tasks.size(); ++i) {
             if (!used[i]) {
-                if (essential_pending && !raw_tasks[i].is_essential) continue;
+                if (essential_pending &&
+                    !raw_tasks[i].is_essential &&
+                    raw_tasks[i].net_profit <= 0) {
+                    continue;
+                }
                 StaticArray<point, MAX_PATH_LENGTH> dummy_path;
                 // 只有物理上能推到目标墙的炸弹任务才参与排序
                 if (PlanningCommon::get_bomb_push_path(lvl, current_pos, raw_tasks[i], dummy_path)) {
@@ -937,12 +941,18 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
     reset_observe_route_cache();
 
     int B = raw_bomb_tasks.size();
-    OCRAM_BSS static SokobanLevel multi_maps[MAX_BOMBS + 1];
+    // 炸弹阶段地图快照数量少，放入 DTCM 便于热点状态切换
+    DTCM_BSS static SokobanLevel multi_maps[MAX_BOMBS + 1];
     multi_maps[0] = cached_level; 
 
     // 在地图快照生成前按真实推炸路径重排炸弹，优先处理当前可达且能尽早解锁地图的任务。
     auto bomb_tasks = optimize_bomb_timeline(cached_level, start_pos, raw_bomb_tasks);
     B = bomb_tasks.size();
+    // 只有策略层确认正收益的可选捷径才抢占炸弹分支搜索预算
+    const bool prioritize_initial_shortcut =
+        B > 0 &&
+        !bomb_tasks[0].is_essential &&
+        bomb_tasks[0].net_profit >= EARLY_SHORTCUT_MIN_STRATEGY_PROFIT;
     for (int k = 0; k < B; ++k) {
         multi_maps[k + 1] = multi_maps[k];
         apply_macro_bomb_effect(multi_maps[k + 1], bomb_tasks[k]);
@@ -1574,6 +1584,40 @@ StaticArray<MacroAction, 32> Exploration::plan_optimal_patrol(
                 }
             }
             frame.ordered_entities[unvisited_count++] = {e, best_cost_for_e};
+        }
+
+        // 只让首颗正收益捷径炸弹提前比较，后续任务恢复原有观测优先顺序
+        if (prioritize_initial_shortcut && k == 0) {
+            StaticArray<point, MAX_PATH_LENGTH>& early_bomb_path = frame.macro_path;
+            early_bomb_path.clear();
+            BombTask early_task = bomb_tasks[k];
+            if (PlanningCommon::get_bomb_push_path(
+                    multi_maps[k], curr_pos, early_task, early_bomb_path)) {
+                const uint32_t bomb_route_cost = get_bomb_route_cost(
+                    curr_pos, early_bomb_path, early_task, curr_move_dir);
+                if (append_flat_bomb_actions(ctx.current_path,
+                                             multi_maps[k],
+                                             curr_pos,
+                                             early_task,
+                                             -1,
+                                             nullptr,
+                                             curr_move_dir)) {
+                    const point next_pos = early_bomb_path.empty()
+                        ? curr_pos : early_bomb_path.back();
+                    const int next_move_dir = path_last_move_direction(
+                        curr_pos, early_bomb_path, curr_move_dir);
+                    const int32_t bomb_cost = apply_bomb_reward(bomb_route_cost);
+                    self(self,
+                         next_pos,
+                         curr_yaw,
+                         next_move_dir,
+                         k + 1,
+                         mask,
+                         current_cost + bomb_cost,
+                         depth + 1);
+                    pop_flat_bomb_actions(ctx.current_path, early_task, false);
+                }
+            }
         }
 
         // 最后炸弹阶段地图不再变化，最近观测的接近代价可安全加入下界

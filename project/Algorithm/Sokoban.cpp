@@ -49,7 +49,7 @@ namespace SokobanConfig {
     // 纯推箱任务级宏搜索累计尝试的箱子任务分支数，0 表示关闭
     inline constexpr uint32_t BOX_TASK_CANDIDATE_BRANCH_BUDGET = 64;
     // 纯推箱宏首解之后，严格 IDA* 最多展开的改进节点数，0 表示不改进
-    inline constexpr uint32_t PURE_IMPROVE_NODE_BUDGET = 1000;
+    inline constexpr uint32_t PURE_IMPROVE_NODE_BUDGET = 1500;
 
     // ------------------------------------------------------------------------
     // 搜索入口与首解修复
@@ -95,7 +95,7 @@ namespace SokobanConfig {
     };
     // 纯推箱模式的保守启发式权重
     inline constexpr HeuristicWeightSet PURE_HEURISTIC_WEIGHTS = {
-        10, 10, 10, 10, 20
+        10, 10, 10, 10, 10
     };
 
     // 多轮失败后的 threshold 推进

@@ -27,10 +27,12 @@ OCRAM_BSS static StrategyBoxDistances shared_probe_box_dist;
 OCRAM_BSS static StrategyBombDistances shared_probe_bomb_dist;
 OCRAM_BSS static StrategyBombDepthDistances shared_hard_bomb_dist_by_depth;
 OCRAM_BSS static StrategyBombDepthDistances shared_strict_bomb_dist_by_depth;
-OCRAM_BSS static StrategyMatchDp shared_matching_dp;
-OCRAM_BSS static StrategyMatchDp shared_matching_next;
+// 匹配 DP 在每次候选评估中反复读写，且容量可控，放入 DTCM
+DTCM_BSS static StrategyMatchDp shared_matching_dp;
+DTCM_BSS static StrategyMatchDp shared_matching_next;
 OCRAM_BSS static StrategyDfsScratch shared_dfs_ws;
-OCRAM_BSS static LogicBlastScores shared_logic_blast_scores;
+// 逻辑爆破评分是小型热点缓存，放入 DTCM
+DTCM_BSS static LogicBlastScores shared_logic_blast_scores;
 
 StrategySearchWorkspace& strategy_search_workspace() {
     // 只在 Common 内绑定一次引用视图，Phase 文件不直接接触底层大数组
@@ -1929,6 +1931,11 @@ static void logic_clear_scores(LogicBlastScores& scores) {
     std::memset(&scores, 0, sizeof(scores));
 }
 
+static bool phase1_pair_structurally_compatible(
+    const SokobanLevel& lvl,
+    int box_id,
+    int target_id);
+
 static void logic_add_score(LogicBlastScores& scores, point center, int add, uint8_t layer) {
     if (!PlanningCommon::in_bounds(center)) return;
     int v = scores.score[center.y][center.x] + add;
@@ -2142,6 +2149,7 @@ static void build_phase1_logic_blast_scores(
     bool target_needed[MAX_BOXES] = {false};
     for (int b = 0; b < lvl.box_count; ++b) {
         for (int t = 0; t < lvl.target_count; ++t) {
+            if (!phase1_pair_structurally_compatible(lvl, b, t)) continue;
             point target = lvl.targets[t];
             if (box_dist[b][target.y][target.x] == INF_DIST) target_needed[t] = true;
         }
@@ -2158,6 +2166,7 @@ static void build_phase1_logic_blast_scores(
 
         bool target_has_box_contact = false;
         for (int b = 0; b < lvl.box_count && !target_has_box_contact; ++b) {
+            if (!phase1_pair_structurally_compatible(lvl, b, t)) continue;
             for (int y = 1; y < MAP_MAX_HEIGHT - 1 && !target_has_box_contact; ++y) {
                 for (int x = 1; x < MAP_MAX_WIDTH - 1; ++x) {
                     if (box_dist[b][y][x] != INF_DIST && reverse_dist[t][y][x] != INF_DIST) {
@@ -2198,6 +2207,7 @@ static void build_phase1_logic_blast_scores(
         bool box_has_reachable_target = false;
         bool box_has_applicable_target = false;
         for (int t = 0; t < lvl.target_count; ++t) {
+            if (!phase1_pair_structurally_compatible(lvl, b, t)) continue;
             box_has_applicable_target = true;
             point target = lvl.targets[t];
             if (box_dist[b][target.y][target.x] != INF_DIST) {
@@ -2210,6 +2220,7 @@ static void build_phase1_logic_blast_scores(
         bool box_has_target_contact = false;
         for (int t = 0; t < lvl.target_count && !box_has_target_contact; ++t) {
             if (!target_needed[t]) continue;
+            if (!phase1_pair_structurally_compatible(lvl, b, t)) continue;
             for (int y = 1; y < MAP_MAX_HEIGHT - 1 && !box_has_target_contact; ++y) {
                 for (int x = 1; x < MAP_MAX_WIDTH - 1; ++x) {
                     if (box_dist[b][y][x] != INF_DIST && reverse_dist[t][y][x] != INF_DIST) {
@@ -2247,6 +2258,7 @@ static void build_phase1_logic_blast_scores(
     for (int b = 0; b < lvl.box_count; ++b) {
         for (int t = 0; t < lvl.target_count; ++t) {
             if (!target_needed[t]) continue;
+            if (!phase1_pair_structurally_compatible(lvl, b, t)) continue;
             point target = lvl.targets[t];
             if (box_dist[b][target.y][target.x] != INF_DIST) continue;
 
@@ -2324,6 +2336,41 @@ static inline int bit_count_u16(uint16_t mask) {
     while (mask) {
         count += (mask & 1);
         mask >>= 1;
+    }
+    return count;
+}
+
+// 边界箱无法离开所在外边界，只评估物理上可能成立的 Phase1 配对
+static uint8_t phase1_outer_edge_mask(point p) {
+    uint8_t mask = 0;
+    if (p.x == 1) mask |= 1u << 0;
+    if (p.x == MAP_MAX_WIDTH - 2) mask |= 1u << 1;
+    if (p.y == 1) mask |= 1u << 2;
+    if (p.y == MAP_MAX_HEIGHT - 2) mask |= 1u << 3;
+    return mask;
+}
+
+static bool phase1_pair_structurally_compatible(
+    const SokobanLevel& lvl,
+    int box_id,
+    int target_id) {
+    if (box_id < 0 || box_id >= lvl.box_count ||
+        target_id < 0 || target_id >= lvl.target_count) {
+        return false;
+    }
+
+    uint8_t box_edges = phase1_outer_edge_mask(lvl.boxes[box_id]);
+    if (box_edges == 0) return true;
+    uint8_t target_edges = phase1_outer_edge_mask(lvl.targets[target_id]);
+    return (target_edges & box_edges) == box_edges;
+}
+
+static int phase1_compatible_pair_count(const SokobanLevel& lvl) {
+    int count = 0;
+    for (int b = 0; b < lvl.box_count; ++b) {
+        for (int t = 0; t < lvl.target_count; ++t) {
+            if (phase1_pair_structurally_compatible(lvl, b, t)) ++count;
+        }
     }
     return count;
 }
@@ -2412,6 +2459,7 @@ static void evaluate_phase1_any_matching(
     // 先统计所有箱-目标对的粗略距离，用作“整体通路质量”的辅助分
     for (int b = 0; b < lvl.box_count; ++b) {
         for (int t = 0; t < lvl.target_count; ++t) {
+            if (!phase1_pair_structurally_compatible(lvl, b, t)) continue;
             point target = lvl.targets[t];
             int d = box_dist[b][target.y][target.x];
             if (d == INF_DIST) {
@@ -2427,7 +2475,9 @@ static void evaluate_phase1_any_matching(
     evaluate_matching_dp_core(
         lvl,
         box_dist,
-        [](int, int) { return true; },
+        [&lvl](int b, int t) {
+            return phase1_pair_structurally_compatible(lvl, b, t);
+        },
         best_matched,
         best_distance
     );
@@ -2445,6 +2495,7 @@ static int count_phase1_unreachable_pairs(
     int unreachable = 0;
     for (int b = 0; b < lvl.box_count; ++b) {
         for (int t = 0; t < lvl.target_count; ++t) {
+            if (!phase1_pair_structurally_compatible(lvl, b, t)) continue;
             point target = lvl.targets[t];
             if (box_dist[b][target.y][target.x] == INF_DIST) ++unreachable;
         }
@@ -2519,6 +2570,7 @@ static int phase1_optimization_route_hint(
     bool useful_targets[MAX_BOXES] = {false};
     for (int b = 0; b < lvl.box_count; ++b) {
         for (int t = 0; t < lvl.target_count; ++t) {
+            if (!phase1_pair_structurally_compatible(lvl, b, t)) continue;
             point target = lvl.targets[t];
             int current_dist = box_dist[b][target.y][target.x];
             if (current_dist == INF_DIST) continue;
@@ -2559,6 +2611,77 @@ static int phase1_optimization_route_hint(
     if (useful_box_count >= 2) score += useful_box_count * 2;
     if (useful_target_count >= 2) score += useful_target_count * 2;
     return score;
+}
+
+static void phase1_static_floor_distances(
+    const SokobanLevel& lvl,
+    point start,
+    int16_t out_dist[MAP_MAX_HEIGHT][MAP_MAX_WIDTH]) {
+    OCRAM_BSS static point queue[MAP_CELL_COUNT];
+    for (int y = 0; y < MAP_MAX_HEIGHT; ++y) {
+        for (int x = 0; x < MAP_MAX_WIDTH; ++x) out_dist[y][x] = INF_DIST;
+    }
+    if (!PlanningCommon::in_bounds(start) || lvl.map[start.y][start.x] == 1) return;
+
+    int head = 0;
+    int tail = 0;
+    queue[tail++] = start;
+    out_dist[start.y][start.x] = 0;
+    while (head < tail) {
+        point current = queue[head++];
+        int16_t next_dist = static_cast<int16_t>(out_dist[current.y][current.x] + 1);
+        for (int d = 0; d < 4; ++d) {
+            point next = current + MOVE[d];
+            if (!PlanningCommon::in_bounds(next) ||
+                lvl.map[next.y][next.x] == 1 ||
+                out_dist[next.y][next.x] != INF_DIST) {
+                continue;
+            }
+            out_dist[next.y][next.x] = next_dist;
+            queue[tail++] = next;
+        }
+    }
+}
+
+// 用实体间静态通行距离估计巡图绕行，不把箱子和炸弹临时占位当成永久阻断
+static int phase1_patrol_route_proxy(
+    const SokobanLevel& lvl,
+    point player) {
+    constexpr int unreachable_cost = MAP_MAX_WIDTH + MAP_MAX_HEIGHT;
+    point entities[MAX_BOXES * 2];
+    int entity_count = 0;
+    for (int b = 0; b < lvl.box_count && entity_count < MAX_BOXES * 2; ++b) {
+        entities[entity_count++] = lvl.boxes[b];
+    }
+    for (int t = 0; t < lvl.target_count && entity_count < MAX_BOXES * 2; ++t) {
+        entities[entity_count++] = lvl.targets[t];
+    }
+
+    OCRAM_BSS static int16_t dist[MAP_MAX_HEIGHT][MAP_MAX_WIDTH];
+    int score = 0;
+    phase1_static_floor_distances(lvl, player, dist);
+    for (int i = 0; i < entity_count; ++i) {
+        int d = dist[entities[i].y][entities[i].x];
+        score += (d == INF_DIST ? unreachable_cost : d) * 2;
+    }
+
+    for (int i = 0; i < entity_count; ++i) {
+        phase1_static_floor_distances(lvl, entities[i], dist);
+        for (int j = i + 1; j < entity_count; ++j) {
+            int d = dist[entities[j].y][entities[j].x];
+            score += d == INF_DIST ? unreachable_cost : d;
+        }
+    }
+    return score;
+}
+
+static int phase1_optimization_patrol_gain(
+    const SokobanLevel& before,
+    const SokobanLevel& after,
+    point player) {
+    // 推弹换位已经计入 route_cost，这里只比较墙体变化带来的巡图捷径
+    return phase1_patrol_route_proxy(before, player) -
+           phase1_patrol_route_proxy(after, player);
 }
 
 // 奖励爆破后新增的可站立区域，重点看多实体中间墙附近的开区价值
@@ -2737,6 +2860,19 @@ void StrategicPlanner::append_phase1_optimization_tasks(
             }
             next_level.player_start = candidate.next_player;
 
+            // 巡图层允许把独立可选炸弹提前执行，评分也取可重排后的较低真实成本
+            StaticArray<point, MAX_PATH_LENGTH> reordered_path;
+            if (PlanningCommon::get_bomb_push_path(
+                    current_level,
+                    level.player_start,
+                    task,
+                    reordered_path)) {
+                int reordered_cost = PlanningCommon::path_time_cost(
+                    level.player_start,
+                    reordered_path);
+                if (reordered_cost < route_cost) route_cost = reordered_cost;
+            }
+
             int after_deadlocks = 9999;
             int after_distance = 999999;
             this->evaluate_phase1_matching_pairs(
@@ -2759,6 +2895,7 @@ void StrategicPlanner::append_phase1_optimization_tasks(
             bool improved_targets[MAX_BOXES] = {false};
             for (int b = 0; b < current_level.box_count; ++b) {
                 for (int t = 0; t < current_level.target_count; ++t) {
+                    if (!phase1_pair_structurally_compatible(current_level, b, t)) continue;
                     point target = current_level.targets[t];
                     int before_dist = strategy_ws.dfs_dist_box[depth][b][target.y][target.x];
                     int after_dist = strategy_ws.probe_box_dist[b][target.y][target.x];
@@ -2781,8 +2918,17 @@ void StrategicPlanner::append_phase1_optimization_tasks(
             for (int t = 0; t < current_level.target_count; ++t) {
                 if (improved_targets[t]) ++improved_target_count;
             }
-            if (robust_pair_gain <= 0 || improved_pairs < 4 ||
-                improved_box_count < 2 || improved_target_count < 2) {
+            bool has_box_route_gain =
+                robust_pair_gain > 0 &&
+                improved_pairs >= 4 &&
+                improved_box_count >= 2 &&
+                improved_target_count >= 2;
+            int patrol_gain = phase1_optimization_patrol_gain(
+                current_level,
+                next_level,
+                level.player_start);
+            if (!has_box_route_gain &&
+                patrol_gain < PHASE1_OPTIMIZATION_MIN_PATROL_GAIN) {
                 continue;
             }
 
@@ -2791,11 +2937,19 @@ void StrategicPlanner::append_phase1_optimization_tasks(
                     current_level, next_level, candidate.next_player, pre.wall);
             candidate.score =
                 robust_pair_gain * PHASE1_OPTIMIZATION_DISTANCE_WEIGHT +
+                patrol_gain * PHASE1_OPTIMIZATION_PATROL_WEIGHT +
                 clarity_gain * PHASE1_OPTIMIZATION_CLARITY_WEIGHT -
                 route_cost * PHASE1_OPTIMIZATION_ROUTE_WEIGHT;
             if (candidate.score < PHASE1_OPTIMIZATION_MIN_SCORE) continue;
-            if (distance_gain < PHASE1_OPTIMIZATION_MIN_DISTANCE_GAIN) continue;
-            if (clarity_gain < PHASE1_OPTIMIZATION_VIEW_MIN_SCORE) continue;
+            if (has_box_route_gain &&
+                distance_gain < PHASE1_OPTIMIZATION_MIN_DISTANCE_GAIN) {
+                continue;
+            }
+            if (has_box_route_gain &&
+                patrol_gain < PHASE1_OPTIMIZATION_MIN_PATROL_GAIN &&
+                clarity_gain < PHASE1_OPTIMIZATION_VIEW_MIN_SCORE) {
+                continue;
+            }
 
             candidate.task.net_profit = candidate.score;
             if (candidates.size() < 15) candidates.push_back(candidate);
@@ -3429,7 +3583,7 @@ void StrategicPlanner::dfs_phase1_bomb_sequence(
     // 3. 按缺陷类型生成候选，并用一次真实爆破评估过滤
     // =====================================================================
     bool structural_defect_active = phase1_structural_defect_active;
-    int total_pairs = current_lvl.box_count * current_lvl.target_count;
+    int total_pairs = phase1_compatible_pair_count(current_lvl);
     bool phase1_full_disconnect = total_pairs > 0 && current_unreachable_pairs >= total_pairs;
 
     // 结构评估只看任意箱-目标通路，不读取语义绑定

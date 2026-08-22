@@ -64,11 +64,11 @@ struct SimpleBfsWorkspace {
     uint16_t current_gen = 0;                        // 当前 BFS 代数
 };
 
-// 大型时间搜索工作区放入 OCRAM，避免挤占 DTCM
-OCRAM_BSS static TimeSearchWorkspace time_ws;
+// 时间搜索每次规划都会访问，放入 DTCM 降低热点访问延迟
+DTCM_BSS static TimeSearchWorkspace time_ws;
 
-// 普通 BFS 工作区放入 OCRAM
-OCRAM_BSS static SimpleBfsWorkspace simple_bfs_ws;
+// 普通 BFS 工作区体量较小且调用频繁，放入 DTCM
+DTCM_BSS static SimpleBfsWorkspace simple_bfs_ws;
 
 // 将 32 位内部代价钳制到对外 uint16_t 代价范围
 static uint16_t clamp_time_cost(uint32_t cost) {
@@ -1077,8 +1077,8 @@ namespace {
         uint16_t obstacle_count;
     };
 
-    // 路径后处理工作区只在观测动作落地时使用，放 OCRAM 避免占用主循环栈和 DTCM
-    OCRAM_BSS static ObserveRouteWorkspace observe_route_ws;
+    // 观测路径后处理是巡图热点，工作区放入 DTCM
+    DTCM_BSS static ObserveRouteWorkspace observe_route_ws;
 
     static bool same_move_heading(point a, point b) {
         const int cross = static_cast<int>(a.x) * b.y - static_cast<int>(a.y) * b.x;

@@ -57,13 +57,15 @@ namespace StrategyConfig {
     // Phase1 闭环后优化：只使用可直接推动的剩余炸弹，避免为非必需任务额外搬箱
     // ------------------------------------------------------------------------
     inline constexpr int PHASE1_OPTIMIZATION_DISTANCE_WEIGHT = 20; // 路径收益：全对偶推距下降的权重，可调
+    inline constexpr int PHASE1_OPTIMIZATION_PATROL_WEIGHT = 8;   // 巡图收益：实体通行距离下降的权重，可调
     inline constexpr int PHASE1_OPTIMIZATION_CLARITY_WEIGHT = 2;   // 开图收益：多实体中间墙和局部开区的权重，可调
     inline constexpr int PHASE1_OPTIMIZATION_ROUTE_WEIGHT = 16;    // 执行代价：巡图阶段推弹路径的权重，可调
     inline constexpr int PHASE1_OPTIMIZATION_MIN_SCORE = 36;       // 收益阈值：过滤只有微弱结构提示的可选炸弹，可调
     inline constexpr int PHASE1_OPTIMIZATION_VIEW_MIN_SCORE = 24;  // 观测阈值：无推距收益时必须明显改善多实体观测空间，可调
     inline constexpr int PHASE1_OPTIMIZATION_MIN_DISTANCE_GAIN = 3; // 路径收益：小于该值时不为可选任务提前消耗炸弹，可调
+    inline constexpr int PHASE1_OPTIMIZATION_MIN_PATROL_GAIN = 12; // 巡图收益：过滤只缩短少量局部通行距离的爆破，可调
     inline constexpr int PHASE1_OPTIMIZATION_SCAN_LIMIT = 12;      // 候选剪枝：无死锁根层最多做真实爆破重评估的墙位数，可调
-    inline constexpr int PHASE1_OPTIMIZATION_SUFFIX_SCAN_LIMIT = 3; // 候选剪枝：已有结构前缀或第二层时只验证少量高潜力墙位，可调
+    inline constexpr int PHASE1_OPTIMIZATION_SUFFIX_SCAN_LIMIT = 8; // 候选剪枝：已有结构前缀或第二层时保留巡图捷径候选，可调
     inline constexpr int PHASE1_OPTIMIZATION_BRANCH_LIMIT = 2;     // 候选剪枝：每层最多递归展开的优化任务数，可调
 
     // ------------------------------------------------------------------------

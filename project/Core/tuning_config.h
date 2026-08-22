@@ -206,7 +206,7 @@ inline constexpr TuningConfig DEFAULT_TUNE_CONFIG = {
     },
     {
         1.0f,     // latency.encoder_latency_gain
-        380.0f,   // latency.vision_latency_ms
+        240.0f,   // latency.vision_latency_ms
         1.0f,     // latency.enable_estimation
         30.0f,    // latency.turn_thresh_deg
         0.30f,    // latency.enc_v_min
@@ -305,6 +305,7 @@ struct ParamItem {
 };
 
 inline ParamItem params[] = {
+    {"VisLag  ", "VL", &tune.latency.vision_latency_ms, 10.0f, 0.0f, 1000.0f},
     {"MaxDuty ", "MD", &tune.dynamics.max_duty, 1.0f, 1.0f, 100.0f},
     {"MaxVel  ", "MV", &tune.dynamics.max_vel, 10.0f, 1.0f, 500.0f},
     {"MaxAcc  ", "MA", &tune.dynamics.max_acc, 20.0f, 1.0f, 1200.0f},
@@ -325,7 +326,6 @@ inline ParamItem params[] = {
     {"PauseSpd", "CP", &tune.tracker.corner_pause_speed, 0.5f, 0.0f, 50.0f},
     {"Mahony  ", "MK", &tune.estimate.mahony_kp, 0.01f, 0.0f, 10.0f},
     {"EncGain ", "EG", &tune.latency.encoder_latency_gain, 0.01f, 0.01f, 2.0f},
-    {"VisLag  ", "VL", &tune.latency.vision_latency_ms, 10.0f, 0.0f, 1000.0f},
     {"LagEn   ", "LE", &tune.latency.enable_estimation, 1.0f, 0.0f, 1.0f},
     {"LagTurn ", "LT", &tune.latency.turn_thresh_deg, 5.0f, 1.0f, 180.0f},
     {"EncVMin ", "EV", &tune.latency.enc_v_min, 0.05f, 0.0f, 20.0f},
