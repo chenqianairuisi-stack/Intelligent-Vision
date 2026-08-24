@@ -1,3 +1,10 @@
+/// \file Tracker.cpp
+/// \brief 网格路径装载、压缩与实车跟踪实现
+///
+/// \details
+/// 将观测、推炸弹和推箱路径转换为连续跟踪目标，结合位姿反馈与视觉辅助输出速度指令
+/// 同时处理到点判定、爆破等待、推箱末端补偿和路径执行状态
+
 #include "tuning_config.h"
 #include "Tracker.h"
 #include "RobotState.h"

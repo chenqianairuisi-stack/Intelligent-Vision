@@ -1,4 +1,11 @@
-﻿#pragma once
+﻿/// \file encoder.h
+/// \brief 四轮编码器阵列接口
+///
+/// \details
+/// 声明编码器初始化、慢环里程计采样和快环轮速采样接口
+/// 两种采样节拍使用独立历史计数，避免互相消耗硬件增量
+
+#pragma once
 #include <cstdint>
 #include "system_config.h"
 

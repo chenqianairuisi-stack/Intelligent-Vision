@@ -1,5 +1,9 @@
 /// \file storage.cpp
 /// \brief 带版本和 CRC 校验的参数 Flash 持久化
+///
+/// \details
+/// 在固定 Flash 页保存 TuningConfig 记录，写入前校验参数范围并附加魔数、版本和 CRC32
+/// 启动加载失败时恢复编译期默认值，参数替换期间通过短临界区保证一致性
 
 #include "Storage.h"
 

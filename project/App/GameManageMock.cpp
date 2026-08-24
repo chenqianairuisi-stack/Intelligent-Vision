@@ -1,3 +1,10 @@
+/// \file GameManageMock.cpp
+/// \brief Mock 地图库和虚拟视觉输入实现
+///
+/// \details
+/// 提供内置测试地图、地图切换和语义标签注入
+/// 复用正式 GameManager 流程，在实车调试时替代 ART1 与 ART2 的现场识别输入
+
 #include "GameManage.h"
 #include "tuning_config.h"
 #include "Tracker.h"

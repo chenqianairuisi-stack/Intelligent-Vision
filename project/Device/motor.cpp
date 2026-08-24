@@ -1,3 +1,9 @@
+/// \file motor.cpp
+/// \brief 单路直流电机方向与 PWM 输出实现
+///
+/// \details
+/// 初始化方向 GPIO 和 PWM 通道，对目标占空比限幅并根据安装方向处理正反转
+
 #include "zf_common_headfile.h"
 #include "tuning_config.h"
 #include "Motor.h"

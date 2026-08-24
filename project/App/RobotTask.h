@@ -1,3 +1,10 @@
+/// \file RobotTask.h
+/// \brief 宏动作拆分后的底层机器人任务定义
+///
+/// \details
+/// 定义路径装载、等待跟踪、航向对齐、视觉采集和逻辑地图更新等任务类型
+/// GameManager 通过固定容量队列顺序执行这些任务并推进当前宏动作
+
 #pragma once
 #include "RobotState.h"
 

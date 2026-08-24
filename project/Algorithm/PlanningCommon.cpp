@@ -1,5 +1,9 @@
-/// \file planning_common.cpp
+/// \file PlanningCommon.cpp
 /// \brief 规划层通用地图查询、路径搜索和动作效果展开实现
+///
+/// \details
+/// 实现网格可达性、时间代价寻路、观测路径优化、死锁检查以及推箱和推炸弹路径展开
+/// 所有搜索工作区使用固定容量缓存，供 Strategy、Exploration、MacroPlanner 和 Sokoban 复用
 
 #include "PlanningCommon.h"
 #include "tuning_config.h"

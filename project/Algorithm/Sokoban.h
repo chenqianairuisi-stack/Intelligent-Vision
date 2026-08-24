@@ -1,5 +1,9 @@
-/// \file sokoban_planner.h
+/// \file Sokoban.h
 /// \brief C++ 宏动作候选与 IDA* 混合推箱子求解器
+///
+/// \details
+/// 定义推箱搜索状态、换位表、性能统计和求解器接口
+/// 求解器接收逻辑地图、语义绑定和炸弹任务，输出固定容量的最终执行路径
 
 #pragma once
 

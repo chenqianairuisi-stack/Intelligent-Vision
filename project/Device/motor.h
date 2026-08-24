@@ -1,3 +1,9 @@
+/// \file motor.h
+/// \brief 单路直流电机硬件封装
+///
+/// \details
+/// 保存方向引脚、PWM 通道和接线反转配置，向底盘层提供初始化与占空比控制接口
+
 #pragma once
 
 class Motor {

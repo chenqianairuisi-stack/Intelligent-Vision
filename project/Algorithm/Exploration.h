@@ -1,5 +1,10 @@
-/// \file exploration.h
+/// \file Exploration.h
 /// \brief 巡图观测规划器，生成候选观测位姿与最优巡图序列
+///
+/// \details
+/// 声明地图快照加载、候选视角构建、炸弹时间线优化和巡图搜索接口
+/// 规划结果仅作为参考序列，真实地图状态由 GameManager 和 MacroPlanner 维护
+
 #pragma once
 
 #include "PlanningCommon.h"

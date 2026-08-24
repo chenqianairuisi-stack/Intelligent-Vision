@@ -1,3 +1,10 @@
+/// \file main.cpp
+/// \brief RT1064 固件启动入口
+///
+/// \details
+/// 完成时钟、定位、底盘、视觉、通信、显示、参数存储和游戏管理器初始化
+/// 随后启动周期中断，并在主循环中持续推进视觉、软件任务和游戏状态机
+
 #include "zf_common_headfile.h"
 #include "CoreScheduler.h"
 #include "RobotState.h"

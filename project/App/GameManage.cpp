@@ -1,3 +1,10 @@
+/// \file GameManage.cpp
+/// \brief 游戏主状态机与规划执行编排实现
+///
+/// \details
+/// 串联地图识别、炸弹策略、巡图、在线宏动作调度和最终推箱求解
+/// 并把每条宏动作拆为 RobotTask 队列，依据真实逻辑地图和执行反馈推进阶段
+
 #include "GameManage.h"
 #include "tuning_config.h"
 #include "ChassisControl.h"

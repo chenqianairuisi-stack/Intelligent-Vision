@@ -1,3 +1,10 @@
+/// \file GameManage.h
+/// \brief 游戏流程管理器和渲染数据接口
+///
+/// \details
+/// 声明正式、Mock 和 Demo 三种运行模式的管理器层级
+/// 统一管理逻辑地图、巡图动作、底层任务队列以及供显示模块读取的渲染上下文
+
 #pragma once
 #include <array>
 #include <cstdint>

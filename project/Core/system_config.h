@@ -1,3 +1,10 @@
+/// \file system_config.h
+/// \brief 全局硬件常量、坐标约定和跨模块基础数据结构
+///
+/// \details
+/// 集中定义定时周期、底盘与地图尺寸、容量上限、运行状态枚举和规划动作类型
+/// 同时提供固定容量 StaticArray 及 DTCM、OCRAM 段放置宏，作为全项目公共契约
+
 #pragma once
 #include <cstdint>
 #include <array>

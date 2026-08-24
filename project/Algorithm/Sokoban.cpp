@@ -1,5 +1,9 @@
-/// \file sokoban_planner.cpp
+/// \file Sokoban.cpp
 /// \brief C++ Sokoban 预计算、宏动作混合候选搜索和路径优化实现
+///
+/// \details
+/// 从已绑定语义的地图和炸弹任务构造搜索状态，结合距离预计算、候选宏动作和 IDA*
+/// 求得最终推箱路径，并标记爆破等待点和优化可执行的行走段
 
 #include "Sokoban.h"
 #define TUNING_CONFIG_EXTERN_INSTANCE

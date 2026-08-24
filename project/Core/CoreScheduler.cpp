@@ -1,3 +1,10 @@
+/// \file CoreScheduler.cpp
+/// \brief 主循环软件任务调度器实现
+///
+/// \details
+/// 基于 GPT 产生的毫秒绝对时基，按固定周期协作式调度遥测接收、波形发送和显示刷新
+/// 调度器不在中断中执行业务任务，由主循环持续调用 run 推进
+
 #include "CoreScheduler.h"
 
 #include "Display.h"

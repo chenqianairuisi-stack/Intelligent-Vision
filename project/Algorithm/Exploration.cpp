@@ -1,5 +1,9 @@
-/// \file exploration.cpp
+/// \file Exploration.cpp
 /// \brief 巡图候选观测位姿与实体可见性规划实现
+///
+/// \details
+/// 为箱子、目标点和炸弹生成可观测位姿，结合炸弹时间线和固定预算 DFS
+/// 搜索覆盖全部待识别实体的参考宏动作序列，供在线调度器按真实状态执行
 
 #include "Exploration.h"
 #include "Strategy.h"
@@ -11,30 +15,30 @@
 OCRAM_BSS Exploration patrol_planner;
 
 // ============================================================================
-// 参数面板：巡图启发式代价与观测配置
+// 参数区域_巡图启发式代价与观测配置
 // ============================================================================
 
 namespace ExplorationConfig {
     // ------------------------------------------------------------------------
-    // 巡图 DFS 代价参数
+    // 巡图 DFS 代价模型_优先看什么、什么时候推炸弹、最后停在哪里
     // ------------------------------------------------------------------------
-    inline constexpr int32_t BONUS_FOR_BOMB = 8;                 // 完成必推炸弹的固定收益，避免把解锁动作无限推迟
-    inline constexpr uint16_t BOMB_ROUTE_COST_DIVISOR = 100;     // 推炸弹本体路径按摊销代价参与观测顺序排序
-    inline constexpr uint16_t FIRST_BOMB_LOCALITY_WEIGHT = 8;    // 巡图炸弹排序：优先处理当前附近的炸弹
-    inline constexpr int32_t EARLY_SHORTCUT_MIN_STRATEGY_PROFIT = 1000; // 仅用于识别值得优先展开的强捷径任务
-    inline constexpr uint16_t FINAL_NEAR_BOX_RADIUS = 2;         // 收尾位置靠近箱子的判定半径
-    inline constexpr uint16_t FINAL_NO_BOX_PENALTY = 10;         // 收尾位置远离箱子的时间惩罚
-    inline constexpr uint16_t COST_INFINITY = 65535;             // 不可达代价哨兵值
+    inline constexpr int32_t BONUS_FOR_BOMB = 8;                 // 完成必推炸弹的固定收益，避免把解锁动作无限推迟：减小则倾向完成沿途观测任务_增大则倾向提前执行炸弹任务
+    inline constexpr uint16_t BOMB_ROUTE_COST_DIVISOR = 100;     // 推炸弹本体路径按摊销代价参与观测顺序排序：减小则求解长距离下炸弹任务亏本_增大则求解忽略炸弹推移距离
+    inline constexpr uint16_t FIRST_BOMB_LOCALITY_WEIGHT = 8;    // 巡图炸弹排序：优先处理当前附近的炸弹：减小则更趋于偏向全局炸弹_增大则关心周边炸弹
+    inline constexpr int32_t EARLY_SHORTCUT_MIN_STRATEGY_PROFIT = 1000; // 仅用于识别值得优先展开的强捷径任务：减小则因可选炸弹提前透支早期搜索预算_增大则可能错过早期捷径机会
+    inline constexpr uint16_t FINAL_NEAR_BOX_RADIUS = 2;         // 收尾位置靠近箱子的判定半径：减小则"收尾"位置更贴近箱子_增大则更容易被认为"已经"靠近箱子
+    inline constexpr uint16_t FINAL_NO_BOX_PENALTY = 10;         // 收尾位置远离箱子的时间惩罚：减小则重视纯巡图状态下的最短路径_增大则更倾向训图结束后靠近箱子
+    inline constexpr uint16_t COST_INFINITY = 65535;             // 不可达代价哨兵值_主要用于"不可达情况"、"规划失败"、"候选初始化失败"
     inline constexpr int32_t SEARCH_COST_INFINITY = 1000000000;  // DFS 有符号代价上界，允许炸弹奖励产生负代价
 
     // ------------------------------------------------------------------------
-    // 搜索缓存与分支上限
+    // 搜索缓存与分支上限_限制巡图计算量、决定候补方案
     // ------------------------------------------------------------------------
-    inline constexpr int MAX_BOMB_APPROACH_OBS_BRANCHES = 2;     // 每个炸弹宏动作最多展开的顺路观测组合分支数
-    inline constexpr int OBS_POSES_PER_YAW = 2;                  // 每个朝向保留两个候选，降低局部候选裁剪造成的全局漏解
-    inline constexpr int OBS_POSE_BRANCHES = 4 * OBS_POSES_PER_YAW;
-    inline constexpr int GRID_TIME_CACHE_SLOTS = 32;             // 小型 LRU 距离图缓存槽数，含进入方向约 12KB
-    inline constexpr int PATROL_DFS_FRAME_LIMIT = 16;            // DFS 递归帧复用数组深度上限
+    inline constexpr int MAX_BOMB_APPROACH_OBS_BRANCHES = 2;     // 每个炸弹宏动作最多展开的顺路观测组合分支数：减小则规划快，但代价会错过划算的顺路观测_增大则规划慢，但可能找到更优的顺路观测组合
+    inline constexpr int OBS_POSES_PER_YAW = 2;                  // 每个朝向保留两个候选，降低局部候选裁剪造成的全局漏解：减小则易掉入局部最优_增大则消耗内存
+    inline constexpr int OBS_POSE_BRANCHES = 4 * OBS_POSES_PER_YAW;  // 每个实体最多展开的候选观测位姿分支数，当前为8
+    inline constexpr int GRID_TIME_CACHE_SLOTS = 32;             // 小型 LRU 距离图缓存槽数，含进入方向约 12KB_此参数仅仅影响性能而不改变最终规划结果
+    inline constexpr int PATROL_DFS_FRAME_LIMIT = 16;            // DFS 递归帧复用数组深度上限：减小则节省大量 OCRAM_增大则允许搜索更长宏动作序列
     inline constexpr uint32_t PATROL_DFS_OPS_LIMIT = 15000;      // 巡图参考解有限搜索预算
     inline constexpr uint32_t PATROL_BOMB_DFS_OPS_LIMIT = 2000;  // 带炸弹状态单后继更重，限制展开以稳定在 50ms 内
     inline constexpr uint32_t PATROL_SMALL_DFS_OPS_LIMIT = 7000; // 小图由固定点顺序后处理补足全局改进

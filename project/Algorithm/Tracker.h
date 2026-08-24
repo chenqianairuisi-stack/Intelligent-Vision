@@ -1,3 +1,10 @@
+/// \file Tracker.h
+/// \brief 规划路径到实车运动的跟踪接口
+///
+/// \details
+/// 声明普通路径、视觉辅助路径、炸弹路径和推箱路径的装载与执行入口
+/// 并提供到点检查、末端补偿和视觉修正抑制控制
+
 #pragma once
 #include <cstddef>
 #include "system_config.h"

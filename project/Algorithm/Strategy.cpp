@@ -1,5 +1,9 @@
-/// \file strategy.cpp
+/// \file Strategy.cpp
 /// \brief 炸弹清障、语义匹配和巡图策略搜索实现
+///
+/// \details
+/// 评估墙体收益、箱子通路和炸弹可执行性，分别生成巡图前与语义绑定后的炸弹任务
+/// 同时提供清障义务修复、任务排序和可选性能诊断实现
 
 #include "Strategy.h"
 #include <cstring>

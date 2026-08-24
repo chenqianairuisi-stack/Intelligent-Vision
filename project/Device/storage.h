@@ -1,3 +1,9 @@
+/// \file storage.h
+/// \brief 运行时调参数据的 Flash 存储接口
+///
+/// \details
+/// 声明参数存储初始化、保存、校验加载和恢复默认值操作
+
 #pragma once
 
 class Storage {

@@ -1,5 +1,10 @@
-/// \file strategy.h
+/// \file Strategy.h
 /// \brief Core2 炸弹策略规划器，仅根据请求快照生成建议任务
+///
+/// \details
+/// 定义炸弹候选、搜索工作区、清障诊断和性能统计数据结构
+/// 声明第一阶段巡图清障与第二阶段推箱清障的任务规划接口
+
 #pragma once
 
 #include "PlanningCommon.h"

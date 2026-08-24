@@ -1,5 +1,10 @@
-/// \file planning_common.h
+/// \file PlanningCommon.h
 /// \brief 麦克纳姆时间代价寻路与推箱/炸弹路径展开
+///
+/// \details
+/// 声明规划模块共享的地图查询、状态更新、观测位姿评估、时间代价路径搜索、
+/// 死锁判定和宏动作路径展开接口
+
 #pragma once
 
 #include "system_config.h"

@@ -1,5 +1,9 @@
 /// \file tuning_config.h
 /// \brief 全车参数、运动策略和上位机注册表
+///
+/// \details
+/// 定义运动控制默认参数与可运行时修改的 TuningConfig
+/// TuningRegistry 负责键名查找、范围校验、屏幕编辑和遥测参数写入
 
 #pragma once
 
@@ -29,7 +33,7 @@ inline constexpr float LONG_ACCEL_GAIN = 1.40f;
 inline constexpr float DECEL_STEP_CM_S = 36.0f;
 inline constexpr bool USE_K15_SHAPING = false;
 inline constexpr bool AUTO_WINDOW_ENABLE = true;
-inline constexpr float SLOWDOWN_SEG_RATIO = 0.40f;
+inline constexpr float SLOWDOWN_SEG_RATIO = 0.50f;
 inline constexpr float WINDOW_ACC_MARGIN = 0.80f;
 inline constexpr bool USE_FIXED_DECEL_STEP = false;
 inline constexpr bool USE_LEGACY_MIN_SPEED = true;

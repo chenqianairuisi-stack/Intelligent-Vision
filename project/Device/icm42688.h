@@ -1,3 +1,10 @@
+/// \file icm42688.h
+/// \brief ICM42688 惯性传感器驱动接口与寄存器配置
+///
+/// \details
+/// 定义原始数据和物理量结构、SPI 引脚、寄存器地址及量程换算系数
+/// 提供完整采样与单独陀螺仪或加速度计采样接口
+
 #pragma once
 
 #ifdef __cplusplus
@@ -170,4 +177,4 @@ extern Icm42688 imu_icm42688;
 // GYRO_FS_SEL =4  262  LSB/(º/s) 2 
 // GYRO_FS_SEL =5  524.3  LSB/(º/s) 2 
 // GYRO_FS_SEL =6  1048.6  LSB/(º/s) 2 
-// GYRO_FS_SEL =7  2097.2  LSB/(º/s) 2 
+// GYRO_FS_SEL =7  2097.2  LSB/(º/s) 2

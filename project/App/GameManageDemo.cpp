@@ -1,3 +1,10 @@
+/// \file GameManageDemo.cpp
+/// \brief Demo 模式的虚拟执行和动画状态机实现
+///
+/// \details
+/// 在不驱动真实底盘的情况下逐步播放巡图、推炸弹和推箱路径
+/// 同步更新演示地图、实体状态和渲染上下文，用于整套流程的可视化展示
+
 #include "GameManage.h"
 #include "CoreScheduler.h"
 #include "Vision.h"

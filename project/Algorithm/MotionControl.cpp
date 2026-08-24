@@ -1,3 +1,10 @@
+/// \file MotionControl.cpp
+/// \brief 平移速度曲线、航向控制和路径线跟踪实现
+///
+/// \details
+/// 根据位姿误差、路径段长度和实测角速度生成底盘速度指令
+/// 包含末端制动、方向滤波、航向规划以及角度和轮速 PID 实现
+
 #include "MotionControl.h"
 #include "RobotState.h"
 
@@ -25,16 +32,15 @@ inline float shaped_terminal_target_speed(float remaining_dist,
                                           float cruise_speed,
                                           float min_speed) {
     float k = terminal_distance_progress(remaining_dist, slowdown_dist, stop_dist);
-    // 纯线性(k^1.0)：速度对剩余距离线性 → 减速度 ∝ v，起刹最猛、末端最柔，末端"刹得住"的手感来源。
-    // k^1.5 会在 0<k<1 中段额外压速（k^1.5<k），主观是"全程被压着跑"。开关见 tuning_config.h。
+    // 纯线性(k^1.0)：速度对剩余距离线性 → 减速度 ∝ v，起刹最猛、末端最柔，末端"刹得住"的手感来源
+    // k^1.5 会在 0<k<1 中段额外压速（k^1.5<k），主观是"全程被压着跑"。开关见 tuning_config.h
     float shaped_k = LinearTerminalConfig::USE_K15_SHAPING ? (k * sqrtf(k)) : k;
     return min_speed + (cruise_speed - min_speed) * shaped_k;
 }
 
-// 线性减速下由段长与实测刹车能力反推 (巡航速度, 减速窗口)。
-//   线性律 v(d) = v_c·d/D ⇒ dv/dt = v·dv/dd = v_c²/D·(d/D)，峰值(d=D) a = v_c²/D
-//   要求 a <= a_real 且 D <= (seg_len-stop_dist)·ratio ⇒ v_c <= sqrt(a_real·(seg_len-stop_dist)·ratio)
-// 段长未知(<=0/NaN) 时返回 false，调用方退回原来的死窗口，行为与改前一致。
+// 线性减速下由段长与实测刹车能力反推 (巡航速度, 减速窗口)
+// 线性律 v(d) = v_c·d/D ⇒ dv/dt = v·dv/dd = v_c²/D·(d/D)，峰值(d=D) a = v_c²/D
+// 要求 a <= a_real 且 D <= (seg_len-stop_dist)·ratio ⇒ v_c <= sqrt(a_real·(seg_len-stop_dist)·ratio)
 struct TerminalWindow {
     float cruise;
     float slowdown;
@@ -51,9 +57,10 @@ inline bool auto_terminal_window(float seg_len_cm, float stop_dist, float a_real
     float ratio = LinearTerminalConfig::SLOWDOWN_SEG_RATIO;
     if (!(ratio > 0.05f && ratio <= 1.0f)) ratio = 0.5f;
 
-    // 留一点余量：窗口若正好按 a_real 算，曲线所需峰值减速度恰等于每拍限幅 brake_acc·dt，
+    // 留余量操作：
+    // 窗口若正好按 a_real 算，曲线所需峰值减速度恰等于每拍限幅 brake_acc·dt，
     // 限幅处于临界 binding 状态，命令会略微跟不上曲线。按 a_eff = a_real·margin 算窗口，
-    // 窗口略长一点、所需减速度低于物理上限，限幅全程不 binding。
+    // 窗口略长一点、所需减速度低于物理上限，限幅全程不 binding
     float a_eff = a_real * LinearTerminalConfig::WINDOW_ACC_MARGIN;
     if (!(a_eff > 1.0f)) a_eff = a_real;
 
@@ -63,7 +70,7 @@ inline bool auto_terminal_window(float seg_len_cm, float stop_dist, float a_real
 
     out.cruise = cruise;
     out.slowdown = cruise * cruise / a_eff + stop_dist;
-    // 窗口不得超过可用段长，否则起步就在减速带里（龟速）
+    // 窗口不得超过可用段长，否则起步就在减速带里龟速移动
     out.slowdown = std::min(out.slowdown, stop_dist + usable * ratio);
     return out.slowdown > stop_dist;
 }
@@ -75,26 +82,28 @@ static_assert(terminal_distance_progress(18.5f, 35.0f, 2.0f) == 0.5f,
 static_assert(terminal_distance_progress(2.0f, 35.0f, 2.0f) == 0.0f,
               "terminal slowdown stop mismatch");
 
-constexpr float PATH_DIRECTION_FILTER_ALPHA = 0.25f;
-constexpr float PATH_LOOKAHEAD_MIN_CM = 6.0f;
-constexpr float PATH_LOOKAHEAD_MAX_CM = 16.0f;
-constexpr float PATH_LOOKAHEAD_TIME_S = 0.25f;
-constexpr float PATH_LATERAL_LOOKAHEAD_K = 0.8f;
-constexpr float PATH_LATERAL_SLOW_START_CM = 3.0f;
-constexpr float PATH_LATERAL_SLOW_FULL_CM = 12.0f;
-constexpr float PATH_LATERAL_MIN_SPEED_SCALE = 0.55f;
-constexpr float PATH_TRACK_DEADBAND_CM = 1.0f;
-constexpr float PATH_TRACK_GAIN_S = 3.5f;
-constexpr float PATH_TRACK_MAX_RATIO = 0.45f;
-constexpr float PATH_CORNER_APPROACH_CM = 28.0f;
+// 路径线跟踪通用参数，普通路径段直接使用，长直线仅覆盖下方列出的部分参数
+constexpr float PATH_DIRECTION_FILTER_ALPHA = 0.25f;     // 速度方向一阶滤波的新指令权重，调大响应更快但切向更生硬
+constexpr float PATH_LOOKAHEAD_MIN_CM = 6.0f;             // 前瞻距离下限，低速或大偏差时仍至少向前看该距离
+constexpr float PATH_LOOKAHEAD_MAX_CM = 16.0f;            // 普通路径段前瞻距离上限，调大转向更平滑但贴线更慢
+constexpr float PATH_LOOKAHEAD_TIME_S = 0.25f;            // 速度前瞻时间，前瞻距离按 speed * time 随车速增加
+constexpr float PATH_LATERAL_LOOKAHEAD_K = 0.8f;          // 横向偏差对前瞻距离的缩短系数，调大后偏离路径时更快收近目标点
+constexpr float PATH_LATERAL_SLOW_START_CM = 3.0f;        // 横向偏差超过该值后开始线性降低行驶速度
+constexpr float PATH_LATERAL_SLOW_FULL_CM = 12.0f;        // 横向偏差达到该值时降至最小速度比例，必须大于降速起点
+constexpr float PATH_LATERAL_MIN_SPEED_SCALE = 0.55f;     // 普通路径段横向偏差过大时的最低速度倍率
+constexpr float PATH_TRACK_DEADBAND_CM = 1.0f;            // 附加横向拉回速度的误差死区，抑制路径附近的小幅来回修正
+constexpr float PATH_TRACK_GAIN_S = 3.5f;                 // 普通路径段横向拉回增益，误差每增加 1cm 所增加的修正速度
+constexpr float PATH_TRACK_MAX_RATIO = 0.45f;             // 横向拉回速度上限占当前期望速度的比例
+constexpr float PATH_CORNER_APPROACH_CM = 28.0f;          // 进入段末该距离后，前瞻点不允许越过当前路径段终点
 
-constexpr float LONG_PATH_LOOKAHEAD_MAX_CM = 35.0f;
-constexpr float LONG_PATH_LATERAL_LOOKAHEAD_K = 0.35f;
-constexpr float LONG_PATH_LATERAL_SLOW_START_CM = 5.0f;
-constexpr float LONG_PATH_LATERAL_SLOW_FULL_CM = 16.0f;
-constexpr float LONG_PATH_LATERAL_MIN_SPEED_SCALE = 0.75f;
-constexpr float LONG_PATH_TRACK_GAIN_S = 2.5f;
-constexpr float LONG_PATH_TRACK_MAX_RATIO = 0.35f;
+// 长直线由 LONG_SEGMENT_THRESHOLD_CM 判定，采用更远前瞻和更温和的横向修正以保持高速稳定
+constexpr float LONG_PATH_LOOKAHEAD_MAX_CM = 35.0f;        // 长直线前瞻距离上限
+constexpr float LONG_PATH_LATERAL_LOOKAHEAD_K = 0.35f;     // 长直线横向偏差缩短前瞻距离的系数
+constexpr float LONG_PATH_LATERAL_SLOW_START_CM = 5.0f;    // 长直线开始因横向偏差降速的阈值
+constexpr float LONG_PATH_LATERAL_SLOW_FULL_CM = 16.0f;    // 长直线降至最低速度倍率的横向偏差阈值
+constexpr float LONG_PATH_LATERAL_MIN_SPEED_SCALE = 0.75f; // 长直线横向偏差过大时的最低速度倍率
+constexpr float LONG_PATH_TRACK_GAIN_S = 2.5f;             // 长直线横向拉回增益，低于普通段以减少高速摆动
+constexpr float LONG_PATH_TRACK_MAX_RATIO = 0.35f;         // 长直线横向拉回速度占期望速度的最大比例
 }
 
 /// \brief 根据当前位置误差生成平滑的全局平移速度
@@ -117,9 +126,7 @@ Speed2D Trajectory::velocity_planning_1d(float dx, float dy, float dt, float end
     // 刹车能力与 max_acc 解耦：brake_limit×max_acc 是"想要多强"，brake_acc_ceiling 是地面
     // "给得起多强"（轮胎附着力，物理量，与规划参数无关），取两者较小值。
     // 不解耦时调高 max_acc 会让规划自动认为刹车也变强 → auto_terminal_window 按虚高的
-    // brake_acc 反推出过短的减速窗口 → 车以过高速度进窗口 → 刹车段打滑（编码器虚减）→ 冲过头。
-    // 实测：max_acc=200 一律欠到（只有加速打滑），max_acc=800 转为有时过冲（刹车打滑压过加速打滑）。
-    // 默认 ceiling=390，与当前 600×0.65 一致；以后调高 max_acc 也不会虚构更强的刹车能力。
+    // brake_acc 反推出过短的减速窗口 → 车以过高速度进窗口 → 刹车段打滑（编码器虚减）→ 冲过头
     float brake_acc = max_acc * tune.dynamics.brake_limit;
     {
         float cap = tune.dynamics.brake_acc_ceiling;

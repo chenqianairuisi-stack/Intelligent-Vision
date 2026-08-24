@@ -1,3 +1,10 @@
+/// \file RobotState.h
+/// \brief 跨模块共享的机器人运行状态
+///
+/// \details
+/// 汇总游戏阶段、视觉结果、规划输出、控制指令和物理反馈
+/// 全局实例 g_state 作为各层交换实时数据的静态黑板，避免在热路径中动态分配内存
+
 #pragma once
 #include <array>
 #include "system_config.h"

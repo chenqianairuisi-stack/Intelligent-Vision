@@ -1,3 +1,10 @@
+/// \file MotionControl.h
+/// \brief 底盘运动控制算法接口
+///
+/// \details
+/// 声明平移轨迹规划、航向速度规划、路径线跟踪、麦轮运动学和 PID 控制器
+/// 输入为目标几何量与机器人反馈，输出为底盘或车轮速度控制量
+
 #pragma once
 #include "system_config.h"
 #include "tuning_config.h"

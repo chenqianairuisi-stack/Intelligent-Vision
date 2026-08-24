@@ -1,5 +1,9 @@
-/// \file macro_planner.cpp
+/// \file MacroPlanner.cpp
 /// \brief 巡图宏动作生成、语义观测和推箱任务调度实现
+///
+/// \details
+/// 结合 Exploration 参考序列、实时地图、当前位置和语义知识选择下一条宏动作
+/// 并处理顺路观测、参考动作清障、后续动作以及巡图重规划请求
 
 #include "MacroPlanner.h"
 #include <cstring>
@@ -28,9 +32,9 @@ namespace MacroConfig {
     //   - player_to_box    * COMPLETION_DISTANCE_WEIGHT
     //   + COMPLETION_PRESSURE_REWARD
     inline constexpr int COMPLETION_SCORE_THRESHOLD = 0;     // 执行阈值，给镜像地图的路径拐点差异留出余量
-    inline constexpr int COMPLETION_FOLLOW_WEIGHT   = 3;     // 推箱后接回下一参考任务的时间收益权重 [调大：更偏好顺路完成]
-    inline constexpr int COMPLETION_RETURN_WEIGHT   = 1;     // 未来少一次回到该箱子附近的时间收益权重 [调大：更愿意提前处理远处箱子]
-    inline constexpr int COMPLETION_DISTANCE_WEIGHT = 1;     // 小车到箱子可站位时间代价的惩罚权重 [调大：更偏向离车近的箱子]
+    inline constexpr int COMPLETION_FOLLOW_WEIGHT   = 3;     // 推箱后接回下一参考任务的时间收益权重 ,调大：更偏好顺路完成
+    inline constexpr int COMPLETION_RETURN_WEIGHT   = 1;     // 未来少一次回到该箱子附近的时间收益权重 ,调大：更愿意提前处理远处箱子
+    inline constexpr int COMPLETION_DISTANCE_WEIGHT = 1;     // 小车到箱子可站位时间代价的惩罚权重 ,调大：更偏向离车近的箱子
     inline constexpr int COMPLETION_PRESSURE_REWARD = 14;    // 箱子直接落到目标点后，对第二阶段 IDA* 搜索压力下降的基础时间奖励
     inline constexpr int COMPLETION_MAX_PUSH_PATH   = 16;    // 完成式推箱展开路径长度上限
 

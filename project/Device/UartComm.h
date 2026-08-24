@@ -1,3 +1,10 @@
+/// \file UartComm.h
+/// \brief 相机 UART 通信设备封装
+///
+/// \details
+/// 声明串口硬件配置、接收 FIFO、无阻塞读字节、协议包发送和中断转发接口
+/// 全局实例分别连接两路相机串口
+
 #pragma once
 #include <cstdint>
 #include "zf_common_headfile.h" 

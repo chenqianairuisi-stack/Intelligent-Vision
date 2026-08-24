@@ -1,3 +1,10 @@
+/// \file UartComm.cpp
+/// \brief 双相机 UART 接收与数据包发送实现
+///
+/// \details
+/// 中断接收字节写入固定容量 FIFO，业务层通过无阻塞接口读取并解析
+/// 发送端按 AA55 帧头、消息类型、长度、负载和累加校验组织相机协议包
+
 #include "UartComm.h"
 
 

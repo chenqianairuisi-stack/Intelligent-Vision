@@ -1,3 +1,10 @@
+/// \file encoder.cpp
+/// \brief 四轮正交编码器采样与轮速换算实现
+///
+/// \details
+/// 绑定四个轮位的 QTIMER 模块、引脚和安装极性
+/// 分别维护 20 ms 里程计增量与 5 ms 速度内环历史值，并把轮速写入全局物理状态
+
 #include "zf_common_headfile.h"
 #include "Encoder.h"
 #include "RobotState.h"

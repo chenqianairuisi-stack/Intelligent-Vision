@@ -1,5 +1,10 @@
-/// \file macro_planner.h
+/// \file MacroPlanner.h
 /// \brief 巡图宏动作调度器
+///
+/// \details
+/// 定义在线规划上下文和语义知识状态，声明参考序列推进、观测同步、
+/// 宏动作选择及向最终 Sokoban 阶段交接所需的接口
+
 #pragma once
 
 #include "PlanningCommon.h"

@@ -1,3 +1,10 @@
+/// \file isr.cpp
+/// \brief RT1064 外设中断入口与实时任务分发
+///
+/// \details
+/// 在 PIT 中断中按不同周期采集 IMU 和编码器并推进姿态、速度、底盘和跟踪控制
+/// 其余 UART、GPIO 与 CSI 中断转发给对应驱动或设备模块处理
+
 #include "zf_common_headfile.h"
 #include "zf_common_debug.h"
 
